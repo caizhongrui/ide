@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Typecheck all packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # 注：third-party/tianhe-zhikai-ide/ 为本地 nested repo，不通过 submodule 管理
+        # 如某个 CI step 需要 IDE 代码，在该 step 中独立 git clone
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -r --if-present typecheck
+
+  lint-docs:
+    name: Docs sanity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify key docs exist
+        run: |
+          test -f docs/architecture/overview.md
+          test -f docs/architecture/platform-contract.md
+          test -f docs/architecture/http-api.md
+          test -f docs/architecture/sse-events.md
+          test -f docs/regression-checklist.md
+          test -f docs/protocol/CHANGELOG.md
+          echo "✅ All required docs present"
+
+  # 未来任务：
+  # - lint (eslint / prettier check)
+  # - unit-tests
+  # - protocol-check (tools/protocol-check)
+  # - desktop-build (on demand)
+  # - sidecar-build (on demand)

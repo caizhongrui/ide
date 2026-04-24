@@ -1,0 +1,59 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+dist/
+out/
+build/
+*.tsbuildinfo
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+apps/desktop/bin/
+apps/desktop/src-tauri/bin/
+
+# Server sidecar 产物
+packages/server/bin/
+packages/server/dist/
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 环境变量与密钥
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# 运行时
+.cache/
+.temp/
+.tmp/
+*.pid
+*.seed
+coverage/
+
+# OS
+*.swp
+*.swo
+
+# Claude/AI 缓存（可选 — 根据团队习惯）
+.claude/worktrees/
+
+# 第三方 fork — 作为本地工作副本存在，不被主仓追踪
+# 开发机需自行 clone 并 checkout feature/solo-mode-editor-pane
+third-party/tianhe-zhikai-ide/

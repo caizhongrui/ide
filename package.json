@@ -1,0 +1,26 @@
+{
+  "name": "maxian-monorepo",
+  "version": "0.3.0",
+  "description": "码弦（Maxian）AI 开发平台 Monorepo（多形态客户端）",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@tailwindcss/oxide", "esbuild", "sharp"]
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "build": "pnpm -r --if-present build",
+    "build:core": "pnpm --filter @maxian/core run build",
+    "build:sdk": "pnpm --filter @maxian/sdk run build",
+    "build:server": "pnpm --filter @maxian/server run build",
+    "build:ui": "pnpm --filter @maxian/ui run build",
+    "build:libs": "pnpm run build:core && pnpm run build:sdk && pnpm run build:ui && pnpm run build:server",
+    "clean": "pnpm -r --if-present clean",
+    "desktop:dev": "pnpm --filter @maxian/desktop run tauri:dev",
+    "desktop:build": "pnpm --filter @maxian/desktop run tauri:build"
+  }
+}
