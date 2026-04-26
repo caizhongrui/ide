@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@maxian/sdk": "workspace:*",
+    "@maxian/ui": "workspace:*",
     "@solidjs/router": "catalog:",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",

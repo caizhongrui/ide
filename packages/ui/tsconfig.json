@@ -3,7 +3,8 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    "jsx": "preserve",
+    // 使用 Solid 自动 JSX 运行时编译为纯 .js（无需 consumer 配 vite 插件）
+    "jsx": "react-jsx",
     "jsxImportSource": "solid-js",
     "composite": true
   },

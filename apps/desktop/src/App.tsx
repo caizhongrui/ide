@@ -12,6 +12,7 @@ import {
   type SavedCredentials, type UserInfo,
 } from "./api"
 import { initI18n, t, setLocale, getLocale } from "./i18n"
+import { ApprovalDialog as SharedApprovalDialog } from "@maxian/ui"
 
 /** 等待工具审批时的状态 */
 interface ApprovalRequest {
@@ -5580,52 +5581,17 @@ export default {
   }
 
   // ─── ApprovalDialog ───────────────────────────────────────────────────────
+  // 共享自 @maxian/ui 的纯 UI 组件，外部传入 request + onDecide 即可。
   function ApprovalDialog() {
-    const req = approvalRequest()
-    if (!req) return null
-    const isRisky = ['write_to_file', 'execute_command'].includes(req.toolName)
     return (
-      <div class="approval-overlay">
-        <div class="approval-dialog">
-          <div class="approval-header">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={isRisky ? "#f59e0b" : "#6366f1"} stroke-width="2">
-              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span class="approval-title">工具调用审批</span>
-          </div>
-          <div class="approval-body">
-            <div class="approval-tool-name">{TOOL_LABELS[req.toolName] ?? req.toolName}</div>
-            <div class="approval-params">
-              {Object.entries(req.toolParams).slice(0, 3).map(([k, v]) => (
-                <div class="approval-param-row">
-                  <span class="approval-param-key">{k}</span>
-                  <span class="approval-param-val">
-                    {typeof v === 'string' ? (v.length > 100 ? v.slice(0, 100) + '…' : v) : JSON.stringify(v).slice(0, 100)}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <Show when={isRisky}>
-              <div class="approval-risk-hint">⚠ 此操作可能修改文件或执行系统命令</div>
-            </Show>
-          </div>
-          <div class="approval-footer approval-footer-3col">
-            <button class="approval-btn deny" onClick={() => handleApprove(false)}>拒绝</button>
-            <button class="approval-btn allow" onClick={() => handleApprove(true)}>允许一次</button>
-            <button
-              class="approval-btn allow-session"
-              onClick={() => handleApprove(true, 'session')}
-              title="本会话内后续此工具不再询问"
-            >本会话允许</button>
-            <button
-              class="approval-btn allow-always"
-              onClick={() => handleApprove(true, 'always')}
-              title="所有会话永久允许此工具"
-            >总是允许</button>
-          </div>
-        </div>
-      </div>
+      <SharedApprovalDialog
+        request={approvalRequest()}
+        getToolLabel={(n) => TOOL_LABELS[n] ?? n}
+        onDecide={(d) => {
+          if (!d.approved) handleApprove(false)
+          else handleApprove(true, d.remember)
+        }}
+      />
     )
   }
 

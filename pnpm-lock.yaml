@@ -49,6 +49,9 @@ importers:
       '@maxian/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@maxian/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       '@solidjs/router':
         specifier: 'catalog:'
         version: 0.15.4(solid-js@1.9.10)

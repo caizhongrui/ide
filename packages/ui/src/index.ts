@@ -8,10 +8,12 @@
 export const PACKAGE_NAME = '@maxian/ui';
 export const PACKAGE_VERSION = '0.3.0';
 
-// TODO: 迁移 components/
+// 组件（Solid）
+export * from './components/index.js';
+
+// TODO: 后续按抽取顺序加入
 // export * from './components/MessageList.js';
 // export * from './components/ToolCallCard.js';
-// export * from './components/ApprovalDialog.js';
 // export * from './components/TokenUsageBar.js';
 // export * from './components/FileChangeTree.js';
 // export * from './components/SlashCommandPalette.js';
