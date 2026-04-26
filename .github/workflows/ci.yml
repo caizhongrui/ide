@@ -63,6 +63,18 @@ jobs:
           test -f docs/protocol/CHANGELOG.md
           echo "✅ All required docs present"
 
+  version-consistency:
+    name: Desktop version consistency (4 处版本号同步)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Run version-check
+        run: node tools/version-check/check.mjs
+
   # 未来任务：
   # - lint (eslint / prettier check)
   # - unit-tests

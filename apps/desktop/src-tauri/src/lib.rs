@@ -16,9 +16,10 @@
  *    Tauri 按当前运行平台自动选择（由 externalBin 配置驱动）
  *--------------------------------------------------------------------------------------------*/
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, RunEvent, WindowEvent};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 struct ServerHandle(Mutex<Option<CommandChild>>);
@@ -26,6 +27,43 @@ struct ServerPid(Mutex<Option<u32>>);   // 备份 pid，即使 CommandChild 被 
 
 fn read_env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+// ─── O9: 窗口尺寸/位置持久化 ──────────────────────────────────────────────
+// 简化方案：不引 tauri-plugin-window-state 插件，直接读写 ~/.maxian/desktop-window-state.json
+
+fn window_state_path() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let home = std::env::var("HOME").ok();
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok();
+    home.map(|h| PathBuf::from(h).join(".maxian").join("desktop-window-state.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct WindowState {
+    width: Option<u32>,
+    height: Option<u32>,
+    x: Option<i32>,
+    y: Option<i32>,
+    maximized: Option<bool>,
+}
+
+fn load_window_state() -> Option<WindowState> {
+    let path = window_state_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_window_state(s: &WindowState) {
+    if let Some(path) = window_state_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(s) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
 }
 
 /// 硬 kill sidecar：Windows 用 taskkill /T /F 杀进程树，Unix 先 SIGTERM 后 SIGKILL。
@@ -212,11 +250,48 @@ pub fn run() {
                 }
             }
 
-            // 监听每个窗口的 CloseRequested：关窗即 kill（不等 RunEvent::Exit）
+            // O9：恢复上次的窗口尺寸/位置/maximized 状态
+            if let Some(win) = app.get_webview_window("main") {
+                if let Some(state) = load_window_state() {
+                    if let (Some(w), Some(h)) = (state.width, state.height) {
+                        let _ = win.set_size(LogicalSize::new(w as f64, h as f64));
+                    }
+                    if let (Some(x), Some(y)) = (state.x, state.y) {
+                        let _ = win.set_position(LogicalPosition::new(x as f64, y as f64));
+                    }
+                    if state.maximized.unwrap_or(false) {
+                        let _ = win.maximize();
+                    }
+                }
+            }
+
+            // 监听每个窗口的 CloseRequested：保存状态 + kill sidecar
+            // 同时监听 Resized / Moved 事件持久化（节流：保存放在 CloseRequested 时一次性做）
             let h2 = app.handle().clone();
             if let Some(win) = app.get_webview_window("main") {
+                let win_for_save = win.clone();
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { .. } = event {
+                        // O9：保存窗口状态
+                        let maximized = win_for_save.is_maximized().unwrap_or(false);
+                        let mut state = WindowState { maximized: Some(maximized), ..Default::default() };
+                        if !maximized {
+                            // 仅在非最大化时保存 size/pos（最大化时 size 是屏幕大小，下次启动还原会怪异）
+                            if let Ok(PhysicalSize { width, height }) = win_for_save.outer_size() {
+                                let scale = win_for_save.scale_factor().unwrap_or(1.0);
+                                state.width = Some((width as f64 / scale).round() as u32);
+                                state.height = Some((height as f64 / scale).round() as u32);
+                            }
+                            if let Ok(PhysicalPosition { x, y }) = win_for_save.outer_position() {
+                                let scale = win_for_save.scale_factor().unwrap_or(1.0);
+                                state.x = Some((x as f64 / scale).round() as i32);
+                                state.y = Some((y as f64 / scale).round() as i32);
+                            }
+                        }
+                        save_window_state(&state);
+                        println!("[maxian-desktop] 已保存窗口状态");
+
+                        // 原有：kill sidecar
                         println!("[maxian-desktop] 检测到 CloseRequested，kill sidecar");
                         let child = h2.try_state::<ServerHandle>()
                             .and_then(|s| s.0.lock().ok().and_then(|mut g| g.take()));

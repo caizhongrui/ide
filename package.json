@@ -20,6 +20,7 @@
     "build:ui": "pnpm --filter @maxian/ui run build",
     "build:libs": "pnpm run build:core && pnpm run build:sdk && pnpm run build:ui && pnpm run build:server",
     "clean": "pnpm -r --if-present clean",
+    "version:check": "node tools/version-check/check.mjs",
     "desktop:dev": "pnpm --filter @maxian/desktop run tauri:dev",
     "desktop:build": "pnpm --filter @maxian/desktop run tauri:build"
   }

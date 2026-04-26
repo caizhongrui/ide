@@ -6669,12 +6669,77 @@ export default {
   function TokenUsageBar() {
     const pct = () => Math.min(100, (tokenUsed() / tokenLimit()) * 100)
     const color = () => pct() < 50 ? '#22c55e' : pct() < 80 ? '#f59e0b' : '#ef4444'
+    const [compacting, setCompacting] = createSignal(false)
+    const onCompact = async () => {
+      const sid = activeSessionId()
+      if (!sid || compacting() || sending()) return
+      try {
+        setCompacting(true)
+        const c = await getClient()
+        const r = await c.compactSession(sid)
+        const freed = (r as any)?.tokensFreed ?? (r as any)?.freed ?? 0
+        showToast({
+          message: freed > 0 ? `✅ 上下文已压缩，释放约 ${Number(freed).toLocaleString()} tokens` : `✅ 上下文已压缩`,
+          kind: 'info',
+          duration: 3000,
+        })
+      } catch (e) {
+        showToast({ message: `压缩失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
+      } finally {
+        setCompacting(false)
+      }
+    }
     return (
       <Show when={tokenUsed() > 0}>
-        <div class="token-usage-bar" title={`已使用 ${tokenUsed().toLocaleString()} / ${tokenLimit().toLocaleString()} tokens (${pct().toFixed(1)}%)`}>
-          <div class="token-usage-fill" style={{ width: `${pct()}%`, background: color(), transition: 'width 400ms ease-out, background 300ms' }} />
+        <div class="token-usage-row">
+          <div class="token-usage-bar" title={`已使用 ${tokenUsed().toLocaleString()} / ${tokenLimit().toLocaleString()} tokens (${pct().toFixed(1)}%)`}>
+            <div class="token-usage-fill" style={{ width: `${pct()}%`, background: color(), transition: 'width 400ms ease-out, background 300ms' }} />
+          </div>
+          <Show when={pct() >= 80}>
+            <button
+              class="token-compact-btn"
+              classList={{ critical: pct() >= 90 }}
+              disabled={compacting() || !activeSessionId()}
+              onClick={onCompact}
+              title="主动压缩当前会话上下文，释放 token 配额（保留关键工具结果，省略中间步骤摘要）"
+            >
+              {compacting() ? '压缩中…' : '📦 压缩上下文'}
+            </button>
+          </Show>
         </div>
       </Show>
+    )
+  }
+
+  // ─── O7: 工具错误展示（默认折叠，点击展开） ────────────────────────────
+  function ToolErrorPanel(props: { result: string }) {
+    const [open, setOpen] = createSignal(false)
+    const SUMMARY_LEN = 160
+    const isLong = () => props.result.length > SUMMARY_LEN
+    // 错误摘要：取第一个非空行（通常是 "Error: xxx" 主错误信息）
+    const summary = () => {
+      const firstLine = props.result.split('\n').find(l => l.trim().length > 0) ?? ''
+      return firstLine.length > SUMMARY_LEN ? firstLine.slice(0, SUMMARY_LEN) + '…' : firstLine
+    }
+    return (
+      <div class="tool-error-panel" onClick={(e) => e.stopPropagation()}>
+        <div class="tool-error-summary">
+          <span class="tool-error-icon">❌</span>
+          <span class="tool-error-text">{open() ? '错误详情' : summary()}</span>
+          <Show when={isLong() || props.result.includes('\n')}>
+            <button
+              class="tool-error-toggle"
+              onClick={() => setOpen(v => !v)}
+              title={open() ? '折叠' : '展开完整错误'}
+            >
+              {open() ? '收起 ▴' : '展开 ▾'}
+            </button>
+          </Show>
+        </div>
+        <Show when={open()}>
+          <pre class="tool-error-body">{props.result}</pre>
+        </Show>
+      </div>
     )
   }
 
@@ -8260,6 +8325,10 @@ export default {
                                               <code class="diff-code">{String(t.toolParams!.content).split('\n').slice(0, 5).join('\n')}{String(t.toolParams!.content).split('\n').length > 5 ? `\n… 共 ${String(t.toolParams!.content).split('\n').length} 行` : ''}</code>
                                             </div>
                                           </div>
+                                        </Show>
+                                        {/* O7: 工具失败 → 显示错误摘要（前 200 字），点击展开完整 */}
+                                        <Show when={!t.isPartial && t.toolSuccess === false && t.toolResult && t.toolResult.length > 0}>
+                                          <ToolErrorPanel result={t.toolResult!} />
                                         </Show>
                                         {/* bash / execute_command 流式输出（实时 stdout/stderr） */}
                                         <Show when={(t.toolName === 'bash' || t.toolName === 'execute_command') && t.liveOutput && t.liveOutput.length > 0}>
