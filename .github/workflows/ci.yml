@@ -38,6 +38,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # @maxian/server 等包通过 workspace:* 引用 @maxian/core 的 dist/，
+      # 必须先 build libs 让 dist 产物就绪，否则 typecheck 报 "Cannot find module"。
+      - name: Build libs
+        run: pnpm run build:libs
+
       - name: Typecheck
         run: pnpm -r --if-present typecheck
 
