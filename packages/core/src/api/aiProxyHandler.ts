@@ -804,7 +804,7 @@ export class AiProxyHandler implements IApiHandler {
 		// E2优化：追踪最终的 finish_reason，用于检测输出 token 达到上限
 		let finishReason = '';
 		const HEARTBEAT_INTERVAL_MS = 3000;
-		const STREAM_IDLE_TIMEOUT_MS = 90000;
+		const STREAM_IDLE_TIMEOUT_MS = 240_000;   // 4 分钟（multiedit 等大参数 LLM 生成可能慢）
 		const streamStartedAt = Date.now();
 		let lastHeartbeatAt = 0;
 		let lastNetworkActivityAt = streamStartedAt;
