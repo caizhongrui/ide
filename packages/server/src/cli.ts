@@ -2940,6 +2940,19 @@ OBJECTIVE
 			status: 'success',
 		});
 
+		// 累加 token 用量到 sessions 表（设置面板的"token 用量"统计源）
+		try {
+			const cur = server.sessionManager.getSession(sessionId);
+			if (cur) {
+				server.sessionManager.updateStats(sessionId, {
+					inputTokens:  (cur.inputTokens  ?? 0) + totalInputTokens,
+					outputTokens: (cur.outputTokens ?? 0) + totalOutputTokens,
+				});
+			}
+		} catch (e) {
+			console.warn('[Maxian] updateStats(tokens) 失败:', e);
+		}
+
 		return finalText || allText;
 	}
 
