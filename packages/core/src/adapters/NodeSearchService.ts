@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import picomatch from 'picomatch';
+import { normalizePerlInlineFlags } from '../utils/regexFlagsCompat.js';
 
 import type {
 	ISearchService,
@@ -159,7 +160,9 @@ export class NodeSearchService implements ISearchService {
 
 		let regex: RegExp;
 		try {
-			regex = new RegExp(opts.pattern, opts.isCaseSensitive ? 'g' : 'gi');
+			// 支持 AI 生成的 Perl 风格内联标志 (?i) / (?ims) 等 → 转成 JS flags
+			const norm = normalizePerlInlineFlags(opts.pattern, opts.isCaseSensitive ? 'g' : 'gi');
+			regex = new RegExp(norm.pattern, norm.flags);
 		} catch (e) {
 			throw new Error(`Invalid regex: ${opts.pattern} — ${(e as Error).message}`);
 		}

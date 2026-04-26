@@ -48,8 +48,14 @@ export class ToolRepetitionDetector {
 	// P2优化：Doom Loop检测
 	private toolCallHistory: ToolCallHistoryEntry[] = [];
 	private readonly HISTORY_WINDOW_SIZE = 20; // 保留最近20个工具调用
-	private readonly LOOP_DETECTION_THRESHOLD = 3; // 🔥 优化：降低到3次（从5次），更快检测死循环
+	private readonly LOOP_DETECTION_THRESHOLD = 5; // 60秒内同参数同工具阈值（探索类工具 3 次太严格，AI 正常重试就被误杀）
 	private readonly TIME_WINDOW_MS = 60000; // 60秒时间窗口
+	/**
+	 * 探索 / 搜索类工具阈值再放宽一倍 — AI 在不同假设下重复 glob/search 是合理探索行为。
+	 * 真正死循环靠 detectLoopPattern（A→B→A→B 模式）和 same-error-loop 兜底。
+	 */
+	private readonly EXPLORATION_TOOLS = new Set(['glob', 'search_files', 'grep', 'list_files', 'codebase_search']);
+	private readonly EXPLORATION_LOOP_THRESHOLD = 8;
 	private doomLoopDetected = false;
 	private doomLoopCount = 0;
 
@@ -300,6 +306,9 @@ ${checklist}
 		// 同时 lsp 的阈值放宽到 5，避免"改一版看诊断再改"这种正常修复闭环被误杀。
 		let effectiveWindowStart = windowStart;
 		let threshold = this.LOOP_DETECTION_THRESHOLD;
+		if (this.EXPLORATION_TOOLS.has(name)) {
+			threshold = this.EXPLORATION_LOOP_THRESHOLD;
+		}
 		if (name === 'lsp') {
 			threshold = 5;
 			// 从当前 entry 反向找 path

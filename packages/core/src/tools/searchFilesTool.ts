@@ -22,6 +22,7 @@ import * as fs from 'fs';   // 仅 fs.Dirent 类型 + listAllFiles helper（无 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
 import { platformFs, type ToolFs } from './platformFs.js';
+import { normalizePerlInlineFlags } from '../utils/regexFlagsCompat.js';
 
 // ========== 配置常量 ==========
 const SEARCH_CONFIG = {
@@ -205,10 +206,11 @@ export async function searchFilesTool(
 
 		cacheMisses++;
 
-		// 创建正则表达式
+		// 创建正则表达式（兼容 AI 生成的 Perl 风格内联标志 (?i)/(?ims)）
 		let searchRegex: RegExp;
 		try {
-			searchRegex = new RegExp(regex, 'gi');
+			const norm = normalizePerlInlineFlags(regex, 'gi');
+			searchRegex = new RegExp(norm.pattern, norm.flags);
 		} catch (e) {
 			return `Error: Invalid regex pattern: ${regex}\n${(e as Error).message}`;
 		}

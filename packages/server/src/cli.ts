@@ -2766,8 +2766,8 @@ OBJECTIVE
 					streaming:  false,
 				} as any);
 
-				if (mode === 'ask' && DESTRUCTIVE_TOOLS.has(tc.name)) {
-					console.log(`[Agent] ask 模式：等待用户审批 ${tc.name} (id=${tc.id})`);
+				if (DESTRUCTIVE_TOOLS.has(tc.name)) {
+					console.log(`[Agent] 破坏性工具：等待用户审批 ${tc.name} (id=${tc.id}, mode=${mode})`);
 					await server.sessionManager.emitEvent(sessionId, {
 						type:       'tool_approval_request',
 						sessionId,
