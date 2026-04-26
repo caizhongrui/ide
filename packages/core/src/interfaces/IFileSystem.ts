@@ -101,6 +101,14 @@ export interface IFileSystem {
 	readdirSync?(path: string, opts?: { withFileTypes?: boolean }): string[] | FileEntry[];
 	/** 同步删除文件（可选） */
 	unlinkSync?(path: string): void;
+
+	// ── K8c: 收尾用的额外可选 sync 方法 ─────────────────────────
+	/** 同步获取文件元信息（不解符号链接）（可选） */
+	lstatSync?(path: string): FileStat;
+	/** 同步解析符号链接（可选） */
+	realpathSync?(path: string): string;
+	/** 同步读取文件为二进制（可选；用于图片等） */
+	readBinaryFileSync?(path: string): Uint8Array;
 }
 
 /** Node.js BufferEncoding 类型镜像（core 不依赖 @types/node） */

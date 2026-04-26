@@ -44,9 +44,9 @@ function listDir(pf: ToolFs, root: string, rel: string, showHidden: boolean, rec
 	for (const entry of entries) {
 		if (!showHidden && entry.name.startsWith('.')) continue;
 		const full = path.join(root, rel, entry.name);
-		// 使用 platform.fs.statSync（lstatSync 暂未抽象，沿用原行为：用 statSync 统一处理）
+		// K8c：lstatSync 已加入 ToolFs，正确不解符号链接
 		let st;
-		try { st = pf.statSync(full); } catch { continue; }
+		try { st = pf.lstatSync(full); } catch { continue; }
 
 		const item: ILsEntry = {
 			name:  entry.name,

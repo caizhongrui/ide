@@ -326,6 +326,7 @@ export async function listFilesTool(
 
 		// 使用异步遍历
 		await listDirAsync(
+			pf,
 			absolutePath,
 			'',
 			files,
@@ -386,9 +387,10 @@ export async function listFilesTool(
 }
 
 /**
- * 异步遍历目录
+ * 异步遍历目录（K8c 收尾：接收 pf 参数走 platform.fs）
  */
 async function listDirAsync(
+	pf: ToolFs,
 	basePath: string,
 	relativePath: string,
 	results: FileEntry[],
@@ -406,7 +408,7 @@ async function listDirAsync(
 	const fullPath = relativePath ? path.join(basePath, relativePath) : basePath;
 
 	// 防止循环引用（符号链接）
-	const realPath = fs.realpathSync(fullPath);
+	const realPath = pf.realpathSync(fullPath);
 	if (visited.has(realPath)) {
 		return;
 	}
@@ -424,11 +426,11 @@ async function listDirAsync(
 
 		// 使用并发限制读取目录
 		entries = await limiter.run(async () => {
-			const dirents = fs.readdirSync(fullPath, { withFileTypes: true });
+			const dirents = pf.readdirSync(fullPath, { withFileTypes: true }) as fs.Dirent[];
 			return dirents.map(dirent => ({
 				name: dirent.name,
 				isDirectory: dirent.isDirectory(),
-				size: dirent.isFile() ? getFileSize(path.join(fullPath, dirent.name)) : undefined,
+				size: dirent.isFile() ? getFileSize(pf, path.join(fullPath, dirent.name)) : undefined,
 			}));
 		});
 
@@ -440,7 +442,7 @@ async function listDirAsync(
 	}
 
 	// 获取 ignore 规则
-	const ignoreRules = getIgnoreRules(basePath);
+	const ignoreRules = getIgnoreRules(basePath, pf);
 
 	// 处理目录项
 	const subDirs: string[] = [];
@@ -486,7 +488,7 @@ async function listDirAsync(
 	if (recursive && subDirs.length > 0 && results.length < limit) {
 		await Promise.all(
 			subDirs.map(subDir =>
-				listDirAsync(basePath, subDir, results, visited, limiter, recursive, depth + 1, limit)
+				listDirAsync(pf, basePath, subDir, results, visited, limiter, recursive, depth + 1, limit)
 			)
 		);
 	}
@@ -495,9 +497,9 @@ async function listDirAsync(
 /**
  * 获取文件大小（带错误处理）
  */
-function getFileSize(filePath: string): number | undefined {
+function getFileSize(pf: ToolFs, filePath: string): number | undefined {
 	try {
-		const stat = fs.statSync(filePath);
+		const stat = pf.statSync(filePath);
 		return stat.size;
 	} catch {
 		return undefined;

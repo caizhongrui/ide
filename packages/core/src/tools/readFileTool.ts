@@ -385,9 +385,11 @@ function looksLikeShiftJIS(buffer: Buffer): boolean {
 
 /**
  * 使用检测到的编码读取文件内容
+ * K8c：接收 pf 参数走 platform.fs.readBinaryFileSync
  */
-function readFileWithEncoding(filePath: string, encoding: string): string {
-	const buffer = fs.readFileSync(filePath);
+function readFileWithEncoding(pf: import('./platformFs.js').ToolFs, filePath: string, encoding: string): string {
+	const data = pf.readBinaryFileSync(filePath);
+	const buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 
 	// Node.js 内置支持的编码
 	const supportedEncodings: { [key: string]: BufferEncoding } = {
@@ -583,8 +585,9 @@ export async function readFileTool(
 				return `⚠️ 图片过大\n\nFile: ${filePath}\nSize: ${formatBytes(stat.size)}\n超过 10MB 上限，无法嵌入上下文。`;
 			}
 			try {
-				const data = fs.readFileSync(absolutePath);
-				const b64 = data.toString('base64');
+				// K8c：走 platform.fs.readBinaryFileSync
+				const data = pf.readBinaryFileSync(absolutePath);
+				const b64 = Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
 				return `# 图片文件: ${path.basename(absolutePath)}\n\n- 路径: \`${filePath}\`\n- 尺寸: ${formatBytes(stat.size)}\n- 类型: ${IMAGE_EXTS[ext]}\n\n![${path.basename(absolutePath)}](data:${IMAGE_EXTS[ext]};base64,${b64})`;
 			} catch (e) {
 				return `Error: 读取图片失败: ${(e as Error).message}`;
@@ -603,10 +606,11 @@ export async function readFileTool(
 		}
 
 		// 读取文件头部进行二进制检测
-		const headerBuffer = Buffer.alloc(READ_FILE_CONFIG.BINARY_CHECK_SIZE);
-		const fd = fs.openSync(absolutePath, 'r');
-		fs.readSync(fd, headerBuffer, 0, READ_FILE_CONFIG.BINARY_CHECK_SIZE, 0);
-		fs.closeSync(fd);
+		// K8c：用 platform.fs.readBinaryFileSync 替代 openSync/readSync/closeSync 三连
+		// （后者在 Web 形态下完全不可用；并且 platformFs 已封装跨形态降级）
+		const fullBuf = pf.readBinaryFileSync(absolutePath);
+		const headerLen = Math.min(fullBuf.length, READ_FILE_CONFIG.BINARY_CHECK_SIZE);
+		const headerBuffer = Buffer.from(fullBuf.buffer, fullBuf.byteOffset, headerLen);
 
 		// 二进制文件检测
 		const binaryCheck = isBinaryFile(absolutePath, headerBuffer);
@@ -641,7 +645,7 @@ export async function readFileTool(
 		console.log(`[ReadFileTool] 检测到编码: ${encoding} for ${filePath}`);
 
 		// 读取文件内容
-		const content = readFileWithEncoding(absolutePath, encoding);
+		const content = readFileWithEncoding(pf, absolutePath, encoding);
 		const lines = content.split('\n');
 
 		// 更新缓存

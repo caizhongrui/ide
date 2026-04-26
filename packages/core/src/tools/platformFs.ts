@@ -26,6 +26,10 @@ export interface ToolFs {
 	mkdirSync(path: string, opts?: { recursive?: boolean }): void;
 	readdirSync(path: string, opts?: { withFileTypes?: boolean }): string[] | unknown[];
 	unlinkSync(path: string): void;
+	// K8c 收尾扩展：listFilesTool / readFileTool 二进制场景需要
+	lstatSync(path: string): FileStat;
+	realpathSync(path: string): string;
+	readBinaryFileSync(path: string): Uint8Array;
 }
 
 /** 静态返回 node:fs。修复历史：之前用 new Function('return require()')() 在 Bun --compile
@@ -83,6 +87,27 @@ export function platformFs(ctx?: IToolContext): ToolFs {
 		unlinkSync(path) {
 			if (pfs?.unlinkSync) return pfs.unlinkSync(path);
 			getNodeFs().unlinkSync(path);
+		},
+		// K8c 收尾扩展
+		lstatSync(path) {
+			if (pfs?.lstatSync) return pfs.lstatSync(path);
+			const s = getNodeFs().lstatSync(path);
+			return {
+				mtime: s.mtimeMs,
+				ctime: s.ctimeMs,
+				size: s.size,
+				isDirectory: s.isDirectory(),
+				isFile: s.isFile(),
+				isSymbolicLink: s.isSymbolicLink(),
+			};
+		},
+		realpathSync(path) {
+			if (pfs?.realpathSync) return pfs.realpathSync(path);
+			return getNodeFs().realpathSync(path);
+		},
+		readBinaryFileSync(path) {
+			if (pfs?.readBinaryFileSync) return pfs.readBinaryFileSync(path);
+			return getNodeFs().readFileSync(path) as unknown as Uint8Array;
 		},
 	};
 }
