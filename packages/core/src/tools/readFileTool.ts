@@ -645,6 +645,14 @@ export async function readFileTool(
 		if (cachedEntry && cachedEntry.mtime === stat.mtime) {
 			cacheHits++;
 			console.log(`[ReadFileTool] 缓存命中: ${filePath} (命中率: ${getFileCacheStats().hitRate}%)`);
+			// FileTime：即使缓存命中也要刷新 baseline，避免 sidecar 重启后 AI 第二次 read 走缓存
+			// 不写 FileTime → 后续 edit/multiedit 报"必须先 read"导致死循环
+			if (ctx.sessionId) {
+				try {
+					const { FileTime } = await import('../file/FileTime.js');
+					FileTime.read(ctx.sessionId, absolutePath);
+				} catch { /* FileTime 可选，不阻塞读 */ }
+			}
 			return formatFileContent(filePath, cachedEntry.content, cachedEntry.lineCount,
 				cachedEntry.encoding, startLine, endLine, true);
 		}
