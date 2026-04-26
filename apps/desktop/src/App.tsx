@@ -1384,6 +1384,27 @@ export default function App() {
     }
     const c = await getClient()
 
+    // 加载该会话历史的文件变更列表（从 file_snapshots 表）
+    // 注意：当前后端只持久化 path，无 action 信息，统一按 'modified' 显示
+    // 用 currentSessionId 校验防止快速切换会话的竞态
+    void (async () => {
+      try {
+        const r = await c.getChangedFiles(id)
+        if (activeSessionId() !== id) return  // 用户已切走，丢弃过期结果
+        if (Array.isArray(r.files) && r.files.length > 0) {
+          setChangedFiles(prev => {
+            const next = new Map(prev)
+            for (const p of r.files) {
+              if (!next.has(p)) next.set(p, { path: p, action: 'modified' })
+            }
+            return next
+          })
+        }
+      } catch (e) {
+        console.warn('[maxian] failed to load changed-files for session', id, e)
+      }
+    })()
+
     // Load persisted messages from server（最近 50 条，滚到底部）
     try {
       const { messages: stored, hasMore } = await c.getSessionMessages(id, { limit: 50 })
