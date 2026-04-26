@@ -15,7 +15,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
-export const DB_DIR  = path.join(os.homedir(), '.maxian');
+/**
+ * 数据目录优先级：
+ *   1. 环境变量 `MAXIAN_DATA_DIR`（绝对路径或可解析的相对路径）— 多进程隔离场景必备
+ *      （例如 IDE sidecar 与桌面端共存时，IDE 把 DATA_DIR 指向 ~/.maxian-ide 避免 SQLite 写竞争）
+ *   2. 默认 `~/.maxian`
+ *
+ * 仅影响 SQLite 数据文件位置；config.json / plugins / skills 等仍由各自模块决定。
+ */
+const ENV_DATA_DIR = (process.env.MAXIAN_DATA_DIR || '').trim();
+export const DB_DIR  = ENV_DATA_DIR
+	? path.resolve(ENV_DATA_DIR)
+	: path.join(os.homedir(), '.maxian');
 export const DB_PATH = path.join(DB_DIR, 'maxian.db');
 
 /**
