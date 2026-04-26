@@ -20,6 +20,8 @@ import * as fs from 'fs';   // 仅 fs.Dirent 类型 + realpathSync（platform �
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
 import { platformFs, type ToolFs } from './platformFs.js';
+import { DIRS_TO_IGNORE } from '../utils/noiseFilter.js';
+import { getPathSuggestions } from '../utils/pathSuggestions.js';
 
 // ========== 配置常量 ==========
 const LIST_FILES_CONFIG = {
@@ -32,44 +34,17 @@ const LIST_FILES_CONFIG = {
 	/** 最大并发目录读取数 */
 	MAX_CONCURRENT_READS: 10,
 
-	/** 最大返回文件数 */
-	MAX_FILES_LIMIT: 1000,
+	/** 最大返回文件数（T-1：与 IDE list_files 的 500 上限对齐） */
+	MAX_FILES_LIMIT: 500,
 
-	/** 递归最大深度 */
+	/** 递归最大深度（硬上限；用户可通过 max_depth 参数缩小） */
 	MAX_DEPTH: 20,
 
-	/** 默认忽略的目录 */
-	DEFAULT_IGNORE_DIRS: new Set([
-		'node_modules',
-		'.git',
-		'.svn',
-		'.hg',
-		'__pycache__',
-		'.pytest_cache',
-		'.mypy_cache',
-		'.tox',
-		'venv',
-		'.venv',
-		'env',
-		'.env',
-		'dist',
-		'build',
-		'out',
-		'target',           // Maven/Gradle 编译输出
-		'bin',              // 编译输出
-		'.gradle',          // Gradle 缓存
-		'.m2',              // Maven 本地仓库
-		'.idea',
-		'.vscode',
-		'.next',
-		'.nuxt',
-		'.cache',
-		'coverage',
-		'.nyc_output',
-		'logs',             // 日志目录
-		'tmp',              // 临时目录
-		'temp',             // 临时目录
-	]),
+	/**
+	 * 默认忽略的目录 — T-1：复用 utils/noiseFilter 的 DIRS_TO_IGNORE，单一真相源。
+	 * 名单与码弦 IDE common/services/globConstants.ts 完全一致。
+	 */
+	DEFAULT_IGNORE_DIRS: new Set<string>(DIRS_TO_IGNORE),
 
 	/** 默认忽略的文件模式 */
 	DEFAULT_IGNORE_FILES: new Set([
@@ -298,20 +273,36 @@ export async function listFilesTool(
 	const dirPath = params.path || '.';
 	const recursive = params.recursive === 'true' || params.recursive === true;
 
+	// T-1：max_depth 参数（对齐 IDE list_files）
+	// - 显式传入 → 用之
+	// - 未传 + recursive → 默认 3（防止 monorepo 上下文爆炸）
+	// - 未传 + 非 recursive → 1
+	const maxDepth = params.max_depth
+		? parseInt(params.max_depth, 10)
+		: (recursive ? 3 : 1);
+	const effectiveMaxDepth = Math.min(
+		Number.isFinite(maxDepth) && maxDepth > 0 ? maxDepth : (recursive ? 3 : 1),
+		LIST_FILES_CONFIG.MAX_DEPTH,
+	);
+
 	try {
 		// 解析绝对路径
 		const absolutePath = path.isAbsolute(dirPath)
 			? dirPath
 			: path.resolve(ctx.workspacePath, dirPath);
 
-		// 检查目录是否存在
+		// 检查目录是否存在 — 不存在时给路径建议（T-1 平移自 IDE）
 		if (!pf.existsSync(absolutePath)) {
-			return `Error: Directory not found: ${dirPath}`;
+			const suggestions = getPathSuggestions(pf, absolutePath);
+			if (suggestions.length > 0) {
+				return `错误: 目录不存在\n路径: ${absolutePath}\n\n你是否要找:\n${suggestions.map(s => `  - ${s}`).join('\n')}`;
+			}
+			return `错误: 目录不存在\n路径: ${absolutePath}`;
 		}
 
 		const stat = pf.statSync(absolutePath);
 		if (!stat.isDirectory) {
-			return `Error: Path is not a directory: ${dirPath}\n\n💡 Use read_file tool to read file contents.`;
+			return `错误: 路径不是目录: ${dirPath}\n\n💡 请使用 read_file 工具读取文件内容。`;
 		}
 
 		// 清理过期缓存
@@ -324,7 +315,7 @@ export async function listFilesTool(
 		const files: FileEntry[] = [];
 		const visited = new Set<string>();
 
-		// 使用异步遍历
+		// 使用异步遍历（T-1：传入 effectiveMaxDepth 作为递归深度上限）
 		await listDirAsync(
 			pf,
 			absolutePath,
@@ -334,7 +325,8 @@ export async function listFilesTool(
 			limiter,
 			recursive,
 			0,
-			LIST_FILES_CONFIG.MAX_FILES_LIMIT
+			LIST_FILES_CONFIG.MAX_FILES_LIMIT,
+			effectiveMaxDepth,
 		);
 
 		// 排序结果
@@ -398,10 +390,11 @@ async function listDirAsync(
 	limiter: ConcurrencyLimiter,
 	recursive: boolean,
 	depth: number,
-	limit: number
+	limit: number,
+	maxDepth: number = LIST_FILES_CONFIG.MAX_DEPTH,
 ): Promise<void> {
-	// 检查限制
-	if (results.length >= limit || depth > LIST_FILES_CONFIG.MAX_DEPTH) {
+	// 检查限制（T-1：使用调用方传入的 maxDepth，覆盖默认 20）
+	if (results.length >= limit || depth >= maxDepth) {
 		return;
 	}
 
@@ -484,11 +477,11 @@ async function listDirAsync(
 		}
 	}
 
-	// 递归处理子目录（并发）
+	// 递归处理子目录（并发，T-1：透传 maxDepth）
 	if (recursive && subDirs.length > 0 && results.length < limit) {
 		await Promise.all(
 			subDirs.map(subDir =>
-				listDirAsync(pf, basePath, subDir, results, visited, limiter, recursive, depth + 1, limit)
+				listDirAsync(pf, basePath, subDir, results, visited, limiter, recursive, depth + 1, limit, maxDepth)
 			)
 		);
 	}

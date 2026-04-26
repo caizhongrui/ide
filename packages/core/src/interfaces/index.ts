@@ -76,6 +76,12 @@ export type { ILspService, LspDiagnostic, LspLocation } from './ILspService.js';
 
 export type { IFileWatcher } from './IFileWatcher.js';
 
+export type {
+	ISearchService,
+	SearchTextOptions,
+	SearchTextMatch,
+} from './ISearchService.js';
+
 /**
  * 平台能力容器 — 所有接口的集合。
  * 使用方（IDE / Desktop / Cloud Worker）把各自的实现打包传给 Core。
@@ -106,4 +112,10 @@ export interface MaxianPlatform {
 	clock?: import('./IClock.js').IClock;
 	/** LSP 能力（IDE 形态特有；Desktop / Web 等无此能力） */
 	lsp?: import('./ILspService.js').ILspService;
+	/**
+	 * 内容搜索服务（ripgrep / vscode searchService 抽象）。
+	 * 未注入时，core 的 searchFilesTool 将退回到 NodeSearchService（子进程 ripgrep）。
+	 * IDE 必须注入 VSCodeSearchService 以复用 vscode 内置 ripgrep + ignoreFiles 等能力。
+	 */
+	search?: import('./ISearchService.js').ISearchService;
 }

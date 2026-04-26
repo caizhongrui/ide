@@ -27,3 +27,17 @@ export {
 
 export { GlobalFileNames } from './globalFileNames.js';
 export type { GlobalFileName } from './globalFileNames.js';
+
+export {
+	DIRS_TO_IGNORE,
+	TOOL_SEARCH_EXCLUDE_GLOBS,
+	isLikelyNoisePath,
+	shouldApplyNoiseFiltering,
+	isIgnoredDirName,
+} from './noiseFilter.js';
+
+export {
+	getPathSuggestions,
+	getSimilarFiles,
+	getSimilarPathVariants,
+} from './pathSuggestions.js';

@@ -62,6 +62,7 @@ export * from './writeToFileTool.js';
 export * from './editTool.js';
 export * from './multieditTool.js';
 export * from './searchFilesTool.js';
+export * from './searchFilesViaService.js';   // T-1 新版：走 ISearchService
 export * from './listFilesTool.js';
 export * from './executeCommandTool.js';
 
