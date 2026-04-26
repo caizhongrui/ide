@@ -4525,6 +4525,21 @@ export default function App() {
   }
   const CHANGELOG: ChangelogEntry[] = [
     {
+      version: '0.2.11',
+      date: '2026-04-26',
+      changes: [
+        '✅ 修复：任务清单卡 X/Y 永不完成 —— AI 调 attempt_completion 前未把所有 todo 收尾，前端任务清单永远显示少 1 项，用户误以为任务还在跑、不能中止',
+        '✅ 后端硬规则：HARD RULES 第 8 条强制 AI 在 attempt_completion 之前先用 todo_write 把所有 todo 标 completed/cancelled',
+        '✅ 前端兜底：task_status:completed 收到后若 todos 还有 in_progress/pending → 显示橙色徽章"⚠ AI 提前结束，N 项未收尾"，未完成项渲染为橙色斜体',
+        '✅ TodoItem 类型增加 cancelled 状态，渲染为灰色 + 删除线 + ✕ 图标',
+        '📁 修复：切换会话时右侧"文件变更"面板始终为空 —— 切会话时异步从 /sessions/:id/changed-files 拉取该会话历史',
+        '📁 防竞态：用 activeSessionId() 校验，用户快速切换会话时旧请求结果被丢弃',
+        '📊 修复：设置面板里所有会话 token 用量都显示 0 —— sessions 表 input_tokens/output_tokens 列从未被写入',
+        '📊 runAgentLoop 末尾把本轮 totalInputTokens/totalOutputTokens 累加到 sessions 表（仅对新会话和未来对话生效，历史会话仍为 0）',
+        '🔧 CI: typecheck 前先 build:libs，修复 GitHub Actions 上"Cannot find module @maxian/core"',
+      ],
+    },
+    {
       version: '0.2.10',
       date: '2026-04-24',
       changes: [
