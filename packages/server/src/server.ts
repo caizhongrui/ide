@@ -15,6 +15,7 @@ import {
 	LoggerMiddleware,
 	CorsMiddleware,
 	ErrorMiddleware,
+	ProtocolMiddleware,
 } from './middleware/index.js';
 import { HealthRoutes } from './routes/health.js';
 import { SessionRoutes } from './routes/session.js';
@@ -89,6 +90,7 @@ export function createServer(
 	// Global middleware
 	app.use('*', LoggerMiddleware);
 	app.use('*', CorsMiddleware(opts.cors));
+	app.use('*', ProtocolMiddleware());
 	app.use('*', AuthMiddleware(opts.authUsername, opts.authPassword));
 
 	// Routes

@@ -42,7 +42,17 @@ export type MaxianEvent =
 	| TaskStatusEvent
 	| ErrorEvent
 	| FileChangeEvent
-	| CompletionEvent;
+	| CompletionEvent
+	// ── N1d 补齐 server 实际广播但 union 之前缺的 8 种事件 ────────
+	| ToolApprovalRequestEvent
+	| ToolInputDeltaEvent
+	| ContextCompactingEvent
+	| ContextCompactedEvent
+	| ConvertReasoningToAssistantEvent
+	| FollowupSuggestionsEvent
+	| RateLimitEvent
+	| RateLimitClearedEvent
+	| TaskAbortedEvent;
 
 /** AI 助手消息（流式文本） */
 export interface AssistantMessageEvent {
@@ -146,6 +156,84 @@ export interface CompletionEvent {
 	type: 'completion';
 	sessionId: string;
 	resultSummary?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// N1d 新增事件类型（与 maxian-server 实际广播一致）
+// ─────────────────────────────────────────────────────────────────
+
+/** 工具调用需要用户审批 */
+export interface ToolApprovalRequestEvent {
+	type: 'tool_approval_request';
+	sessionId: string;
+	toolUseId: string;
+	toolName: string;
+	params?: Record<string, unknown>;
+	/** 风险描述（destructive / network / fs-write 等） */
+	risk?: string;
+}
+
+/** 工具参数流式构建（AI tokenizer 边出 token 边构造 JSON） */
+export interface ToolInputDeltaEvent {
+	type: 'tool_input_delta';
+	sessionId: string;
+	toolUseId: string;
+	toolName: string;
+	partialArgs: string;
+}
+
+/** 上下文压缩开始 */
+export interface ContextCompactingEvent {
+	type: 'context_compacting';
+	sessionId: string;
+	beforeTokens: number;
+}
+
+/** 上下文压缩完成 */
+export interface ContextCompactedEvent {
+	type: 'context_compacted';
+	sessionId: string;
+	beforeTokens: number;
+	afterTokens: number;
+	tokensFreed: number;
+}
+
+/** 思考块（reasoning）转为正式 assistant 消息 */
+export interface ConvertReasoningToAssistantEvent {
+	type: 'convert_reasoning_to_assistant';
+	sessionId: string;
+	toolUseId: string;
+}
+
+/** AI 给出的追问建议 */
+export interface FollowupSuggestionsEvent {
+	type: 'followup_suggestions';
+	sessionId: string;
+	suggestions: string[];
+}
+
+/** 触发 LLM 限流，正在退避重试 */
+export interface RateLimitEvent {
+	type: 'rate_limit';
+	sessionId: string;
+	/** 重试时间戳（毫秒） */
+	resetAt: number;
+	/** 第几次重试 */
+	attempt: number;
+	message?: string;
+}
+
+/** 限流已解除，恢复正常 */
+export interface RateLimitClearedEvent {
+	type: 'rate_limit_cleared';
+	sessionId: string;
+}
+
+/** 任务被取消的明确广播信号（与 task_status:aborted 配套，前端用作 1500ms 事件丢弃窗口起点） */
+export interface TaskAbortedEvent {
+	type: 'task_aborted';
+	sessionId: string;
+	reason?: string;
 }
 
 /** UI → Core 的命令类型 */

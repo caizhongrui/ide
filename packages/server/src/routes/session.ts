@@ -176,17 +176,32 @@ export function SessionRoutes(sessionManager: SessionManager) {
 		}
 	);
 
-	// 获取会话的文件变更列表（快照记录）
+	// 获取会话的文件变更列表（快照记录）—— 含 action（created/modified/deleted）
 	app.get('/sessions/:id/changed-files', (c) => {
 		const id = c.req.param('id');
 		try {
 			const db = getDb();
+			// 取每个 path 最近一次的 action（同 path 多次写入只看最后状态）
 			const rows = db.prepare(
-				`SELECT DISTINCT path FROM file_snapshots WHERE session_id = ? ORDER BY created_at ASC`
-			).all(id) as Array<{ path: string }>;
-			return c.json({ files: rows.map(r => r.path) });
-		} catch (e) {
-			return c.json({ files: [] });
+				`SELECT path, action FROM file_snapshots
+				 WHERE session_id = ?
+				 AND id IN (
+				   SELECT MAX(id) FROM file_snapshots
+				   WHERE session_id = ?
+				   GROUP BY path
+				 )
+				 ORDER BY created_at ASC`
+			).all(id, id) as Array<{ path: string; action: string }>;
+			// 兼容旧客户端：保留 files: string[]；新客户端读 details: Array<{path, action}>
+			return c.json({
+				files: rows.map(r => r.path),
+				details: rows.map(r => ({
+					path: r.path,
+					action: (r.action || 'modified') as 'created' | 'modified' | 'deleted',
+				})),
+			});
+		} catch {
+			return c.json({ files: [], details: [] });
 		}
 	});
 

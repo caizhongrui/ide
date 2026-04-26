@@ -493,18 +493,24 @@ const AGENT_TOOL_DEFINITIONS: ToolDefinition[] = [
 
 // ─── 文件快照辅助 ──────────────────────────────────────────────────────────────
 
+type FileChangeAction = 'created' | 'modified' | 'deleted';
+
 /**
  * 在写入/编辑文件前，将当前内容保存到 file_snapshots 表。
- * 如果文件不存在则不保存（新建文件无需快照）。
+ * 如果文件不存在则保存空内容（标记为 'created'，撤销 = 删除文件）。
+ *
+ * action: 'created' = 文件之前不存在；'modified' = 文件存在被改；'deleted' = 文件被删除
  */
-function saveFileSnapshot(sessionId: string, absolutePath: string): void {
+function saveFileSnapshot(sessionId: string, absolutePath: string, action: FileChangeAction = 'modified'): void {
 	try {
-		if (!fs.existsSync(absolutePath)) return;
-		const content = fs.readFileSync(absolutePath, 'utf8');
+		const exists = fs.existsSync(absolutePath);
+		const content = exists ? fs.readFileSync(absolutePath, 'utf8') : '';
+		// 实际 action：如果调用方传了 'modified' 但文件不存在，自动校正为 'created'
+		const realAction: FileChangeAction = action === 'modified' && !exists ? 'created' : action;
 		const db = getDb();
 		db.prepare(
-			'INSERT INTO file_snapshots (session_id, path, content, created_at) VALUES (?, ?, ?, ?)'
-		).run(sessionId, absolutePath, content, Date.now());
+			'INSERT INTO file_snapshots (session_id, path, content, action, created_at) VALUES (?, ?, ?, ?, ?)'
+		).run(sessionId, absolutePath, content, realAction, Date.now());
 	} catch (e) {
 		console.warn('[Snapshot] 保存快照失败:', (e as Error).message);
 	}

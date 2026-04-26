@@ -68,7 +68,11 @@ export class MaxianClient {
 	}
 
 	private async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/json',
+			// N4 协议版本声明（server 用于检测客户端 / 服务端协议漂移）
+			'X-Maxian-Protocol': '1',
+		};
 		if (this.auth) headers['Authorization'] = this.auth;
 		const res = await this.fetchFn(`${this.baseUrl}${path}`, {
 			method,
@@ -139,8 +143,15 @@ export class MaxianClient {
 		await this.request('POST', `/sessions/${sessionId}/approve`, { toolUseId, approved, feedback });
 	}
 
-	/** 获取会话中被修改的文件列表 */
-	async getChangedFiles(sessionId: string): Promise<{ files: string[] }> {
+	/**
+	 * 获取会话中被修改的文件列表。
+	 * - files: 兼容旧版只返回路径列表
+	 * - details: 含 action ('created' | 'modified' | 'deleted')，每个 path 取最近一次状态
+	 */
+	async getChangedFiles(sessionId: string): Promise<{
+		files: string[];
+		details?: Array<{ path: string; action: 'created' | 'modified' | 'deleted' }>;
+	}> {
 		return this.request('GET', `/sessions/${sessionId}/changed-files`);
 	}
 

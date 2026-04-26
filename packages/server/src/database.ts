@@ -132,12 +132,14 @@ function initSchema(db: Database.Database): void {
 			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 		);
 
-		-- ── 文件快照（撤销用） ───────────────────────────────────────
+		-- ── 文件快照（撤销用 + 切换会话恢复变更列表） ────────────────
+		-- action: 'created' | 'modified' | 'deleted'，由 cli.ts 写入时传入
 		CREATE TABLE IF NOT EXISTS file_snapshots (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id TEXT    NOT NULL,
 			path       TEXT    NOT NULL,
 			content    TEXT    NOT NULL,
+			action     TEXT    NOT NULL DEFAULT 'modified',
 			created_at INTEGER NOT NULL
 		);
 
@@ -165,5 +167,69 @@ function initSchema(db: Database.Database): void {
 	if (!cols.includes('pinned')) {
 		db.exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
 		console.log('[Database] 迁移完成：sessions 表新增 pinned 列');
+	}
+
+	// ── file_snapshots 表迁移：补 action 列 ─────────────────────────────
+	const fsCols = (db.pragma('table_info(file_snapshots)') as Array<{ name: string }>).map(r => r.name);
+	if (!fsCols.includes('action')) {
+		db.exec(`ALTER TABLE file_snapshots ADD COLUMN action TEXT NOT NULL DEFAULT 'modified'`);
+		console.log('[Database] 迁移完成：file_snapshots 表新增 action 列');
+	}
+
+	// ── K5 历史 token 估算回填（一次性，幂等） ─────────────────────────
+	// 背景：v0.2.11 之前 sessions.input_tokens / output_tokens 从未被写入，
+	// 但历史 ai_call_logs 是远端上报，本地无数据可恢复。
+	// 妥协：从 history_entries 内容长度估算（char/4），UI 用户可接受 ±20% 误差好过看到 0。
+	backfillSessionTokensFromHistory(db);
+}
+
+/**
+ * 从 history_entries 内容估算并回填 sessions.input_tokens / output_tokens。
+ * 仅对 input_tokens=0 AND output_tokens=0 的 session 跑（幂等）。
+ * 估算公式：char count / 4（GPT 系列粗略 token-per-char 比例）
+ */
+function backfillSessionTokensFromHistory(db: ReturnType<typeof getDb>): void {
+	try {
+		// 找出所有"两个 token 都为 0"的 session（候选回填对象）
+		const candidates = db.prepare(
+			`SELECT id FROM sessions WHERE input_tokens = 0 AND output_tokens = 0`
+		).all() as Array<{ id: string }>;
+
+		if (candidates.length === 0) return;
+
+		const update = db.prepare(
+			`UPDATE sessions SET input_tokens = ?, output_tokens = ? WHERE id = ?`
+		);
+		// 按 session 一次扫历史
+		const histStmt = db.prepare(
+			`SELECT content, position FROM history_entries WHERE session_id = ? ORDER BY position ASC`
+		);
+
+		let touched = 0;
+		for (const { id } of candidates) {
+			const rows = histStmt.all(id) as Array<{ content: string; position: number }>;
+			if (rows.length === 0) continue;
+			let inputChars = 0;
+			let outputChars = 0;
+			// history_entries 排列：偶数 position 通常是 user / 工具结果 → input；奇数是 assistant → output
+			// 但更准确：直接累加 content 长度，按位置奇偶粗分（实际 maxian 协议同时含 user / assistant / tool 多种 role 在 message 里）
+			for (const r of rows) {
+				const len = (r.content || '').length;
+				if (r.position % 2 === 0) inputChars += len;
+				else outputChars += len;
+			}
+			const estIn  = Math.round(inputChars  / 4);
+			const estOut = Math.round(outputChars / 4);
+			if (estIn > 0 || estOut > 0) {
+				update.run(estIn, estOut, id);
+				touched++;
+			}
+		}
+
+		if (touched > 0) {
+			console.log(`[Database] K5 回填：${touched} 个会话的 token 用量按 history 估算回填（误差 ±20%，是估算值非真实统计）`);
+		}
+	} catch (e) {
+		console.warn('[Database] K5 回填失败（不影响正常使用）:', (e as Error).message);
 	}
 }

@@ -1385,17 +1385,21 @@ export default function App() {
     const c = await getClient()
 
     // 加载该会话历史的文件变更列表（从 file_snapshots 表）
-    // 注意：当前后端只持久化 path，无 action 信息，统一按 'modified' 显示
+    // 后端 v0.2.12+ 在 details 里返回真实 action（K4），旧版本仅 files 列表则统一按 'modified' fallback
     // 用 currentSessionId 校验防止快速切换会话的竞态
     void (async () => {
       try {
         const r = await c.getChangedFiles(id)
         if (activeSessionId() !== id) return  // 用户已切走，丢弃过期结果
-        if (Array.isArray(r.files) && r.files.length > 0) {
+        const items: Array<{ path: string; action: 'created' | 'modified' | 'deleted' }> =
+          Array.isArray(r.details) && r.details.length > 0
+            ? r.details
+            : (Array.isArray(r.files) ? r.files.map(p => ({ path: p, action: 'modified' as const })) : [])
+        if (items.length > 0) {
           setChangedFiles(prev => {
             const next = new Map(prev)
-            for (const p of r.files) {
-              if (!next.has(p)) next.set(p, { path: p, action: 'modified' })
+            for (const it of items) {
+              if (!next.has(it.path)) next.set(it.path, { path: it.path, action: it.action })
             }
             return next
           })

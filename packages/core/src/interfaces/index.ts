@@ -43,6 +43,16 @@ export type {
 	FileChangeEvent,
 	FileChangeSummary,
 	CompletionEvent,
+	// N1d 新增 9 种
+	ToolApprovalRequestEvent,
+	ToolInputDeltaEvent,
+	ContextCompactingEvent,
+	ContextCompactedEvent,
+	ConvertReasoningToAssistantEvent,
+	FollowupSuggestionsEvent,
+	RateLimitEvent,
+	RateLimitClearedEvent,
+	TaskAbortedEvent,
 } from './IMessageBus.js';
 
 export type { IConfiguration } from './IConfiguration.js';
@@ -56,11 +66,25 @@ export type { ISkillService } from './ISkillService.js';
 export type { IBehaviorReporter } from './IBehaviorReporter.js';
 export { NoopBehaviorReporter } from './IBehaviorReporter.js';
 
+export type { ITenantContext } from './ITenantContext.js';
+export { LocalTenantContext } from './ITenantContext.js';
+
+export type { IClock } from './IClock.js';
+export { SystemClock } from './IClock.js';
+
+export type { ILspService, LspDiagnostic, LspLocation } from './ILspService.js';
+
+export type { IFileWatcher } from './IFileWatcher.js';
+
 /**
  * 平台能力容器 — 所有接口的集合。
- * 使用方（IDE / Desktop）把各自的实现打包传给 Core。
+ * 使用方（IDE / Desktop / Cloud Worker）把各自的实现打包传给 Core。
+ *
+ * 必填字段（7 个）：所有形态必须实现
+ * 可选字段（6 个）：按形态能力提供，core 内部按 truthy 检查使用
  */
 export interface MaxianPlatform {
+	// ── 必填 ─────────────────────────────────────────────
 	fs: import('./IFileSystem.js').IFileSystem;
 	terminal: import('./ITerminal.js').ITerminal;
 	workspace: import('./IWorkspace.js').IWorkspace;
@@ -68,4 +92,18 @@ export interface MaxianPlatform {
 	config: import('./IConfiguration.js').IConfiguration;
 	storage: import('./IStorage.js').IStorage;
 	auth: import('./IAuthProvider.js').IAuthProvider;
+
+	// ── 可选 ─────────────────────────────────────────────
+	/** 外部文件变更监听（stale-overwrite 检测增强可选用） */
+	fileWatcher?: import('./IFileWatcher.js').IFileWatcher;
+	/** Skills 加载（项目级 SKILLS.md 等） */
+	skills?: import('./ISkillService.js').ISkillService;
+	/** 行为埋点上报（生产可空实现 NoopBehaviorReporter） */
+	reporter?: import('./IBehaviorReporter.js').IBehaviorReporter;
+	/** 多租户上下文（云端 worker 必填，本地形态可省 = LocalTenantContext） */
+	tenant?: import('./ITenantContext.js').ITenantContext;
+	/** 可注入时钟（默认 SystemClock，测试 / 回放可注入 FakeClock） */
+	clock?: import('./IClock.js').IClock;
+	/** LSP 能力（IDE 形态特有；Desktop / Web 等无此能力） */
+	lsp?: import('./ILspService.js').ILspService;
 }

@@ -4,6 +4,37 @@
 
 import type { Context, Next } from 'hono';
 
+/** 当前服务端协议版本（与 X-Maxian-Protocol header 对齐） */
+export const SERVER_PROTOCOL_VERSION = 1 as const;
+
+/**
+ * 协议版本中间件 —— 当前阶段（K3）只**记录**客户端协议版本，**不拒绝**。
+ * 未来 protocol 升到 v2 等破坏性改动时，把 logging-only 改为 426 拒绝。
+ *
+ * 客户端约定：每个请求带 header `X-Maxian-Protocol: 1`
+ * 协议变更见 docs/protocol/CHANGELOG.md
+ */
+export function ProtocolMiddleware() {
+	const warnedClients = new Set<string>();
+	return async (c: Context, next: Next) => {
+		const clientProto = c.req.header('x-maxian-protocol');
+		if (clientProto && clientProto !== String(SERVER_PROTOCOL_VERSION)) {
+			// 不一致只警告一次（避免日志刷屏）
+			const key = `${c.req.header('user-agent') ?? 'unknown'}|${clientProto}`;
+			if (!warnedClients.has(key)) {
+				warnedClients.add(key);
+				console.warn(
+					`[Protocol] 客户端协议版本 ${clientProto} 与服务端 ${SERVER_PROTOCOL_VERSION} 不一致 ` +
+					`(UA=${c.req.header('user-agent') ?? 'unknown'}). 当前为 logging-only，未来可能拒绝。`,
+				);
+			}
+		}
+		// 总是把 server 协议版本回给客户端（便于客户端检测漂移）
+		c.header('X-Maxian-Protocol', String(SERVER_PROTOCOL_VERSION));
+		return next();
+	};
+}
+
 /** 认证 Middleware — 基于 Basic Auth，密码由 password 参数控制 */
 export function AuthMiddleware(expectedUser?: string, expectedPass?: string) {
 	return async (c: Context, next: Next) => {
