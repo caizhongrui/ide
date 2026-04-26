@@ -3190,6 +3190,31 @@ OBJECTIVE
 	// Windows 不支持 SIGTERM，但 CommandChild.kill() 会发 SIGBREAK 或直接结束进程
 	// 补加一个 beforeExit 兜底，也能触发端口释放
 	process.on('beforeExit', () => { if (!shuttingDown) void gracefulShutdown('beforeExit'); });
+
+	// O4：Parent-death watcher
+	// Tauri spawn sidecar 时设了 MAXIAN_PARENT_PID + MAXIAN_KILL_ON_PARENT_DEATH=1。
+	// dev 环境用 kill -9 强杀 desktop 主进程时 Tauri CloseRequested handler 不跑、
+	// hard_kill_sidecar 没机会执行 → sidecar 给 init 接管成为僵尸占住 4096 端口。
+	// 解决：sidecar 自己每 3s 探测父进程是否还活，父死了就 graceful shutdown。
+	if (process.env.MAXIAN_KILL_ON_PARENT_DEATH === '1' && process.env.MAXIAN_PARENT_PID) {
+		const parentPid = parseInt(process.env.MAXIAN_PARENT_PID, 10);
+		if (Number.isFinite(parentPid) && parentPid > 0) {
+			console.log(`[Maxian Server] Parent-death watcher 已启用 (parent_pid=${parentPid})`);
+			const watchTimer = setInterval(() => {
+				try {
+					// signal 0 = 不发信号，仅探测进程存在
+					process.kill(parentPid, 0);
+				} catch {
+					// 父进程已不存在 → 自杀（释放端口）
+					console.log(`[Maxian Server] 父进程 ${parentPid} 已退出，sidecar 自动关闭`);
+					clearInterval(watchTimer);
+					if (!shuttingDown) void gracefulShutdown('parent_death');
+				}
+			}, 3000);
+			// 不阻塞进程退出
+			watchTimer.unref?.();
+		}
+	}
 }
 
 main().catch((err) => {

@@ -160,6 +160,22 @@ export class MaxianClient {
 		return this.request('POST', `/sessions/${sessionId}/revert`, { path: filePath });
 	}
 
+	/**
+	 * O3：重算所有会话的 token 用量（按 history 内容估算）。
+	 * @param force true = 不论原值是否为 0，全部重新覆盖；false = 仅对 0 值会话回填
+	 */
+	async recalculateAllSessionTokens(force = false): Promise<{ ok: boolean; touched: number; force: boolean }> {
+		return this.request('POST', '/sessions/recalculate-tokens', { force });
+	}
+
+	/**
+	 * O1：清除会话的工具失败记忆 - 删除 history 里所有 tool_result 错误条目。
+	 * 用于解决"底层修复后 AI 仍按旧错误推理"的问题（如 require is not defined / Binary File 误判）。
+	 */
+	async pruneToolErrors(sessionId: string): Promise<{ ok: boolean; pruned: number; before: number; after: number; error?: string }> {
+		return this.request('POST', `/sessions/${sessionId}/prune-tool-errors`);
+	}
+
 	/** 获取文件变更 diff（原始快照内容 vs 当前磁盘内容） */
 	async getFileDiff(sessionId: string, filePath: string): Promise<{ original: string | null; current: string }> {
 		return this.request('GET', `/sessions/${sessionId}/file-diff?path=${encodeURIComponent(filePath)}`);

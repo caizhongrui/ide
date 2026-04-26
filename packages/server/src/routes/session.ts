@@ -11,7 +11,7 @@ import { z } from 'zod';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SessionManager } from '../sessionManager.js';
-import { getDb } from '../database.js';
+import { getDb, recalculateAllSessionTokens } from '../database.js';
 
 export function SessionRoutes(sessionManager: SessionManager) {
 	const app = new Hono();
@@ -22,6 +22,72 @@ export function SessionRoutes(sessionManager: SessionManager) {
 			sessions: sessionManager.listSessions(),
 		});
 	});
+
+	// O3：管理操作 - 重算所有会话的 token 用量（按 history 估算）
+	app.post(
+		'/sessions/recalculate-tokens',
+		zValidator('json', z.object({
+			force: z.boolean().optional().default(false),
+		})),
+		(c) => {
+			const { force } = c.req.valid('json');
+			const touched = recalculateAllSessionTokens(force);
+			return c.json({ ok: true, touched, force });
+		},
+	);
+
+	// O1：清除会话工具失败记忆 - 删除 history 里所有 tool_result 错误条目
+	// （让 AI 不再被旧的"已修复"工具错误污染推理）
+	app.post(
+		'/sessions/:id/prune-tool-errors',
+		(c) => {
+			const id = c.req.param('id');
+			const db = getDb();
+			try {
+				// history_entries.content 是 JSON 字符串，包含 tool_result + isError 的需删除
+				// 简化：所有含 "is_error":true 或 "isError":true 的 entry 删掉
+				const before = (db.prepare(
+					`SELECT COUNT(*) as n FROM history_entries WHERE session_id = ?`
+				).get(id) as { n: number }).n;
+
+				// 找候选：content 含错误标志
+				const rows = db.prepare(
+					`SELECT id, content FROM history_entries WHERE session_id = ?
+					 AND (content LIKE '%"is_error":true%' OR content LIKE '%"isError":true%'
+					      OR content LIKE '%Error: %' OR content LIKE '%require is not defined%'
+					      OR content LIKE '%Binary File Detected%')`
+				).all(id) as Array<{ id: number; content: string }>;
+
+				const toDel: number[] = [];
+				for (const r of rows) {
+					try {
+						const obj = JSON.parse(r.content);
+						const blocks = Array.isArray(obj?.content) ? obj.content : [];
+						const hasError = blocks.some((b: any) =>
+							b?.is_error === true || b?.isError === true ||
+							(typeof b?.content === 'string' && /Error:|require is not defined|Binary File/.test(b.content)),
+						);
+						if (hasError) toDel.push(r.id);
+					} catch {
+						// JSON 解析失败：保守保留
+					}
+				}
+				if (toDel.length === 0) {
+					return c.json({ ok: true, pruned: 0, before, after: before });
+				}
+				const placeholders = toDel.map(() => '?').join(',');
+				db.prepare(
+					`DELETE FROM history_entries WHERE id IN (${placeholders})`
+				).run(...toDel);
+				const after = (db.prepare(
+					`SELECT COUNT(*) as n FROM history_entries WHERE session_id = ?`
+				).get(id) as { n: number }).n;
+				return c.json({ ok: true, pruned: toDel.length, before, after });
+			} catch (e) {
+				return c.json({ ok: false, error: (e as Error).message }, 500);
+			}
+		},
+	);
 
 	// 创建新会话
 	app.post(

@@ -188,6 +188,49 @@ function initSchema(db: Database.Database): void {
  * 仅对 input_tokens=0 AND output_tokens=0 的 session 跑（幂等）。
  * 估算公式：char count / 4（GPT 系列粗略 token-per-char 比例）
  */
+/**
+ * 对外暴露：手动触发"全量回填会话 token"。
+ * 用户点击设置面板"重新计算所有会话 token 用量"按钮时调用（O3）。
+ *
+ * @param force true = 不论 input/output 是否已有值，全部按 history 重算覆盖；
+ *              false = 仅对 input=0 AND output=0 的会话回填（默认，启动时行为）
+ * @returns 回填的 session 数
+ */
+export function recalculateAllSessionTokens(force = false): number {
+	const db = getDb();
+	const where = force ? '1=1' : 'input_tokens = 0 AND output_tokens = 0';
+	const candidates = db.prepare(
+		`SELECT id FROM sessions WHERE ${where}`
+	).all() as Array<{ id: string }>;
+	if (candidates.length === 0) return 0;
+
+	const update = db.prepare(
+		`UPDATE sessions SET input_tokens = ?, output_tokens = ? WHERE id = ?`
+	);
+	const histStmt = db.prepare(
+		`SELECT content, position FROM history_entries WHERE session_id = ? ORDER BY position ASC`
+	);
+
+	let touched = 0;
+	for (const { id } of candidates) {
+		const rows = histStmt.all(id) as Array<{ content: string; position: number }>;
+		if (rows.length === 0) continue;
+		let inputChars = 0, outputChars = 0;
+		for (const r of rows) {
+			const len = (r.content || '').length;
+			if (r.position % 2 === 0) inputChars += len;
+			else outputChars += len;
+		}
+		const estIn = Math.round(inputChars / 4);
+		const estOut = Math.round(outputChars / 4);
+		if (estIn > 0 || estOut > 0) {
+			update.run(estIn, estOut, id);
+			touched++;
+		}
+	}
+	return touched;
+}
+
 function backfillSessionTokensFromHistory(db: ReturnType<typeof getDb>): void {
 	try {
 		// 找出所有"两个 token 都为 0"的 session（候选回填对象）

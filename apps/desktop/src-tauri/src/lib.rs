@@ -105,6 +105,11 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         return Err("__REUSE_EXISTING__".into());
     }
 
+    // O4：传父进程 PID 给 sidecar，sidecar 自己 watch 父进程死亡然后自杀
+    // 解决 dev 环境用 kill -9 强杀 desktop 主进程时 Tauri CloseRequested handler 不跑、
+    // sidecar 给 init 接管成为僵尸的问题
+    let parent_pid = std::process::id().to_string();
+
     let sidecar = app
         .shell()
         .sidecar("maxian-server")
@@ -115,7 +120,9 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
             "--cors",
             "--username", &user,
             "--password", &pass,
-        ]);
+        ])
+        .env("MAXIAN_PARENT_PID", &parent_pid)
+        .env("MAXIAN_KILL_ON_PARENT_DEATH", "1");
 
     let (mut rx, child) = sidecar
         .spawn()

@@ -5060,6 +5060,55 @@ export default {
           </div>
         </div>
         <div class="settings-group">
+          <div class="settings-group-title">诊断与维护</div>
+          <div class="settings-card">
+            <div class="settings-row">
+              <div class="settings-row-label">
+                <div class="settings-row-name">重新计算所有会话 Token 用量</div>
+                <div class="settings-row-desc">从 history 内容按 char/4 估算回填 sessions 表，修复"会话列表 token 用量为 0"。误差 ±20%。</div>
+              </div>
+              <button
+                class="settings-btn"
+                onClick={async () => {
+                  try {
+                    const c = await getClient()
+                    const r = await c.recalculateAllSessionTokens(true)   // force=true 重算全部
+                    showToast({ message: `Token 重算完成：${r.touched} 个会话已更新`, kind: 'info', duration: 3000 })
+                    await refreshSessions()
+                  } catch (e) {
+                    showToast({ message: `Token 重算失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
+                  }
+                }}
+              >重算 Token</button>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-label">
+                <div class="settings-row-name">清除当前会话的"工具失败记忆"</div>
+                <div class="settings-row-desc">删除当前会话历史里的所有工具错误条目（require is not defined / Binary File / 等），让 AI 不再被旧的"已修复"错误污染推理。</div>
+              </div>
+              <button
+                class="settings-btn"
+                disabled={!activeSessionId()}
+                onClick={async () => {
+                  const sid = activeSessionId()
+                  if (!sid) return
+                  try {
+                    const c = await getClient()
+                    const r = await c.pruneToolErrors(sid)
+                    if (r.ok) {
+                      showToast({ message: `已清除 ${r.pruned} 条错误记忆 (${r.before} → ${r.after} 条历史)`, kind: 'info', duration: 3500 })
+                    } else {
+                      showToast({ message: `清除失败：${r.error}`, kind: 'error', duration: 4000 })
+                    }
+                  } catch (e) {
+                    showToast({ message: `清除失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
+                  }
+                }}
+              >清除错误记忆</button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-group">
           <div class="settings-group-title">更新日志</div>
           <div class="settings-card">
             <For each={CHANGELOG}>
