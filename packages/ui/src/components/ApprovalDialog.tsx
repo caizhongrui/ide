@@ -12,7 +12,6 @@ import type { JSX } from 'solid-js';
 // @ts-expect-error vite ?inline 把 CSS 文件作为字符串导入；类型由 vite-env.d.ts 兜底
 import css from './ApprovalDialog.css?inline';
 import { injectStyleOnce } from './_injectStyle.js';
-injectStyleOnce('maxian-ui-approval-dialog', css as string);
 
 /** 一次审批请求的最小数据集合 */
 export interface ApprovalRequestData {
@@ -79,6 +78,9 @@ export interface ApprovalDialogProps {
 }
 
 export function ApprovalDialog(props: ApprovalDialogProps): JSX.Element {
+	// CSS 延迟注入：在组件首次构造时（document 已就绪）才 injectStyleOnce，
+	// 避免模块 top-level 注入在 vscode workbench bootstrap 早期跑导致 document.head 未就绪。
+	injectStyleOnce('maxian-ui-approval-dialog', css as string);
 	const labels = (): Required<ApprovalLabels> => ({ ...DEFAULT_LABELS, ...(props.labels ?? {}) });
 	const maxParams      = () => props.maxParamsShown ?? 3;
 	const maxParamLen    = () => props.maxParamValueLength ?? 100;
