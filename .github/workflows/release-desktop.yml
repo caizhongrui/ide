@@ -1,0 +1,148 @@
+name: Release Desktop
+
+on:
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:    # 允许从 Actions 页面手动触发（用于测试构建）
+
+permissions:
+  contents: write       # 创建/写 GitHub Release
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: false   # release 构建不要中途打断
+
+jobs:
+  build:
+    name: ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: macos-latest
+            name: "macOS (Apple Silicon)"
+            sidecar: "darwin-arm64"
+            rustTarget: "aarch64-apple-darwin"
+            isMac: true
+          - os: macos-13
+            name: "macOS (Intel)"
+            sidecar: "darwin-x64"
+            rustTarget: "x86_64-apple-darwin"
+            isMac: true
+          - os: windows-latest
+            name: "Windows x64"
+            sidecar: "win32-x64"
+            rustTarget: "x86_64-pc-windows-msvc"
+            isMac: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Bun（sidecar 单文件编译器）────────────────────────
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # ── Node.js + pnpm ────────────────────────────────────
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # ── Rust toolchain ────────────────────────────────────
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rustTarget }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+          key: ${{ matrix.platform.rustTarget }}
+
+      # ── 安装 npm deps ─────────────────────────────────────
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      # ── 先 build workspace 库（core/sdk），server build 依赖 ─
+      - name: Build libs
+        run: pnpm run build:libs
+
+      # ── 编译 maxian-server 单文件 sidecar（指定平台）────────
+      - name: Build sidecar binary
+        working-directory: packages/server
+        run: pnpm run build:bin:${{ matrix.platform.sidecar }}
+
+      # ── 拷贝 sidecar 到 src-tauri/bin/ ────────────────────
+      - name: Sync sidecar
+        working-directory: apps/desktop
+        run: node scripts/sync-sidecar.mjs ${{ matrix.platform.sidecar }}
+
+      # ── Tauri Build（含 beforeBuildCommand: vite build） ───
+      - name: Tauri Build
+        working-directory: apps/desktop
+        run: pnpm tauri build --target ${{ matrix.platform.rustTarget }}
+
+      # ── macOS: 手工 hdiutil 生成 DMG（绕开 create-dmg 中文名 bug） ─
+      - name: Create DMG (macOS only)
+        if: matrix.platform.isMac == true
+        working-directory: apps/desktop
+        env:
+          TAURI_BUILD_TARGET: ${{ matrix.platform.rustTarget }}
+        run: node scripts/make-dmg.mjs
+
+      # ── 列出本平台产物 ─────────────────────────────────────
+      - name: List artifacts
+        shell: bash
+        run: |
+          echo "--- bundle tree (${{ matrix.platform.rustTarget }}) ---"
+          find "apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle" -maxdepth 3 -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.exe" -o -name "*.sig" \) 2>/dev/null || true
+
+      # ── 上传产物到 workflow（手动 dispatch 时可下载验证） ──
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maxian-desktop-${{ matrix.platform.sidecar }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle/msi/*.msi
+
+      # ── tag 触发时上传到 GitHub Release（draft） ───────────
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: "Maxian Desktop ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          body: |
+            ## 📦 下载
+
+            | 平台 | 文件 |
+            |------|------|
+            | macOS (Apple Silicon) | `.dmg` aarch64 |
+            | macOS (Intel) | `.dmg` x64 |
+            | Windows x64 | `.exe` (NSIS installer) |
+
+            ### 安装说明
+            - **macOS**：双击 `.dmg`，把 `码弦Desktop.app` 拖进 Applications。首次启动若提示"未验证的开发者"，右键图标选"打开"。
+            - **Windows**：双击 `.exe` (NSIS setup) 按提示安装。
+
+            全部安装包**无需单独安装 Node.js**（maxian-server 已内嵌为 sidecar）。
+          files: |
+            apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/${{ matrix.platform.rustTarget }}/release/bundle/msi/*.msi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
