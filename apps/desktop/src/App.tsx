@@ -4529,6 +4529,24 @@ export default function App() {
   }
   const CHANGELOG: ChangelogEntry[] = [
     {
+      version: '0.2.12',
+      date: '2026-04-26',
+      changes: [
+        '🧠 设置→关于→诊断与维护：「清除当前会话工具失败记忆」按钮 — 删 history 里所有 tool error 历史条目，让 AI 不再被旧错误污染推理（O1）',
+        '📊 设置→关于→诊断与维护：「重新计算所有会话 Token 用量」按钮 — 从 history 按 char/4 估算回填 sessions 表，修复"会话列表 token 用量为 0"（O3）',
+        '🛡 sidecar 父进程死亡 watcher — Tauri spawn 时传 MAXIAN_PARENT_PID，sidecar 每 3s 探测父进程，父死了自动 graceful shutdown。彻底解决 kill -9 desktop 主进程时 sidecar 残留占住 4096 端口（O4）',
+        '🔧 CI 新增版本一致性校验 — tools/version-check/check.mjs 校验 4 处 desktop 版本字段同步，防 hardcode mismatch（O2）',
+        '📦 Token 进度条 ≥ 80% 显示橙色「📦 压缩上下文」按钮，≥ 90% 升级红色 critical 样式 — 一键 /sessions/:id/compact 释放配额（O5）',
+        '⚠️ 工具失败时显示 ❌ 错误详情面板（之前只有红点）— 默认显示一行摘要，多行错误支持「展开 ▾」max-height 320px（O7）',
+        '🪟 窗口尺寸/位置/最大化状态持久化到 ~/.maxian/desktop-window-state.json，重启后还原（O9）',
+        '🔥 修复：sidecar 报 "require is not defined" 导致所有走 platformFs fallback 的工具全炸 — 改静态 import * as nodeFs from "node:fs"，Bun --compile 二进制兼容',
+        '🔥 修复：read_file 缓存命中分支不写 FileTime → sidecar 重启后 multiedit "必须先 read" 死循环',
+        '🔥 修复：移除 readFileTool 的「目录名误判二进制」逻辑 — 之前 dist/out/build/target 等路径段下的 .vue/.ts 等文本文件被错误判定为 binary 拒读',
+        '🔥 修复：关于面板版本号 hardcode 0.2.10 — vite.config.ts 用 define 注入 __APP_VERSION__，唯一真相源 = package.json',
+        '🏗 K8c 收尾：core 9 个工具入口 fs.*Sync 100% 走 platformFs（含 listDirAsync / readFileTool binary buffer / openSync 等之前保留的内部 helper）— 为 Web/IDEA/Cloud 形态接入彻底铺路',
+      ],
+    },
+    {
       version: '0.2.11',
       date: '2026-04-26',
       changes: [

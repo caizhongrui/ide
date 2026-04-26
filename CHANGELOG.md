@@ -8,6 +8,28 @@
 
 ## Unreleased
 
+### desktop v0.2.12 (2026-04-26)
+
+**新功能**：
+- O1 设置→关于→诊断与维护：「清除当前会话工具失败记忆」按钮 — 删除 history 里所有 tool error 历史条目，让 AI 不再被旧错误污染推理 — `c9019bb`
+- O3 设置→关于→诊断与维护：「重新计算所有会话 Token 用量」按钮 — 从 history 估算回填 sessions 表 — `c9019bb`
+- O4 sidecar 父进程死亡 watcher — 解决 kill -9 desktop 主进程时 sidecar 残留占住 4096 端口 — `c9019bb`
+- O5 Token 进度条 ≥ 80% 显示「📦 压缩上下文」按钮 — `925d430`
+- O7 工具失败显示 ❌ 错误详情面板（之前完全不显示）— 折叠/展开 — `925d430`
+- O9 窗口尺寸/位置/最大化状态持久化到 ~/.maxian/desktop-window-state.json — `925d430`
+
+**Bug 修复**：
+- sidecar "require is not defined" — platformFs 改静态 import node:fs，Bun --compile 兼容 — `bbb1acc`
+- read_file 缓存命中分支不写 FileTime → multiedit 死循环 — `83fc8d4`
+- readFileTool「目录名误判二进制」— dist/out/build 路径下文本文件被拒读 — `861f006`
+- 关于面板版本号 hardcode 0.2.10 — vite.config define 注入 __APP_VERSION__ — `fdb52ef`
+
+**架构 / 工程**：
+- K8c 收尾：core 9 个工具入口 fs.*Sync 100% 走 platformFs（含 listDirAsync / readFileTool binary buffer / openSync 等）— `fa8d8d0`
+- O2 CI 版本一致性校验脚本 tools/version-check/check.mjs — `925d430`
+- file_snapshots 加 action 列 + 切换会话拉取 — 已在 `7902633`
+- K5 历史 token 估算回填 — 已在 `7902633`
+
 ### desktop v0.2.11 (2026-04-26)
 - 修复任务清单卡 X/Y 永不完成（AI 提前结束未收尾 todos） — `2c22d25`
   - 后端 HARD RULES 加第 8 条：attempt_completion 前必须收尾 todos
