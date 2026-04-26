@@ -13,6 +13,7 @@
  *  仍可在工具里直接 import 'node:fs'，但应尽量收敛到此处。
  *--------------------------------------------------------------------------------------------*/
 
+import * as nodeFs from 'node:fs';   // Node / Bun 都原生支持；Web 形态用此 helper 时需自行 alias 屏蔽
 import type { IToolContext } from './IToolContext.js';
 import type { FileStat, BufferEncoding } from '../interfaces/IFileSystem.js';
 
@@ -27,16 +28,11 @@ export interface ToolFs {
 	unlinkSync(path: string): void;
 }
 
-let _nodeFsCache: typeof import('node:fs') | null = null;
-
-/** 懒加载 node:fs（避免顶部 import 让本文件污染纯浏览器 bundle 分析） */
+/** 静态返回 node:fs。修复历史：之前用 new Function('return require()')() 在 Bun --compile
+ *  二进制里报 "require is not defined"，因为 Bun 是 ESM-only。改静态 import 可同时被
+ *  Node / Bun / Tauri sidecar 正确解析；Web 形态用此 helper 时需自行 vite alias 屏蔽 node:fs。 */
 function getNodeFs(): typeof import('node:fs') {
-	if (!_nodeFsCache) {
-		// 用动态 require 防止 Web bundler 静态打包 node:fs
-		// eslint-disable-next-line @typescript-eslint/no-require-imports
-		_nodeFsCache = (new Function('m', 'return require(m)'))('node:fs');
-	}
-	return _nodeFsCache!;
+	return nodeFs;
 }
 
 /**
