@@ -14,8 +14,9 @@
  *  详见 docs/architecture/platform-contract.md § 5.1
  *--------------------------------------------------------------------------------------------*/
 
-import type { MaxianPlatform, IFileSystem, ITerminal, IWorkspace, IMessageBus, IConfiguration, IStorage, IAuthProvider, IClock, IFileWatcher, ISkillService, IBehaviorReporter, ITenantContext, ILspService } from '../interfaces/index.js';
+import type { MaxianPlatform, IFileSystem, ITerminal, IWorkspace, IMessageBus, IConfiguration, IStorage, IAuthProvider, IClock, IFileWatcher, ISkillService, IBehaviorReporter, ITenantContext, ILspService, ISearchService } from '../interfaces/index.js';
 import { LocalTenantContext, SystemClock, NoopBehaviorReporter } from '../interfaces/index.js';
+import { NodeSearchService } from './NodeSearchService.js';
 
 /**
  * 创建 Node.js 平台 MaxianPlatform 装配选项。
@@ -44,6 +45,8 @@ export interface NodePlatformOptions {
 	tenant?: ITenantContext;
 	clock?: IClock;
 	lsp?: ILspService;
+	/** 搜索服务（默认 NodeSearchService — 系统 rg / fallback JS walk） */
+	search?: ISearchService;
 }
 
 /**
@@ -88,6 +91,8 @@ export function createNodePlatform(opts: NodePlatformOptions): MaxianPlatform {
 		tenant: opts.tenant ?? new LocalTenantContext(sandboxRoot),
 		clock: opts.clock ?? new SystemClock(),
 		lsp: opts.lsp,
+		// T-1：默认注入 NodeSearchService（系统 rg → JS walk fallback），让 ctx.platform.search 永远存在
+		search: opts.search ?? new NodeSearchService(sandboxRoot),
 	};
 }
 

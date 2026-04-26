@@ -15,6 +15,20 @@ export type { IFileWatcher, FileWatchEvent, FileWatchHandler, WatchOptions } fro
 // ─── 平台适配器（K7 N1b） ────────────────────────────────
 export { createNodePlatform, type NodePlatformOptions } from './adapters/NodePlatform.js';
 
+// ─── K9-4 / T-1：IDE 直接调用的工具精选导出 ─────────────────
+// IDE tsconfig moduleResolution=node 不支持 conditional exports subpath，故顶层 re-export
+export {
+	listFilesTool,
+	globTool,
+	formatGlobResult,
+	searchFilesViaService,
+	platformFs,
+} from './tools/index.js';
+export type {
+	IToolContext,
+	IFileContextTracker,
+} from './tools/IToolContext.js';
+
 // ─── 共享类型 ────────────────────────────────────────────
 export * from './types/index.js';
 export { CancellationTokenSource, Emitter } from './types/cancellation.js';
