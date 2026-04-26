@@ -5,9 +5,10 @@
  *  目录列表（含文件类型/大小/修改时间），比 list_files 更细。
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';
+import * as fs from 'node:fs';   // 仅用作 fs.Stats / fs.Dirent 类型，运行时调用走 platformFs(ctx)
 import * as path from 'node:path';
 import type { IToolContext } from './IToolContext.js';
+import { platformFs, type ToolFs } from './platformFs.js';
 
 export interface ILsToolParams {
 	/** 目标目录（相对或绝对，默认 "."） */
@@ -32,37 +33,32 @@ export interface ILsToolResult {
 	error?:  string;
 }
 
-function toType(stat: fs.Stats): ILsEntry['type'] {
-	if (stat.isSymbolicLink()) return 'symlink';
-	if (stat.isDirectory()) return 'directory';
-	if (stat.isFile()) return 'file';
-	return 'other';
-}
-
-function listDir(root: string, rel: string, showHidden: boolean, recursive: boolean, depth: number, out: ILsEntry[]): void {
+function listDir(pf: ToolFs, root: string, rel: string, showHidden: boolean, recursive: boolean, depth: number, out: ILsEntry[]): void {
 	if (depth > 5 || out.length > 1000) return;
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(path.join(root, rel), { withFileTypes: true });
+		// platform.fs.readdirSync 接口未必返回 Dirent[]，但 NodeFs fallback 确实返回 Dirent[]
+		entries = pf.readdirSync(path.join(root, rel), { withFileTypes: true }) as fs.Dirent[];
 	} catch { return; }
 
 	for (const entry of entries) {
 		if (!showHidden && entry.name.startsWith('.')) continue;
 		const full = path.join(root, rel, entry.name);
-		let stat: fs.Stats;
-		try { stat = fs.lstatSync(full); } catch { continue; }
+		// 使用 platform.fs.statSync（lstatSync 暂未抽象，沿用原行为：用 statSync 统一处理）
+		let st;
+		try { st = pf.statSync(full); } catch { continue; }
 
 		const item: ILsEntry = {
 			name:  entry.name,
-			type:  toType(stat),
-			size:  stat.size,
-			mtime: stat.mtimeMs,
+			type:  st.isSymbolicLink ? 'symlink' : st.isDirectory ? 'directory' : st.isFile ? 'file' : 'other',
+			size:  st.size,
+			mtime: st.mtime,
 			path:  path.join(rel, entry.name),
 		};
 		out.push(item);
 
 		if (recursive && entry.isDirectory() && !entry.name.startsWith('.')) {
-			listDir(root, path.join(rel, entry.name), showHidden, recursive, depth + 1, out);
+			listDir(pf, root, path.join(rel, entry.name), showHidden, recursive, depth + 1, out);
 		}
 	}
 }
@@ -71,23 +67,24 @@ export async function lsTool(
 	ctx:    IToolContext,
 	params: ILsToolParams,
 ): Promise<ILsToolResult> {
+	const pf = platformFs(ctx);
 	const relPath = params.path ?? '.';
 	const absPath = path.isAbsolute(relPath) ? relPath : path.resolve(ctx.workspacePath, relPath);
 
-	if (!fs.existsSync(absPath)) {
+	if (!pf.existsSync(absPath)) {
 		return { dir: absPath, entries: [], error: `路径不存在: ${absPath}` };
 	}
 
-	let stat: fs.Stats;
-	try { stat = fs.statSync(absPath); } catch (e) {
+	let st;
+	try { st = pf.statSync(absPath); } catch (e) {
 		return { dir: absPath, entries: [], error: (e as Error).message };
 	}
-	if (!stat.isDirectory()) {
+	if (!st.isDirectory) {
 		return { dir: absPath, entries: [], error: '不是目录' };
 	}
 
 	const entries: ILsEntry[] = [];
-	listDir(absPath, '', params.showHidden ?? false, params.recursive ?? false, 0, entries);
+	listDir(pf, absPath, '', params.showHidden ?? false, params.recursive ?? false, 0, entries);
 
 	// 目录优先 + 字母序
 	entries.sort((a, b) => {

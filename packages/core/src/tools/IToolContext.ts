@@ -41,6 +41,18 @@ export interface IToolContext {
 
 	/** 当前任务 ID（可选） */
 	readonly taskId?: string;
+
+	/**
+	 * 平台能力容器（K8 N1 起可选注入）。
+	 *
+	 * - 当上层 server 装配并传入时，工具内的 fs / terminal 会优先走 ctx.platform.*；
+	 * - 未传时（向后兼容）工具自动降级到内置 node:fs；
+	 * - Web / IDEA 等无 sync fs 的形态后续可注入只实现 async 方法的 platform，
+	 *   届时 tools 也需异步化（独立子任务）。
+	 *
+	 * 详见 docs/architecture/platform-contract.md
+	 */
+	readonly platform?: import('../interfaces/index.js').MaxianPlatform;
 }
 
 /**

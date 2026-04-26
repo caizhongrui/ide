@@ -80,7 +80,33 @@ export interface IFileSystem {
 	 * 实现方可以在此加入工作区感知逻辑。
 	 */
 	resolvePath(path: string): string;
+
+	// ── 可选的同步方法（K8 N1）────────────────────────────────────
+	// 用途：让 core/tools 在 Node 形态下不必把整条调用链 async 化。
+	// Web / IDEA 等无原生同步 fs 的形态可以**不实现**这些方法，
+	// 工具内 platformFs helper 会自动降级到内置 fs（理想状态是工具
+	// 后续异步化后即便 fallback 也不再需要，作为下一阶段独立任务）。
+
+	/** 同步读文本文件（可选） */
+	readFileSync?(path: string, encoding?: BufferEncoding): string;
+	/** 同步写文本文件（可选） */
+	writeFileSync?(path: string, content: string, encoding?: BufferEncoding): void;
+	/** 同步判断路径是否存在（可选） */
+	existsSync?(path: string): boolean;
+	/** 同步获取文件元信息（可选） */
+	statSync?(path: string): FileStat;
+	/** 同步创建目录（可选；recursive 默认 true） */
+	mkdirSync?(path: string, opts?: { recursive?: boolean }): void;
+	/** 同步列目录条目（可选） */
+	readdirSync?(path: string, opts?: { withFileTypes?: boolean }): string[] | FileEntry[];
+	/** 同步删除文件（可选） */
+	unlinkSync?(path: string): void;
 }
+
+/** Node.js BufferEncoding 类型镜像（core 不依赖 @types/node） */
+export type BufferEncoding =
+	| 'ascii' | 'utf8' | 'utf-8' | 'utf16le' | 'ucs2' | 'ucs-2'
+	| 'base64' | 'base64url' | 'latin1' | 'binary' | 'hex';
 
 export interface FileStat {
 	/** 最后修改时间（毫秒时间戳） */

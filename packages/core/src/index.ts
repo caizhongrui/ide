@@ -12,6 +12,9 @@
 export * from './interfaces/index.js';
 export type { IFileWatcher, FileWatchEvent, FileWatchHandler, WatchOptions } from './interfaces/IFileWatcher.js';
 
+// ─── 平台适配器（K7 N1b） ────────────────────────────────
+export { createNodePlatform, type NodePlatformOptions } from './adapters/NodePlatform.js';
+
 // ─── 共享类型 ────────────────────────────────────────────
 export * from './types/index.js';
 export { CancellationTokenSource, Emitter } from './types/cancellation.js';
