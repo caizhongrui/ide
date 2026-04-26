@@ -45,7 +45,7 @@
 	50% { opacity: 0; }
 }
 
-/* ── 思考块：折叠淡灰 ── */
+/* ── 思考块：流式中无高度限制；完成后默认折叠，可点击展开 ── */
 .mu-reasoning {
 	background:    var(--maxian-bg-muted, rgba(255, 255, 255, 0.04));
 	border-left:   3px solid var(--maxian-accent, #6366f1);
@@ -54,20 +54,33 @@
 	margin:        4px 0;
 }
 .mu-reasoning-head {
-	display:    flex;
-	align-items: center;
-	gap:        6px;
-	font-size:  12px;
-	color:      var(--maxian-text-muted, #999);
-	margin-bottom: 4px;
+	display:        flex;
+	align-items:    center;
+	gap:            6px;
+	font-size:      12px;
+	color:          var(--maxian-text-muted, #999);
+	margin-bottom:  4px;
+	user-select:    none;
 }
 .mu-reasoning-icon { font-size: 14px; }
+.mu-reasoning-title { flex: 1; }
+.mu-reasoning-toggle {
+	font-size: 10px;
+	color:     var(--maxian-text-muted, #999);
+	transition: transform 0.15s;
+}
+.mu-reasoning-done .mu-reasoning-head:hover {
+	color: var(--maxian-text-base, #e6e6e6);
+}
+
 .mu-reasoning-body {
-	white-space: pre-wrap;
-	color:       var(--maxian-text-muted, #888);
-	font-size:   12.5px;
-	max-height:  120px;
-	overflow-y:  auto;
+	color:     var(--maxian-text-muted, #888);
+	font-size: 12.5px;
+	/* 流式中：无最大高度限制（不影响往下滚动） */
+	/* 完成后展开：保留同样无限制行为 */
+}
+.mu-reasoning-body :where(p, ul, ol, h1, h2, h3) {
+	margin: 4px 0;
 }
 
 /* ── 错误消息：红框 ── */
@@ -91,3 +104,56 @@
 	font-style: italic;
 	padding:   2px 0;
 }
+
+/* ── 任务完成横条 ── */
+.mu-task-done {
+	display:       flex;
+	align-items:   center;
+	gap:           10px;
+	background:    linear-gradient(90deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.08) 100%);
+	border:        1px solid rgba(16, 185, 129, 0.4);
+	border-radius: 8px;
+	padding:       10px 14px;
+	margin:        8px 0;
+	color:         #10b981;
+	font-weight:   600;
+	font-size:     13px;
+}
+.mu-task-done-icon {
+	display:         inline-flex;
+	align-items:     center;
+	justify-content: center;
+	width:           22px;
+	height:          22px;
+	border-radius:   50%;
+	background:      #10b981;
+	color:           #fff;
+	font-size:       13px;
+	font-weight:     800;
+}
+.mu-task-done-text { flex: 1; }
+
+/* ── 极简 markdown 元素 ── */
+.mu-h1 { font-size: 17px; font-weight: 700; margin: 8px 0 4px; }
+.mu-h2 { font-size: 15px; font-weight: 700; margin: 6px 0 4px; }
+.mu-h3 { font-size: 14px; font-weight: 600; margin: 4px 0 2px; }
+.mu-ul, .mu-ol { padding-left: 22px; margin: 4px 0; }
+.mu-ul li, .mu-ol li { margin: 2px 0; }
+.mu-inline-code {
+	font-family:    var(--maxian-font-mono, ui-monospace, Menlo, Consolas, monospace);
+	font-size:      90%;
+	background:     var(--maxian-bg-muted, rgba(255, 255, 255, 0.08));
+	padding:        1px 5px;
+	border-radius:  3px;
+	color:          var(--maxian-accent, #fef9c3);
+}
+.mu-code {
+	background:    var(--maxian-bg-muted, #1f1f1f);
+	padding:       8px 10px;
+	border-radius: 6px;
+	overflow-x:    auto;
+	font-family:   var(--maxian-font-mono, ui-monospace, Menlo, Consolas, monospace);
+	font-size:     12px;
+	margin:        6px 0;
+}
+.mu-msg a { color: var(--maxian-accent, #6366f1); text-decoration: underline; }

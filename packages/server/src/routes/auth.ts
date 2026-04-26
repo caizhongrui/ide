@@ -33,7 +33,8 @@ export function AuthRoutes(setAiConfig: SetAiConfigFn, getAiConfig: () => AiRunt
 		if (!apiUrl || !username || !password) {
 			return c.json({ error: 'Missing required fields: apiUrl, username, password' }, 400);
 		}
-		setAiConfig({ apiUrl, username, password });
+		// 必须显式声明 type='proxy'，否则 pushAiCallLog 等下游会因 cfg.type !== 'proxy' 跳过
+		setAiConfig({ type: 'proxy', apiUrl, username, password } as any);
 		console.log('[Maxian Server] AI 代理已配置:', apiUrl);
 		return c.json({ ok: true });
 	});

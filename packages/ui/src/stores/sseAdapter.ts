@@ -46,16 +46,21 @@ export function createSseDispatcher(store: MessagesStoreApi): SseDispatcher {
 	const ctx: SseDispatchContext = { lastWasReasoning: false };
 
 	return function dispatch(event: SseEvent): void {
-		const isReasoning   = event.type === 'reasoning' || event.type === 'reasoning_delta';
-		const isPassThrough =
-			event.type === 'token_usage' ||
-			event.type === 'heartbeat' ||
-			event.type === 'tool_input_delta';
+		const isReasoning = event.type === 'reasoning' || event.type === 'reasoning_delta';
 
-		// 多轮 LLM 调用气泡分组：上次是 reasoning + 本次是非 reasoning 非 passthrough → 上一条 reasoning 收尾
-		const isGroupBoundary = !isReasoning && !isPassThrough;
-		if (ctx.lastWasReasoning && isGroupBoundary) {
-			store.patchLast({ isPartial: false });
+		// 思考气泡分组：以"AI 实际行动"为边界 → 工具开始 / 助手文本回复 / 任务完成。
+		// 中间的 token_usage / heartbeat / tool_input_delta / tool_call_result 等都不切。
+		// 这样：
+		//   reasoning... → tool_call_start  →  原 reasoning 收尾，下次 reasoning 新建气泡
+		//   reasoning... → assistant_message →  同上
+		//   reasoning... → tool_input_delta  →  不收尾（同一轮思考还在继续）
+		const finalizesReasoning =
+			event.type === 'tool_call_start' ||
+			event.type === 'assistant_message' ||
+			event.type === 'completion' ||
+			(event.type === 'task_status' && event['status'] === 'completed');
+		if (ctx.lastWasReasoning && finalizesReasoning) {
+			finalizeLastReasoning(store);
 			ctx.lastWasReasoning = false;
 		}
 
@@ -80,6 +85,23 @@ export function createSseDispatcher(store: MessagesStoreApi): SseDispatcher {
 				const toolName  = String(event['toolName']  ?? 'unknown');
 				if (!toolUseId) break;
 				const toolParams = (event['toolParams'] ?? event['input'] ?? {}) as Record<string, unknown>;
+
+				// attempt_completion 是 AI 任务的"最终结论" — result 参数本身就是给用户看的总结文本，
+				// 不应该藏在工具卡片折叠面板里。这里把它直接渲染为 assistant 消息。
+				if (toolName === 'attempt_completion') {
+					const summary = String(toolParams['result'] ?? '').trim();
+					if (summary) {
+						store.append({
+							id:        `completion-${toolUseId}`,
+							role:      'assistant',
+							content:   summary,
+							createdAt: Date.now(),
+							isPartial: false,
+						});
+					}
+					break;
+				}
+
 				store.upsertTool(toolUseId, {
 					toolName, toolId: toolUseId, toolParams,
 					content: '',
@@ -119,6 +141,17 @@ export function createSseDispatcher(store: MessagesStoreApi): SseDispatcher {
 				if (event.type === 'task_status' && event['status'] !== 'completed') break;
 				store.finalizeStreaming();
 				ctx.lastWasReasoning = false;
+				// 末尾追加一条 system 消息作为"任务完成"标记（不抢 AI 的 attempt_completion 总结）
+				const list = store.messages();
+				const last = list[list.length - 1];
+				if (!last || last.role !== 'system' || !String(last.content).startsWith('✅')) {
+					store.append({
+						id:        `task-done-${Date.now()}`,
+						role:      'system',
+						content:   '✅ 任务完成',
+						createdAt: Date.now(),
+					});
+				}
 				break;
 			}
 			case 'error': {
@@ -142,25 +175,35 @@ export function createSseDispatcher(store: MessagesStoreApi): SseDispatcher {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 把 reasoning delta 续到末尾的 reasoning 消息；若末尾不是 reasoning（或非 partial），新建一条
+ * 把 reasoning delta 续到末尾仍 isPartial 的 reasoning 消息；
+ * 若末尾不是 reasoning（或已 finalize），新建一条。
  */
 function appendOrExtendReasoning(store: MessagesStoreApi, delta: string): void {
 	const list = store.messages();
 	const last = list[list.length - 1];
 	if (last && last.role === 'reasoning' && last.isPartial) {
-		store.patchLast({
+		store.patchById(last.id, {
 			content:   last.content + delta,
 			charCount: (last.charCount ?? 0) + delta.length,
 		});
-	} else {
-		store.append({
-			id:        `reasoning-${Date.now()}`,
-			role:      'reasoning',
-			content:   delta,
-			createdAt: Date.now(),
-			isPartial: true,
-			charCount: delta.length,
-		});
+		return;
+	}
+	store.append({
+		id:        `reasoning-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+		role:      'reasoning',
+		content:   delta,
+		createdAt: Date.now(),
+		isPartial: true,
+		charCount: delta.length,
+	});
+}
+
+/** 把末尾的 reasoning 标记为完成（如果它还 isPartial） */
+function finalizeLastReasoning(store: MessagesStoreApi): void {
+	const list = store.messages();
+	const last = list[list.length - 1];
+	if (last && last.role === 'reasoning' && last.isPartial) {
+		store.patchById(last.id, { isPartial: false });
 	}
 }
 

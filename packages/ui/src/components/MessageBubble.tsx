@@ -8,10 +8,11 @@
  *  自定义渲染（@maxian/ui 不内置 markdown 库以保持轻量）。
  *--------------------------------------------------------------------------------------------*/
 
-import { Show } from 'solid-js';
+import { Show, createSignal, createEffect } from 'solid-js';
 import type { JSX } from 'solid-js';
 import type { ChatMessage } from '../stores/messagesStore.js';
 import { ToolCallCard, type ToolRenderRegistry } from './ToolCallCard.js';
+import { renderLightMarkdown } from './lightMarkdown.js';
 // @ts-expect-error vite ?inline → string
 import css from './MessageBubble.css?inline';
 import { injectStyleOnce } from './_injectStyle.js';
@@ -30,34 +31,74 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 	injectStyleOnce('maxian-ui-message-bubble', css as string);
 
 	const m = () => props.message;
-	const renderContent = (text: string): JSX.Element | string =>
-		props.renderContent ? props.renderContent(text) : text;
+	/** 优先用 consumer 提供的渲染（如 marked + DOMPurify），否则用内置 lightMarkdown */
+	const renderRichContent = (text: string): JSX.Element => {
+		if (props.renderContent) {
+			return props.renderContent(text) as unknown as JSX.Element;
+		}
+		// 内置极简 markdown（已 escape XSS 安全）
+		return (<div innerHTML={renderLightMarkdown(text)} />) as unknown as JSX.Element;
+	};
 
 	return (
 		<Show when={m()}>
 			{(msg) => {
 				const role = () => msg().role;
+				// 思考气泡折叠态：流式中始终展开；完成 → 自动折叠一次；之后用户可手动展开/折叠
+				const [reasoningOpen, setReasoningOpen] = createSignal(true);
+				const [autoCollapsed, setAutoCollapsed] = createSignal(false);
+				createEffect(() => {
+					// isPartial → false 的瞬间执行一次自动折叠
+					if (!m().isPartial && m().role === 'reasoning' && !autoCollapsed()) {
+						setReasoningOpen(false);
+						setAutoCollapsed(true);
+					}
+				});
 				return (
 					<div class={`mu-msg mu-msg-${role()}`} data-msg-id={msg().id}>
 						<Show when={role() === 'user'}>
-							<div class="mu-msg-content">{renderContent(msg().content)}</div>
+							<div class="mu-msg-content">{msg().content}</div>
 						</Show>
 
 						<Show when={role() === 'assistant'}>
-							<div class="mu-msg-content">{renderContent(msg().content)}</div>
+							<div class="mu-msg-content">{renderRichContent(msg().content)}</div>
 							<Show when={msg().isPartial}>
 								<span class="mu-typing">▍</span>
 							</Show>
 						</Show>
 
 						<Show when={role() === 'reasoning'}>
-							<div class="mu-reasoning">
-								<div class="mu-reasoning-head">
-									<span class="mu-reasoning-icon">💭</span>
-									<span>思考中{msg().charCount ? ` (${msg().charCount} 字)` : ''}</span>
-								</div>
-								<div class="mu-reasoning-body">{msg().content}</div>
-							</div>
+							{(() => {
+								// 一旦完成 → 默认折叠；首次完成才折叠（用户手动展开后保持）
+								const isDone   = !msg().isPartial;
+								const expanded = (): boolean => msg().isPartial ? true : reasoningOpen();
+								return (
+									<div class="mu-reasoning" classList={{ 'mu-reasoning-done': isDone }}>
+										<div
+											class="mu-reasoning-head"
+											onClick={() => isDone && setReasoningOpen(o => !o)}
+											style={{ cursor: isDone ? 'pointer' : 'default' }}
+										>
+											<span class="mu-reasoning-icon">💭</span>
+											<span class="mu-reasoning-title">
+												{msg().isPartial ? '思考中' : '思考完成'}
+												{msg().charCount ? ` (${msg().charCount} 字)` : ''}
+											</span>
+											<Show when={isDone}>
+												<span class="mu-reasoning-toggle">{expanded() ? '▲' : '▼'}</span>
+											</Show>
+										</div>
+										<Show when={expanded()}>
+											<div
+												class="mu-reasoning-body"
+												classList={{ 'mu-reasoning-body-streaming': !!msg().isPartial }}
+											>
+												{renderRichContent(msg().content)}
+											</div>
+										</Show>
+									</div>
+								);
+							})()}
 						</Show>
 
 						<Show when={role() === 'error'}>
@@ -68,7 +109,18 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 						</Show>
 
 						<Show when={role() === 'system'}>
-							<div class="mu-system">{msg().content}</div>
+							{(() => {
+								const isTaskDone = msg().content.startsWith('✅ 任务完成');
+								if (isTaskDone) {
+									return (
+										<div class="mu-task-done">
+											<span class="mu-task-done-icon">✓</span>
+											<span class="mu-task-done-text">任务完成</span>
+										</div>
+									);
+								}
+								return <div class="mu-system">{msg().content}</div>;
+							})()}
 						</Show>
 
 						<Show when={role() === 'tool'}>

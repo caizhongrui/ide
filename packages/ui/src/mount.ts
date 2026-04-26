@@ -50,22 +50,41 @@ function ensureTrustedHtmlPatch(): void {
 		return;
 	}
 
-	const proto = HTMLTemplateElement.prototype;
-	const desc  = Object.getOwnPropertyDescriptor(proto, 'innerHTML')
-		?? Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
-	if (!desc?.set) return;
-	const origSet = desc.set;
+	// 同时 patch 两条原型链上的 innerHTML setter：
+	//  1. HTMLTemplateElement.prototype — Solid 编译产物 template().innerHTML = html 走这条
+	//  2. Element.prototype             — JSX 里 <div innerHTML={...}> 走这条（lightMarkdown 渲染依赖）
+	// passthrough policy 不放宽任何已有 sanitizer 的工作，仅让我们自己已 escapeHtml 的输出能落入 DOM。
+	const elementDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+	if (elementDesc?.set) {
+		const origSet = elementDesc.set;
+		Object.defineProperty(Element.prototype, 'innerHTML', {
+			...elementDesc,
+			set(value: unknown) {
+				if (typeof value === 'string') {
+					origSet.call(this, policy.createHTML(value));
+				} else {
+					origSet.call(this, value);
+				}
+			},
+		});
+	}
 
-	Object.defineProperty(proto, 'innerHTML', {
-		...desc,
-		set(value: unknown) {
-			if (typeof value === 'string') {
-				origSet.call(this, policy.createHTML(value));
-			} else {
-				origSet.call(this, value);
-			}
-		},
-	});
+	// HTMLTemplateElement 单独可能有自己的 setter overload（部分浏览器版本）
+	const tplProto = HTMLTemplateElement.prototype;
+	const tplDesc  = Object.getOwnPropertyDescriptor(tplProto, 'innerHTML');
+	if (tplDesc?.set && tplDesc.set !== elementDesc?.set) {
+		const origTplSet = tplDesc.set;
+		Object.defineProperty(tplProto, 'innerHTML', {
+			...tplDesc,
+			set(value: unknown) {
+				if (typeof value === 'string') {
+					origTplSet.call(this, policy.createHTML(value));
+				} else {
+					origTplSet.call(this, value);
+				}
+			},
+		});
+	}
 }
 
 /**
