@@ -27,13 +27,51 @@
 	word-break:    break-word;
 }
 
-/* ── 助手消息：左侧无气泡，全宽 ── */
+/* ── 时间戳（user / assistant 共享） ── */
+.mu-msg-time {
+	display:      inline-block;
+	margin-left:  8px;
+	font-size:    11px;
+	color:        var(--maxian-text-muted, #999);
+	user-select:  none;
+	vertical-align: baseline;
+	opacity:      0.7;
+}
+
+/* ── 助手消息：左侧气泡 ── */
 .mu-msg-assistant {
-	padding: 4px 0;
+	display: flex;
+	justify-content: flex-start;
 }
 .mu-msg-assistant .mu-msg-content {
-	white-space: pre-wrap;
-	word-break:  break-word;
+	background:    var(--maxian-bg-assistant-bubble, var(--maxian-bg-subtle, #2a2a2a));
+	border:        1px solid var(--maxian-border, #3a3a3a);
+	border-radius: 10px;
+	padding:       8px 12px;
+	max-width:     90%;
+	word-break:    break-word;
+}
+/* renderContent 输出的是 markdown HTML（含 <p><h><ul> 等），不要再 pre-wrap，
+   否则段落 margin + 原始换行 \n 双重生效，行距翻倍。raw text 才需要 pre-wrap。 */
+.mu-msg-content-rich {
+	white-space: normal;
+}
+/* 控制 markdown 输出的内部段落紧凑度，与气泡 padding 协调 */
+.mu-msg-content-rich :where(p) {
+	margin: 0;
+	line-height: 1.55;
+}
+.mu-msg-content-rich :where(p + p) {
+	margin-top: 6px;
+}
+.mu-msg-content-rich :where(ul, ol) {
+	margin: 4px 0;
+}
+.mu-msg-content-rich :where(h1, h2, h3) {
+	margin: 8px 0 4px;
+}
+.mu-msg-content-rich :where(pre) {
+	margin: 6px 0;
 }
 .mu-typing {
 	display:    inline-block;

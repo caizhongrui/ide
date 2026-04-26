@@ -12,7 +12,12 @@ import {
   type SavedCredentials, type UserInfo,
 } from "./api"
 import { initI18n, t, setLocale, getLocale } from "./i18n"
-import { ApprovalDialog as SharedApprovalDialog } from "@maxian/ui"
+import {
+  ApprovalDialog as SharedApprovalDialog,
+  MessageList as SharedMessageList,
+  createMessagesStore,
+  type ChatMessage as SharedChatMessage,
+} from "@maxian/ui"
 
 /** 等待工具审批时的状态 */
 interface ApprovalRequest {
@@ -716,36 +721,19 @@ export default function App() {
   const [inChatSearchQuery, setInChatSearchQuery] = createSignal('')
   const [inChatSearchIdx, setInChatSearchIdx] = createSignal(0)
   let inChatSearchInputRef: HTMLInputElement | undefined
-  /** 当前所有命中消息的 idx（在 viewGroups 中的索引） */
+  /** 当前所有命中消息的 idx（在 messages 数组中的索引） */
   const inChatSearchHits = createMemo((): number[] => {
     const q = inChatSearchQuery().trim().toLowerCase()
     if (!q || !showInChatSearch()) return []
     const hits: number[] = []
-    const groups = viewGroups()
-    for (let i = 0; i < groups.length; i++) {
-      const vg = groups[i]
-      const text = extractVgText(vg).toLowerCase()
-      if (text.includes(q)) hits.push(i)
+    const list = messages()
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i]
+      const text = (m.content ?? '') + ' ' + (m.toolName ?? '') + ' ' + (m.toolResult ?? '')
+      if (text.toLowerCase().includes(q)) hits.push(i)
     }
     return hits
   })
-  /** 把一个 ViewGroup 压成可搜文本 */
-  function extractVgText(vg: ViewGroup): string {
-    try {
-      if (vg.kind === 'msg') {
-        return (vg.data as any)?.content ?? ''
-      }
-      if (vg.kind === 'tool-batch') {
-        return (vg.tools ?? []).map((t: any) => {
-          const name = t?.toolName ?? ''
-          const input = t?.toolInput ? (typeof t.toolInput === 'string' ? t.toolInput : JSON.stringify(t.toolInput)) : ''
-          const out = t?.content ?? ''
-          return `${name} ${input} ${out}`
-        }).join('\n')
-      }
-    } catch {}
-    return ''
-  }
   function openInChatSearch() {
     setShowInChatSearch(true)
     setInChatSearchIdx(0)
@@ -866,6 +854,31 @@ export default function App() {
   const [sessionSearch, setSessionSearch] = createSignal('')
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null)
   const [messages, setMessages] = createSignal<ChatMessage[]>([])
+  // ─── @maxian/ui 共享 store 镜像 ─────────────────────────────────────────────
+  // desktop 现有 messages signal 是真相源；这里做"单向镜像"到共享 store，
+  // 让未来共享 MessageList / 三端共用代码可以无缝消费。镜像只读不写回。
+  const sharedMessagesStore = createMessagesStore()
+  createEffect(() => {
+    const local = messages()
+    // 把 desktop ChatMessage shape 适配成 @maxian/ui SharedChatMessage shape
+    const shared: SharedChatMessage[] = local.map((m): SharedChatMessage => ({
+      id:          String(m.id),
+      role:        m.role === 'system' || m.role === 'tool' || m.role === 'reasoning' || m.role === 'error' || m.role === 'assistant' || m.role === 'user'
+        ? m.role
+        : 'system',
+      content:     m.content ?? '',
+      createdAt:   m.createdAt ?? Date.now(),
+      isPartial:   m.isPartial,
+      toolName:    m.toolName,
+      toolId:      m.toolUseId,
+      toolParams:  m.toolParams,
+      toolResult:  m.toolResult,
+      toolSuccess: m.toolSuccess,
+      liveOutput:  m.liveOutput,
+      charCount:   m.charCount,
+    }))
+    sharedMessagesStore.setAll(shared)
+  })
   // contextFiles: 从消息里提取 @ 文件引用（P1-10）
   const contextFiles = createMemo(() => {
     const set = new Set<string>()
@@ -1087,96 +1100,8 @@ export default function App() {
     }
   })
 
-  // ─── View groups（将连续 tool 消息合并为批次） ──────────────────────────────
-  type ViewGroup =
-    | { kind: 'msg';        data:  ChatMessage }
-    | { kind: 'tool-batch'; id:    string;  tools: ChatMessage[] }
-
-  // ── 包装缓存：避免每次 setMessages 都生成全新的 ViewGroup 对象
-  //   （旧实现会让 <For> 把所有行 DOM 重建，导致 reasoning-body 滚动被重置）
-  // 如果底层 msg 引用未变 / tool 批次引用未变，wrapper 就复用，<For> 就能跳过这一行。
-  const msgWrapCache  = new Map<string, { vg: ViewGroup; data: ChatMessage }>()
-  const toolWrapCache = new Map<string, { vg: ViewGroup; toolsSig: string; flt: string }>()
-
-  const viewGroupsAll = createMemo((): ViewGroup[] => {
-    const groups: ViewGroup[] = []
-    const msgs = messages()
-    const flt = msgFilter()
-    const fltSig = `${flt.hideTodos}|${flt.hideReasoning}|${flt.hideInternalTools}`
-    const aliveMsgIds  = new Set<string>()
-    const aliveToolIds = new Set<string>()
-    let i = 0
-    while (i < msgs.length) {
-      const m = msgs[i]
-      if (m.role === 'tool') {
-        const batchId = m.id
-        const tools: ChatMessage[] = []
-        while (i < msgs.length && msgs[i].role === 'tool') {
-          tools.push(msgs[i])
-          i++
-        }
-        // 过滤：hideTodos 隐藏 todo_write；hideInternalTools 隐藏所有内部工具
-        const filteredTools = tools.filter(t => {
-          const name = (t.toolName ?? '').toLowerCase()
-          if (flt.hideTodos && (name === 'todo_write' || name === 'update_todo_list')) return false
-          if (flt.hideInternalTools && INTERNAL_TOOL_NAMES.has(name)) return false
-          return true
-        })
-        if (filteredTools.length > 0) {
-          // 生成"tools 指纹"：用每个 tool 的 id+版本（isPartial/toolResult/liveOutput.length）拼接
-          // 任一 tool 的关键状态变化则指纹变化 → 重建 wrapper
-          const toolsSig = filteredTools.map(t =>
-            `${t.id}:${t.isPartial ? 'p' : 'd'}:${(t.toolResult ?? '').length}:${(t.liveOutput ?? '').length}`
-          ).join(',')
-          aliveToolIds.add(batchId)
-          const cached = toolWrapCache.get(batchId)
-          if (cached && cached.toolsSig === toolsSig && cached.flt === fltSig) {
-            groups.push(cached.vg)
-          } else {
-            const vg: ViewGroup = { kind: 'tool-batch', id: batchId, tools: filteredTools }
-            toolWrapCache.set(batchId, { vg, toolsSig, flt: fltSig })
-            groups.push(vg)
-          }
-        }
-      } else {
-        // hideReasoning: 隐藏 reasoning 角色
-        if (flt.hideReasoning && m.role === 'reasoning') { i++; continue }
-        aliveMsgIds.add(m.id)
-        const cached = msgWrapCache.get(m.id)
-        if (cached && cached.data === m) {
-          // msg 引用未变 → 复用 wrapper（<For> 会跳过此行，DOM 不重建）
-          groups.push(cached.vg)
-        } else {
-          const vg: ViewGroup = { kind: 'msg', data: m }
-          msgWrapCache.set(m.id, { vg, data: m })
-          groups.push(vg)
-        }
-        i++
-      }
-    }
-    // GC：清理已经不在列表中的 id（防止切换会话后内存泄漏）
-    for (const id of Array.from(msgWrapCache.keys())) {
-      if (!aliveMsgIds.has(id)) msgWrapCache.delete(id)
-    }
-    for (const id of Array.from(toolWrapCache.keys())) {
-      if (!aliveToolIds.has(id)) toolWrapCache.delete(id)
-    }
-    return groups
-  })
-  // P1-6: 虚拟化兜底：超过阈值时只渲染最近 N 条，顶部提供"展开全部"
-  const VG_INLINE_LIMIT = 600
-  const [vgExpandAll, setVgExpandAll] = createSignal(false)
-  const viewGroups = createMemo((): ViewGroup[] => {
-    const all = viewGroupsAll()
-    if (vgExpandAll()) return all
-    if (all.length <= VG_INLINE_LIMIT) return all
-    return all.slice(all.length - VG_INLINE_LIMIT)
-  })
-  const vgTruncatedCount = createMemo(() => {
-    if (vgExpandAll()) return 0
-    const n = viewGroupsAll().length
-    return n > VG_INLINE_LIMIT ? n - VG_INLINE_LIMIT : 0
-  })
+  // viewGroups 系统已迁移到 @maxian/ui SharedMessageList — 旧实现 80+ 行（tool 批次合并、
+  // 包装缓存、虚拟化兜底等）整段下线。需要 tool 批次折叠等高级功能时按需补到 @maxian/ui。
 
   // ─── Login ────────────────────────────────────────────────────────────────
   async function handleLogin() {
@@ -2227,26 +2152,7 @@ export default function App() {
       }
     }
 
-    // 消息间键盘导航（j/k 或 ↑/↓）— 不在输入框内、无 meta 时
-    if (!meta) {
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
-      const inInput = tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable
-      if (!inInput && (e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-        const total = viewGroups().length
-        if (total === 0) return
-        e.preventDefault()
-        const dir = (e.key === 'j' || e.key === 'ArrowDown') ? 1 : -1
-        const next = Math.max(0, Math.min(total - 1, (focusedMsgIdx() === -1 ? (dir > 0 ? 0 : total - 1) : focusedMsgIdx() + dir)))
-        setFocusedMsgIdx(next)
-        // 滚动到视图
-        queueMicrotask(() => {
-          const el = document.querySelector(`[data-msg-idx="${next}"]`) as HTMLElement | null
-          el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-        })
-        return
-      }
-    }
-
+    // 消息间键盘导航暂时禁用（迁移到 SharedMessageList 后由 @maxian/ui 自带滚动管理；后续按需补回）
     if (!meta) return
 
     // Cmd+N — 新建会话（文本框外）
@@ -8125,387 +8031,12 @@ export default {
                       </Show>
                     </div>
                   </Show>
-                  {/* P1-6: 虚拟化兜底提示（超阈值时仅渲染最近 N 条） */}
-                  <Show when={vgTruncatedCount() > 0}>
-                    <div class="msg-load-more" style="padding:6px 8px">
-                      <button class="msg-load-more-btn" onClick={() => setVgExpandAll(true)}>
-                        为保持流畅，已折叠 {vgTruncatedCount()} 条较早的消息 · 点击展开全部
-                      </button>
-                    </div>
-                  </Show>
-                  <For each={viewGroups()}>
-                    {(vg, idx) => {
-                      const isFocused = () => focusedMsgIdx() === idx()
-                      const wrap = (children: any) => (
-                        <div
-                          data-msg-idx={idx()}
-                          classList={{ 'msg-focused': isFocused() }}
-                          onClick={() => setFocusedMsgIdx(idx())}
-                        >
-                          {children}
-                        </div>
-                      )
-                      /* ── 工具批次 ── */
-                      if (vg.kind === 'tool-batch') {
-                        const batch = vg
-                        const anyRunning = () => batch.tools.some(t => t.isPartial)
-                        const showExpanded = () => expandedTools().has(batch.id) || anyRunning()
-                        return wrap(
-                          <div class="tool-batch-wrap">
-                            <Show
-                              when={showExpanded()}
-                              fallback={
-                                /* 收起状态：单行摘要 */
-                                <div class="tool-batch-row" onClick={() => toggleTool(batch.id)}>
-                                  <div class="tool-batch-dots">
-                                    <For each={batch.tools.slice(0, 7)}>
-                                      {(t) => (
-                                        <span class={`batch-dot ${t.toolSuccess ? 'batch-dot-ok' : t.toolSuccess === false ? 'batch-dot-err' : 'batch-dot-ok'}`} />
-                                      )}
-                                    </For>
-                                    <Show when={batch.tools.length > 7}>
-                                      <span class="batch-dot-more">+{batch.tools.length - 7}</span>
-                                    </Show>
-                                  </div>
-                                  <span class="tool-batch-label">已执行 {batch.tools.length} 个工具</span>
-                                  <svg class="batch-expand-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                                    <polyline points="6 9 12 15 18 9"/>
-                                  </svg>
-                                </div>
-                              }
-                            >
-                              {/* 展开状态 */}
-                              <div class="tool-batch-expanded">
-                                {/* 头部行 */}
-                                <Show
-                                  when={anyRunning()}
-                                  fallback={
-                                    <div class="tool-batch-row tool-batch-done-header" onClick={() => toggleTool(batch.id)}>
-                                      <div class="tool-batch-dots">
-                                        <For each={batch.tools.slice(0, 7)}>
-                                          {(t) => <span class={`batch-dot ${t.toolSuccess ? 'batch-dot-ok' : 'batch-dot-err'}`} />}
-                                        </For>
-                                        <Show when={batch.tools.length > 7}>
-                                          <span class="batch-dot-more">+{batch.tools.length - 7}</span>
-                                        </Show>
-                                      </div>
-                                      <span class="tool-batch-label">{batch.tools.length} 个工具调用</span>
-                                      <svg class="batch-expand-icon batch-expand-up" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                                        <polyline points="6 9 12 15 18 9"/>
-                                      </svg>
-                                    </div>
-                                  }
-                                >
-                                  <div class="tool-batch-row tool-batch-running-header">
-                                    <span class="batch-spinner-dot" />
-                                    <span class="batch-spinner-dot" style="animation-delay:0.2s" />
-                                    <span class="batch-spinner-dot" style="animation-delay:0.4s" />
-                                    <span class="tool-batch-label" style="margin-left:4px">
-                                      执行工具… ({batch.tools.filter(t => !t.isPartial).length}/{batch.tools.length})
-                                    </span>
-                                  </div>
-                                </Show>
-                                {/* 工具列表 */}
-                                <div class="tool-batch-items">
-                                  <For each={batch.tools}>
-                                    {(t) => {
-                                      // 提取被修改的文件路径（用于点击跳转到预览 diff 视图）
-                                      const fileModTools = new Set(['edit', 'write_to_file', 'multiedit', 'apply_patch']);
-                                      const hasFileDiff = () => !t.isPartial && fileModTools.has(t.toolName ?? '');
-                                      const targetPath = () => {
-                                        const p = t.toolParams?.path as string | undefined;
-                                        return p && typeof p === 'string' ? p : '';
-                                      };
-                                      return (
-                                      <div
-                                        class="tool-item-row"
-                                        classList={{ 'tool-item-row-clickable': hasFileDiff() && !!targetPath() }}
-                                        onClick={() => {
-                                          if (hasFileDiff() && targetPath()) {
-                                            openPreview(targetPath(), { viewMode: 'diff' })
-                                          }
-                                        }}
-                                      >
-                                        <Show
-                                          when={t.isPartial}
-                                          fallback={
-                                            <span class={`batch-dot ${t.toolSuccess ? 'batch-dot-ok' : 'batch-dot-err'}`} style="flex-shrink:0" />
-                                          }
-                                        >
-                                          <span class="tool-item-running-dot" />
-                                        </Show>
-                                        <span class={`tool-item-name ${t.isPartial ? 'tool-item-name-running' : ''}`}>
-                                          {getToolLabel(t.toolName ?? '')}
-                                        </span>
-                                        <Show when={getToolSubtitle(t.toolName ?? '', t.toolParams)}>
-                                          <span class="tool-item-path">{getToolSubtitle(t.toolName ?? '', t.toolParams)}</span>
-                                        </Show>
-                                        <Show when={hasFileDiff() && targetPath()}>
-                                          <span class="tool-item-view-diff">
-                                            查看 diff →
-                                          </span>
-                                        </Show>
-                                        {/* 流式生成工具 JSON 中 —— 显示实时字数 + 预览 */}
-                                        <Show when={t.isPartial && t.content && t.content.length > 0}>
-                                          <div class="tool-item-streaming">
-                                            <span class="tool-item-streaming-label">
-                                              <span class="tool-item-running-dot" />
-                                              生成参数中… {t.content.length} 字
-                                            </span>
-                                            <code class="diff-code tool-item-streaming-preview">
-                                              {t.content.slice(-200)}
-                                            </code>
-                                          </div>
-                                        </Show>
-                                        {/* edit 展示变更内容（前 5 行 old/new 对照） */}
-                                        <Show when={!t.isPartial && t.toolName === 'edit' && (t.toolParams?.old_string || t.toolParams?.new_string)}>
-                                          <div class="tool-item-diff">
-                                            <Show when={t.toolParams?.old_string}>
-                                              <div class="tool-diff-del">
-                                                <span class="diff-sign">−</span>
-                                                <code class="diff-code">{String(t.toolParams!.old_string).split('\n').slice(0, 5).join('\n')}{String(t.toolParams!.old_string).split('\n').length > 5 ? '\n…' : ''}</code>
-                                              </div>
-                                            </Show>
-                                            <Show when={t.toolParams?.new_string}>
-                                              <div class="tool-diff-add">
-                                                <span class="diff-sign">+</span>
-                                                <code class="diff-code">{String(t.toolParams!.new_string).split('\n').slice(0, 5).join('\n')}{String(t.toolParams!.new_string).split('\n').length > 5 ? '\n…' : ''}</code>
-                                              </div>
-                                            </Show>
-                                          </div>
-                                        </Show>
-                                        {/* multiedit 展示每一条编辑对照（前 3 条） */}
-                                        <Show when={!t.isPartial && t.toolName === 'multiedit' && Array.isArray(t.toolParams?.edits)}>
-                                          <div class="tool-item-diff">
-                                            <For each={(t.toolParams!.edits as any[]).slice(0, 3)}>
-                                              {(ed, i) => (
-                                                <>
-                                                  <div class="tool-diff-del">
-                                                    <span class="diff-sign">−</span>
-                                                    <code class="diff-code">{String(ed.old_string ?? ed.oldString ?? '').split('\n').slice(0, 3).join('\n')}</code>
-                                                  </div>
-                                                  <div class="tool-diff-add">
-                                                    <span class="diff-sign">+</span>
-                                                    <code class="diff-code">{String(ed.new_string ?? ed.newString ?? '').split('\n').slice(0, 3).join('\n')}</code>
-                                                  </div>
-                                                  <Show when={i() < Math.min(2, (t.toolParams!.edits as any[]).length - 1)}>
-                                                    <div class="tool-diff-sep" />
-                                                  </Show>
-                                                </>
-                                              )}
-                                            </For>
-                                            <Show when={(t.toolParams!.edits as any[]).length > 3}>
-                                              <div class="tool-diff-more">
-                                                … 还有 {(t.toolParams!.edits as any[]).length - 3} 处编辑，点击查看完整 diff
-                                              </div>
-                                            </Show>
-                                          </div>
-                                        </Show>
-                                        {/* write_to_file 展示前 5 行新内容 */}
-                                        <Show when={!t.isPartial && t.toolName === 'write_to_file' && t.toolParams?.content}>
-                                          <div class="tool-item-diff">
-                                            <div class="tool-diff-add">
-                                              <span class="diff-sign">+</span>
-                                              <code class="diff-code">{String(t.toolParams!.content).split('\n').slice(0, 5).join('\n')}{String(t.toolParams!.content).split('\n').length > 5 ? `\n… 共 ${String(t.toolParams!.content).split('\n').length} 行` : ''}</code>
-                                            </div>
-                                          </div>
-                                        </Show>
-                                        {/* O7: 工具失败 → 显示错误摘要（前 200 字），点击展开完整 */}
-                                        <Show when={!t.isPartial && t.toolSuccess === false && t.toolResult && t.toolResult.length > 0}>
-                                          <ToolErrorPanel result={t.toolResult!} />
-                                        </Show>
-                                        {/* bash / execute_command 流式输出（实时 stdout/stderr） */}
-                                        <Show when={(t.toolName === 'bash' || t.toolName === 'execute_command') && t.liveOutput && t.liveOutput.length > 0}>
-                                          <div class="bash-live-output" onClick={(e) => e.stopPropagation()}>
-                                            <div class="bash-live-header">
-                                              <Show when={t.isPartial}>
-                                                <span class="bash-live-dot" />
-                                              </Show>
-                                              <span class="bash-live-label">
-                                                {t.isPartial ? '执行中…' : '输出'}
-                                              </span>
-                                              <span class="bash-live-bytes">{(t.liveOutput ?? '').length} 字</span>
-                                            </div>
-                                            <pre
-                                              class="bash-live-body"
-                                              ref={(el) => {
-                                                createEffect(() => {
-                                                  const _ = t.liveOutput  // track reactivity
-                                                  if (el) el.scrollTop = el.scrollHeight
-                                                })
-                                              }}
-                                            >{(t.liveOutput ?? '').length > 8000 ? '…' + (t.liveOutput ?? '').slice(-8000) : (t.liveOutput ?? '')}</pre>
-                                          </div>
-                                        </Show>
-                                      </div>
-                                      )
-                                    }}
-                                  </For>
-                                </div>
-                              </div>
-                            </Show>
-                          </div>
-                        )
-                      }
-
-                      /* ── 普通消息 ── */
-                      const msg = vg.data
-                      return wrap(
-                        <>
-                          <Show when={msg.role === 'user'}>
-                            <div class="turn">
-                              <div class="turn-user">
-                                <div class="turn-user-col">
-                                  <Show when={editingMessageId() === msg.id} fallback={
-                                    <div class="turn-user-bubble">{msg.content}</div>
-                                  }>
-                                    <textarea
-                                      class="turn-user-bubble msg-edit-input"
-                                      value={editingMessageContent()}
-                                      onInput={(e) => setEditingMessageContent(e.currentTarget.value)}
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Escape') setEditingMessageId(null)
-                                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                                          e.preventDefault(); commitEditMessage(msg.id)
-                                        }
-                                      }}
-                                      ref={(el) => setTimeout(() => el?.focus(), 10)}
-                                    />
-                                    <div class="msg-edit-actions">
-                                      <button class="btn btn-ghost" onClick={() => setEditingMessageId(null)}>取消 (Esc)</button>
-                                      <button class="btn btn-primary" onClick={() => commitEditMessage(msg.id)}>保存并重跑 (⌘↵)</button>
-                                    </div>
-                                  </Show>
-                                  <Show when={editingMessageId() !== msg.id}>
-                                    <div class="msg-actions-row">
-                                      <Show when={msg.createdAt}>
-                                        <span class="msg-timestamp msg-timestamp-right">{formatFullTime(msg.createdAt)}</span>
-                                      </Show>
-                                      <div class="msg-hover-actions">
-                                        <button class="msg-action-btn" title="编辑并重跑" onClick={() => { setEditingMessageContent(msg.content); setEditingMessageId(msg.id) }}>
-                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                                          </svg>
-                                        </button>
-                                        <button class="msg-action-btn" title="从此消息分叉新会话" onClick={() => forkFromMessage(msg.id)}>
-                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                            <circle cx="6" cy="3" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="21" r="3"/>
-                                            <path d="M6 6v15"/><path d="M18 9a9 9 0 0 1-9 9"/>
-                                          </svg>
-                                        </button>
-                                        <button class="msg-action-btn del" title="删除" onClick={() => deleteMessage(msg.id)}>
-                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                            <polyline points="3 6 5 6 21 6"/>
-                                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                                          </svg>
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </Show>
-                                </div>
-                              </div>
-                            </div>
-                          </Show>
-                          <Show when={msg.role === 'assistant'}>
-                            <div class="turn">
-                              <div class="turn-assistant">
-                                <img class="assistant-avatar" src={logoUrl} alt="AI" />
-                                <div class="turn-assistant-content">
-                                  <div
-                                    class="md"
-                                    innerHTML={renderMarkdown(
-                                      msg.isPartial && msg.content.length > 0
-                                        ? msg.content + ' ▌'
-                                        : msg.content
-                                    )}
-                                  />
-                                  <Show when={!msg.isPartial}>
-                                    <div class="msg-actions-row">
-                                      <Show when={msg.createdAt}>
-                                        <span class="msg-timestamp">{formatFullTime(msg.createdAt)}</span>
-                                      </Show>
-                                      <div class="msg-hover-actions">
-                                        <button class="msg-action-btn" title="重新生成" onClick={() => regenerateMessage(msg.id)}>
-                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                            <polyline points="23 4 23 10 17 10"/>
-                                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                                          </svg>
-                                        </button>
-                                        <button class="msg-action-btn" title="从此消息分叉新会话" onClick={() => forkFromMessage(msg.id)}>
-                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                            <circle cx="6" cy="3" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="21" r="3"/>
-                                            <path d="M6 6v15"/><path d="M18 9a9 9 0 0 1-9 9"/>
-                                          </svg>
-                                        </button>
-                                        <button class="msg-action-btn del" title="删除" onClick={() => deleteMessage(msg.id)}>
-                                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                            <polyline points="3 6 5 6 21 6"/>
-                                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                                          </svg>
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </Show>
-                                </div>
-                              </div>
-                            </div>
-                          </Show>
-                          <Show when={msg.role === 'reasoning'}>
-                            <div class="reasoning-wrap">
-                              <div class={`reasoning-block ${msg.isPartial ? 'reasoning-streaming' : ''}`}>
-                                <div
-                                  class="reasoning-header"
-                                  onClick={() => !msg.isPartial && toggleReasoning(msg.id)}
-                                  style={msg.isPartial ? 'cursor:default' : 'cursor:pointer'}
-                                >
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:#a78bfa;flex-shrink:0">
-                                    <path d="M12 2a8 8 0 0 0-8 8c0 3 1.7 5.6 4.2 7H15.8A9 9 0 0 0 20 10a8 8 0 0 0-8-8z"/>
-                                    <path d="M9 21h6"/><path d="M10 17v4"/><path d="M14 17v4"/>
-                                  </svg>
-                                  <span class="reasoning-title">
-                                    {msg.isPartial ? '思考中…' : `思考过程 (${msg.charCount ?? msg.content.length}字)`}
-                                  </span>
-                                  <Show when={!msg.isPartial}>
-                                    <svg
-                                      class="reasoning-chevron"
-                                      classList={{ expanded: expandedReasonings().has(msg.id) }}
-                                      width="10" height="10" viewBox="0 0 24 24"
-                                      fill="none" stroke="currentColor" stroke-width="2.5"
-                                    >
-                                      <polyline points="6 9 12 15 18 9"/>
-                                    </svg>
-                                  </Show>
-                                </div>
-                                <Show when={msg.isPartial || expandedReasonings().has(msg.id)}>
-                                  <div class="reasoning-body">
-                                    {msg.content}
-                                    <Show when={msg.isPartial}><span class="cursor-blink" /></Show>
-                                  </div>
-                                </Show>
-                              </div>
-                            </div>
-                          </Show>
-                          <Show when={msg.role === 'system'}>
-                            <div class="turn">
-                              <div class="turn-system">{msg.content}</div>
-                              <Show when={msg.createdAt}>
-                                <span class="msg-timestamp">{formatFullTime(msg.createdAt)}</span>
-                              </Show>
-                            </div>
-                          </Show>
-                          <Show when={msg.role === 'error'}>
-                            <div class="turn">
-                              <div class="turn-error">⚠ {msg.content}</div>
-                              <Show when={msg.createdAt}>
-                                <span class="msg-timestamp">{formatFullTime(msg.createdAt)}</span>
-                              </Show>
-                            </div>
-                          </Show>
-                        </>
-                      )
-                    }}
-                  </For>
+                  {/* @maxian/ui 共享 MessageList — 三端唯一渲染入口 */}
+                  <SharedMessageList
+                    messages={sharedMessagesStore.messages}
+                    renderContent={(text) => <div innerHTML={renderMarkdown(text)} />}
+                    getToolLabel={(n) => TOOL_LABELS[n] ?? n}
+                  />
                   {/* 任务进行中：实时接收计数（直接写 DOM，不走 SolidJS 批更新） */}
                   <Show when={sending()}>
                     <div class="recv-status-bar">

@@ -42,6 +42,22 @@
 
     --terminal-bg: #111111;
 
+    /* @maxian/ui 主题映射（共享 MessageList/ToolCallCard/ApprovalDialog 等组件读取这些变量） */
+    --maxian-text-base:    var(--text-base);
+    --maxian-text-muted:   var(--text-muted);
+    --maxian-bg-subtle:    var(--bg-subtle);
+    --maxian-bg-muted:     var(--bg-muted);
+    --maxian-bg-hover:     var(--bg-hover);
+    --maxian-border:       var(--border);
+    --maxian-border-strong:var(--border-strong);
+    --maxian-accent:       var(--accent);
+    --maxian-accent-hover: var(--accent-hover);
+    --maxian-font-sans:    var(--font-sans);
+    --maxian-font-mono:    var(--font-mono);
+    --maxian-scrollbar:    var(--scrollbar-thumb);
+    /* user 气泡：用 accent 半透明 */
+    --maxian-bg-user-bubble: var(--accent-faint);
+
     color-scheme: dark;
   }
 

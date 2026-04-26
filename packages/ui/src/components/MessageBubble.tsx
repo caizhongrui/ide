@@ -54,14 +54,32 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 						setAutoCollapsed(true);
 					}
 				});
+				const ts = (): string => {
+					const t = msg().createdAt;
+					if (!t) return '';
+					const d = new Date(t);
+					const hh = String(d.getHours()).padStart(2, '0');
+					const mm = String(d.getMinutes()).padStart(2, '0');
+					return `${hh}:${mm}`;
+				};
 				return (
 					<div class={`mu-msg mu-msg-${role()}`} data-msg-id={msg().id}>
 						<Show when={role() === 'user'}>
-							<div class="mu-msg-content">{msg().content}</div>
+							<div class="mu-msg-content">
+								{msg().content}
+								<Show when={ts()}>
+									<span class="mu-msg-time">{ts()}</span>
+								</Show>
+							</div>
 						</Show>
 
 						<Show when={role() === 'assistant'}>
-							<div class="mu-msg-content">{renderRichContent(msg().content)}</div>
+							<div class="mu-msg-content mu-msg-content-rich">
+								{renderRichContent(msg().content)}
+								<Show when={ts() && !msg().isPartial}>
+									<span class="mu-msg-time">{ts()}</span>
+								</Show>
+							</div>
 							<Show when={msg().isPartial}>
 								<span class="mu-typing">▍</span>
 							</Show>
