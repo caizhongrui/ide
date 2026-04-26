@@ -5016,7 +5016,7 @@ export default {
           <img class="about-logo" src={logoUrl} alt="Maxian" />
           <div style="font-size:20px;font-weight:700;color:var(--text-base)">码弦 Maxian</div>
           <div style="font-size:13px;color:var(--text-muted)">智能 AI 编程助手</div>
-          <div style="font-size:12px;color:var(--text-faint)">版本 0.2.10</div>
+          <div style="font-size:12px;color:var(--text-faint)">版本 {__APP_VERSION__}</div>
         </div>
         <div class="settings-group">
           <div class="settings-group-title">软件更新</div>
@@ -5031,7 +5031,7 @@ export default {
                     </span>
                   </Show>
                   <Show when={!updateMsg()}>
-                    当前版本 0.2.10
+                    当前版本 {__APP_VERSION__}
                   </Show>
                 </div>
               </div>
