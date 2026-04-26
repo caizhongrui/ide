@@ -14,6 +14,23 @@ export * from './components/index.js';
 // Solid 挂载入口（封装 solid-js/web.render，consumer 无需直接依赖 solid-js）
 export * from './mount.js';
 
+// Solid reactive 原语 re-export
+// 让无法 bare specifier 解析 solid-js 的宿主（vscode renderer 等）
+// 也能从本包统一入口拿到 createSignal/createMemo/createEffect 等。
+// solid-js 已在 vite library bundle 里 inline，这些 export 在 dist/index.js 内绑定。
+export {
+	createSignal,
+	createMemo,
+	createEffect,
+	createRoot,
+	onCleanup,
+	batch,
+	untrack,
+	Show,
+	For,
+} from 'solid-js';
+export type { Accessor, Setter, Signal, JSX } from 'solid-js';
+
 // TODO: 后续按抽取顺序加入
 // export * from './components/MessageList.js';
 // export * from './components/ToolCallCard.js';
