@@ -181,44 +181,21 @@ const BINARY_FILE_PATTERNS = [
 	/\.bin$/i,
 ];
 
-/** 应该跳过的目录（编译输出、依赖等） */
-const SKIP_DIRECTORIES = new Set([
-	'target',
-	'build',
-	'out',
-	'dist',
-	'node_modules',
-	'.git',
-	'.svn',
-	'.hg',
-	'__pycache__',
-	'.pytest_cache',
-	'venv',
-	'.venv',
-	'.next',
-	'.nuxt',
-	'coverage',
-]);
-
-/**
- * 检查文件路径是否在应该跳过的目录中
- */
-function isInSkipDirectory(filePath: string): boolean {
-	const parts = filePath.split(path.sep);
-	return parts.some(part => SKIP_DIRECTORIES.has(part));
-}
+// 注：SKIP_DIRECTORIES + isInSkipDirectory 已移除 ——
+// 之前用于 "在 build/dist/out/target 等目录里直接判定为二进制" 的拦截逻辑，
+// 误伤太多（用户项目里真正的源码目录恰好叫这些名字），不如靠 NULL 字节 + 魔数 + 扩展名兜底。
 
 /**
  * 检测文件是否为二进制
+ *
+ * 注：之前有"目录名匹配 SKIP_DIRECTORIES → 视为二进制"规则（看注释 0.），
+ * 但它把路径里**任意一段**叫 dist/out/build/target 的文件全部误判（如用户项目里
+ * 真正的源码目录恰好叫 dist/，或工作区路径含 dist 段，会让 .vue/.ts 等正经
+ * 文本文件被拒读）。已移除：靠下面的 NULL 字节 / 魔数 / 扩展名 3 重检测就够了。
  */
 function isBinaryFile(filePath: string, buffer: Buffer): { isBinary: boolean; format?: string; reason?: string } {
 	const ext = path.extname(filePath).toLowerCase();
 	const fileName = path.basename(filePath);
-
-	// 0. 检查是否在跳过目录中（如 target/）
-	if (isInSkipDirectory(filePath)) {
-		return { isBinary: true, format: 'Build Output', reason: '文件位于编译输出目录中' };
-	}
 
 	// 1. 扩展名快速判断
 	if (BINARY_EXTENSIONS.has(ext)) {
