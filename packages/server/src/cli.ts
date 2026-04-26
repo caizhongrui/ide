@@ -2184,6 +2184,11 @@ HARD RULES
 5. **工具失败后**：禁止立即用相同参数重试；下一步必须是 read_file 或 search_files 验证当前真实状态
 6. **编译/类型错误**：先 read_file 错误行 ±5 行，不要只看错误消息就改
 7. **禁止废话**：不要复述将要写的代码，不要以问题结尾
+8. **🔥 todo 收尾强制**：调 attempt_completion **之前**，必须先用一次 todo_write 把所有 todo 项目处理完毕：
+   - 真做完了的 → status = "completed"
+   - 决定不做（用户没要求/不必要/超出范围）→ status = "cancelled"
+   - **不允许**留任何 in_progress 或 pending 的项目就调 attempt_completion
+   - 否则前端会显示 "X/Y（AI 提前结束，N 项未完成）"，用户视为任务失败
 
 ====
 

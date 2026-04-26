@@ -269,9 +269,11 @@ export default function App() {
   const [diffViewMode, setDiffViewMode] = createSignal<'unified' | 'split'>('unified')
 
   // ── Todo 跟踪面板（P0-1） ────────────────────────────────────────────────
-  interface TodoItem { id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }
+  interface TodoItem { id: string; content: string; status: 'pending' | 'in_progress' | 'completed' | 'cancelled' }
   const [todos, setTodos] = createSignal<TodoItem[]>([])
   const [todoDockCollapsed, setTodoDockCollapsed] = createSignal(false)
+  // 任务结束时如果还有 in_progress/pending 项，标记为"AI 提前结束未完成"以便 UI 显示警告
+  const [todosLeftover, setTodosLeftover] = createSignal(false)
 
   // ── Followup 建议队列（P0-2） ───────────────────────────────────────────
   const [followupSuggestions, setFollowupSuggestions] = createSignal<string[]>([])
@@ -1344,6 +1346,7 @@ export default function App() {
     setMsgHasMore(false)
     setMsgOldestTs(undefined)
     setTodos([])
+    setTodosLeftover(false)
     setFollowupSuggestions([])
     setFollowupQueue([])
     setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
@@ -1670,6 +1673,7 @@ export default function App() {
     if (type === "todos_updated") {
       const list = (e as any).todos as TodoItem[]
       setTodos(Array.isArray(list) ? list : [])
+      setTodosLeftover(false)   // AI 又更新了 todos，清掉上一轮的"未完成"提示
       return
     }
     // Followup 建议
@@ -1937,8 +1941,18 @@ export default function App() {
       } catch { /* 忽略音频失败 */ }
     } else if (type === "task_status") {
       const s = (e as any).status as string
-      if (s === "processing") _bumpRecv(1)   // 后端开始处理，让蓝点亮起
-      if (s === "completed" || s === "aborted" || s === "error") { setSending(false) }
+      if (s === "processing") {
+        _bumpRecv(1)   // 后端开始处理，让蓝点亮起
+        setTodosLeftover(false)   // 新一轮处理开始，清掉上一轮的"未完成"提示
+      }
+      if (s === "completed" || s === "aborted" || s === "error") {
+        setSending(false)
+        // 检查 todos 是否有未收尾的项目（AI 提前结束的兜底提示）
+        const list = todos()
+        if (list.length > 0 && list.some(t => t.status === 'in_progress' || t.status === 'pending')) {
+          setTodosLeftover(true)
+        }
+      }
     } else if (type === "tool_call_start") {
       _bumpRecv(1)
       const toolName   = (e as any).toolName   as string
@@ -6579,10 +6593,13 @@ export default {
   function TodoDock() {
     const total = () => todos().length
     const completed = () => todos().filter(t => t.status === 'completed').length
+    const cancelled = () => todos().filter(t => t.status === 'cancelled').length
     const inProgress = () => todos().find(t => t.status === 'in_progress')
-    const pct = () => total() === 0 ? 0 : Math.round((completed() / total()) * 100)
+    const pct = () => total() === 0 ? 0 : Math.round(((completed() + cancelled()) / total()) * 100)
+    // AI 提前结束未收尾的项目数
+    const leftoverCount = () => todos().filter(t => t.status === 'in_progress' || t.status === 'pending').length
     return (
-      <div class="todo-dock">
+      <div class="todo-dock" classList={{ 'todo-dock-leftover': todosLeftover() }}>
         <div class="todo-dock-header" onClick={() => setTodoDockCollapsed(v => !v)}>
           <svg class="todo-dock-arrow" classList={{ open: !todoDockCollapsed() }} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <polyline points="9 18 15 12 9 6"/>
@@ -6598,7 +6615,12 @@ export default {
           <div class="todo-dock-progress">
             <div class="todo-dock-progress-fill" style={{ width: `${pct()}%` }} />
           </div>
-          <Show when={inProgress() && todoDockCollapsed()}>
+          <Show when={todosLeftover() && leftoverCount() > 0}>
+            <span class="todo-dock-leftover-badge" title="AI 在调用 attempt_completion 前未把这些 todo 收尾。任务已结束，但这些项目可能未真正完成。">
+              ⚠ AI 提前结束，{leftoverCount()} 项未收尾
+            </span>
+          </Show>
+          <Show when={inProgress() && todoDockCollapsed() && !todosLeftover()}>
             <span class="todo-dock-current" title={inProgress()!.content}>
               · {inProgress()!.content}
             </span>
@@ -6608,13 +6630,19 @@ export default {
           <div class="todo-dock-list">
             <For each={todos()}>
               {(t) => (
-                <div class={`todo-item todo-${t.status}`}>
+                <div class={`todo-item todo-${t.status}`} classList={{ 'todo-leftover': todosLeftover() && (t.status === 'in_progress' || t.status === 'pending') }}>
                   <span class="todo-checkbox">
                     <Show when={t.status === 'completed'}>
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
                     </Show>
-                    <Show when={t.status === 'in_progress'}>
+                    <Show when={t.status === 'cancelled'}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </Show>
+                    <Show when={t.status === 'in_progress' && !todosLeftover()}>
                       <span class="todo-spinner" />
+                    </Show>
+                    <Show when={(t.status === 'in_progress' || t.status === 'pending') && todosLeftover()}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="opacity:0.55"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                     </Show>
                   </span>
                   <span class="todo-content">{t.content}</span>
