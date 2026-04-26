@@ -3,10 +3,12 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    // 使用 Solid 自动 JSX 运行时编译为纯 .js（无需 consumer 配 vite 插件）
-    "jsx": "react-jsx",
+    // 仅产出 d.ts；JS 由 vite + vite-plugin-solid 编译（正确处理 Solid JSX 转换）
+    "jsx": "preserve",
     "jsxImportSource": "solid-js",
-    "composite": true
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true
   },
   "include": ["src/**/*"]
 }

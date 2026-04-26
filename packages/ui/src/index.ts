@@ -11,6 +11,9 @@ export const PACKAGE_VERSION = '0.3.0';
 // 组件（Solid）
 export * from './components/index.js';
 
+// Solid 挂载入口（封装 solid-js/web.render，consumer 无需直接依赖 solid-js）
+export * from './mount.js';
+
 // TODO: 后续按抽取顺序加入
 // export * from './components/MessageList.js';
 // export * from './components/ToolCallCard.js';

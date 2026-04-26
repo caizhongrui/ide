@@ -1,0 +1,134 @@
+/* ============================================================================
+ *  ApprovalDialog 样式
+ *
+ *  CSS variables 都用 var(--maxian-X, <fallback>) 写法：
+ *  - consumer 设了 :root { --maxian-bg-subtle: ... } → 走 consumer 主题
+ *  - consumer 没设 → 走 fallback（深色 IDE 可读）
+ * ========================================================================== */
+
+.approval-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.55);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 10000;
+	backdrop-filter: blur(2px);
+}
+.approval-dialog {
+	background: var(--maxian-bg-subtle, #2a2a2a);
+	border: 1px solid var(--maxian-border-strong, #4a4a4a);
+	border-radius: 12px;
+	width: 420px;
+	max-width: 90vw;
+	box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+	overflow: hidden;
+	color: var(--maxian-text-base, #e6e6e6);
+	font-family: var(--maxian-font-sans, system-ui, -apple-system, sans-serif);
+}
+.approval-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 16px 20px 12px;
+	border-bottom: 1px solid var(--maxian-border, #3a3a3a);
+}
+.approval-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--maxian-text-base, #e6e6e6);
+}
+.approval-body {
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.approval-tool-name {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--maxian-text-base, #e6e6e6);
+}
+.approval-params {
+	background: var(--maxian-bg-muted, #1f1f1f);
+	border-radius: 8px;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.approval-param-row {
+	display: flex;
+	gap: 8px;
+	font-size: 12px;
+	align-items: flex-start;
+}
+.approval-param-key {
+	color: var(--maxian-text-muted, #999);
+	font-weight: 600;
+	flex-shrink: 0;
+	min-width: 60px;
+}
+.approval-param-val {
+	color: var(--maxian-text-base, #e6e6e6);
+	font-family: var(--maxian-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+	word-break: break-all;
+}
+.approval-risk-hint {
+	font-size: 12px;
+	color: #f59e0b;
+	background: rgba(245, 158, 11, 0.1);
+	border-radius: 6px;
+	padding: 6px 10px;
+}
+.approval-footer {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 12px 20px 16px;
+	border-top: 1px solid var(--maxian-border, #3a3a3a);
+}
+.approval-btn {
+	padding: 7px 18px;
+	border-radius: 7px;
+	font-size: 13px;
+	font-weight: 600;
+	cursor: pointer;
+	border: 1px solid transparent;
+	transition: background 150ms;
+	font-family: var(--maxian-font-sans, system-ui, -apple-system, sans-serif);
+}
+.approval-btn.deny {
+	background: var(--maxian-bg-muted, #1f1f1f);
+	color: var(--maxian-text-base, #e6e6e6);
+	border-color: var(--maxian-border-strong, #4a4a4a);
+}
+.approval-btn.deny:hover {
+	background: var(--maxian-bg-hover, #2f2f2f);
+}
+.approval-btn.allow {
+	background: var(--maxian-accent, #6366f1);
+	color: #fff;
+}
+.approval-btn.allow:hover {
+	background: var(--maxian-accent-hover, #5558e3);
+}
+.approval-btn.allow-session,
+.approval-btn.allow-always {
+	background: transparent;
+	color: var(--maxian-text-muted, #999);
+	border-color: var(--maxian-border-strong, #4a4a4a);
+	padding: 7px 12px;
+	font-size: 12px;
+	font-weight: 500;
+}
+.approval-btn.allow-session:hover,
+.approval-btn.allow-always:hover {
+	background: var(--maxian-bg-hover, #2f2f2f);
+	color: var(--maxian-text-base, #e6e6e6);
+	border-color: var(--maxian-accent, #6366f1);
+}
+.approval-footer-3col {
+	flex-wrap: wrap;
+}

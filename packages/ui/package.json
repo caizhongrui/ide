@@ -27,9 +27,9 @@
   },
   "files": ["dist", "README.md"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --emitDeclarationOnly && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "peerDependencies": {
     "solid-js": "catalog:"
@@ -37,7 +37,9 @@
   "devDependencies": {
     "@types/node": "catalog:",
     "solid-js": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-solid": "catalog:"
   },
   "private": true
 }

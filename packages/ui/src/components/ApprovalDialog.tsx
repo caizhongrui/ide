@@ -9,6 +9,10 @@
 
 import { Show, For } from 'solid-js';
 import type { JSX } from 'solid-js';
+// @ts-expect-error vite ?inline 把 CSS 文件作为字符串导入；类型由 vite-env.d.ts 兜底
+import css from './ApprovalDialog.css?inline';
+import { injectStyleOnce } from './_injectStyle.js';
+injectStyleOnce('maxian-ui-approval-dialog', css as string);
 
 /** 一次审批请求的最小数据集合 */
 export interface ApprovalRequestData {
