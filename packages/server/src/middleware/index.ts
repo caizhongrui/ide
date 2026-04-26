@@ -98,7 +98,7 @@ export function CorsMiddleware(allowedOrigins?: string[] | boolean) {
 			c.header('Access-Control-Allow-Origin', allowOrigin);
 			c.header('Vary', 'Origin');
 			c.header('Access-Control-Allow-Credentials', 'true');
-			c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Cache-Control');
+			c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Cache-Control, X-Maxian-Protocol');
 			c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
 		}
 

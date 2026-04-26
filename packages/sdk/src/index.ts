@@ -7,6 +7,12 @@ export interface ClientOptions {
 	username?: string;
 	password?: string;
 	fetch?: typeof fetch;
+	/**
+	 * 显式声明客户端协议版本（写入 X-Maxian-Protocol header）。
+	 * 不传 = 不发该 header，避免 vscode-file:// 等严苛 origin 下的 CORS preflight 问题。
+	 * server 总是把自己的协议版本写在 response header（X-Maxian-Protocol），客户端可读后校验。
+	 */
+	protocolVersion?: string;
 }
 
 /** 持久化存储的 UI 消息（从 GET /sessions/:id/messages 返回） */
@@ -56,6 +62,7 @@ export class MaxianClient {
 	private readonly auth?: string;
 	private readonly authQuery?: string; // base64(user:pass) for EventSource ?auth=
 	private readonly fetchFn: typeof fetch;
+	private readonly protocolVersion?: string;
 
 	constructor(opts: ClientOptions) {
 		this.baseUrl = opts.baseUrl.replace(/\/$/, '');
@@ -64,15 +71,19 @@ export class MaxianClient {
 			this.auth = 'Basic ' + encoded;
 			this.authQuery = encoded;
 		}
-		this.fetchFn = opts.fetch ?? fetch;
+		this.fetchFn         = opts.fetch ?? fetch;
+		this.protocolVersion = opts.protocolVersion;
 	}
 
 	private async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
 		const headers: Record<string, string> = {
 			'Content-Type': 'application/json',
-			// N4 协议版本声明（server 用于检测客户端 / 服务端协议漂移）
-			'X-Maxian-Protocol': '1',
 		};
+		// 仅当 caller 显式声明 protocolVersion 时才发该 header
+		// （避免 vscode-file:// 等 origin 下浏览器 CORS preflight 的 cache 异常）
+		if (this.protocolVersion) {
+			headers['X-Maxian-Protocol'] = this.protocolVersion;
+		}
 		if (this.auth) headers['Authorization'] = this.auth;
 		const res = await this.fetchFn(`${this.baseUrl}${path}`, {
 			method,
