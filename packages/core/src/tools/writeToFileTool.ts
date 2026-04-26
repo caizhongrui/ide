@@ -5,15 +5,16 @@
 
 // Complete implementation from Kilocode
 import * as path from 'path';
-import * as fs from 'fs';
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
+import { platformFs } from './platformFs.js';
 
 export async function writeToFileTool(
 	ctx: IToolContext,
 	params: any,
 ): Promise<ToolResponse> {
+	const pf = platformFs(ctx);
 	const filePath = params.path;
 	let content = params.content;
 
@@ -32,7 +33,7 @@ export async function writeToFileTool(
 			: path.resolve(ctx.workspacePath, filePath);
 
 		// Check if file exists
-		const exists = fs.existsSync(absolutePath);
+		const exists = pf.existsSync(absolutePath);
 		const fileExists = exists;
 
 		// Pre-process content (remove markdown code blocks if present)
@@ -45,12 +46,12 @@ export async function writeToFileTool(
 
 		// Create directory if it doesn't exist
 		const dir = path.dirname(absolutePath);
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true });
+		if (!pf.existsSync(dir)) {
+			pf.mkdirSync(dir, { recursive: true });
 		}
 
 		// Write file
-		fs.writeFileSync(absolutePath, content, 'utf-8');
+		pf.writeFileSync(absolutePath, content, 'utf-8');
 
 		// Track file modification
 		ctx.fileContextTracker.trackFileWrite(absolutePath, 'roo_edited');

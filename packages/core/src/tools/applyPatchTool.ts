@@ -10,9 +10,9 @@
  *  回退策略：任一 hunk 失败则整体回滚。
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { IToolContext } from './IToolContext.js';
+import { platformFs, type ToolFs } from './platformFs.js';
 
 export interface IApplyPatchParams {
 	/** 标准 unified diff 文本 */
@@ -135,6 +135,7 @@ export async function applyPatchTool(
 	ctx:    IToolContext,
 	params: IApplyPatchParams,
 ): Promise<IApplyPatchResult> {
+	const pf: ToolFs = platformFs(ctx);
 	const lines = (params.patch ?? '').split('\n');
 	const { patches, error: parseErr } = parseHeaders(lines);
 	if (parseErr) {
@@ -169,7 +170,7 @@ export async function applyPatchTool(
 		if (newPath === '/dev/null') {
 			const abs = path.isAbsolute(origPath) ? origPath : path.resolve(ctx.workspacePath, origPath);
 			let before: string | null = null;
-			try { before = fs.readFileSync(abs, 'utf8'); } catch { /* 可能已不存在 */ }
+			try { before = pf.readFileSync(abs, 'utf8'); } catch { /* 可能已不存在 */ }
 			plans.push({ abs, before, after: null, isCreate: false, isDelete: true });
 			result.hunkApplied += hunks.length;
 			continue;
@@ -178,7 +179,7 @@ export async function applyPatchTool(
 		// 修改文件
 		const absOrig = path.isAbsolute(origPath) ? origPath : path.resolve(ctx.workspacePath, origPath);
 		let origContent: string;
-		try { origContent = fs.readFileSync(absOrig, 'utf8'); }
+		try { origContent = pf.readFileSync(absOrig, 'utf8'); }
 		catch (e) {
 			result.success = false;
 			result.hunkFailed += hunks.length;
@@ -210,11 +211,11 @@ export async function applyPatchTool(
 	for (const p of plans) {
 		try {
 			if (p.isDelete) {
-				if (fs.existsSync(p.abs)) fs.unlinkSync(p.abs);
+				if (pf.existsSync(p.abs)) pf.unlinkSync(p.abs);
 				result.filesDeleted.push(p.abs);
 			} else {
-				fs.mkdirSync(path.dirname(p.abs), { recursive: true });
-				fs.writeFileSync(p.abs, p.after ?? '', 'utf8');
+				pf.mkdirSync(path.dirname(p.abs), { recursive: true });
+				pf.writeFileSync(p.abs, p.after ?? '', 'utf8');
 				if (p.isCreate) result.filesCreated.push(p.abs);
 				else result.filesChanged.push(p.abs);
 			}

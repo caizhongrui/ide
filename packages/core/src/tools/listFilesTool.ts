@@ -15,10 +15,11 @@
  */
 
 import * as path from 'path';
-import * as fs from 'fs';
+import * as fs from 'fs';   // 仅 fs.Dirent 类型 + realpathSync（platform 抽象未覆盖）
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
+import { platformFs, type ToolFs } from './platformFs.js';
 
 // ========== 配置常量 ==========
 const LIST_FILES_CONFIG = {
@@ -196,7 +197,7 @@ function parseGitignore(content: string): IgnoreRule[] {
 /**
  * 获取目录的 ignore 规则
  */
-function getIgnoreRules(dirPath: string): IgnoreRule[] {
+function getIgnoreRules(dirPath: string, pf?: ToolFs): IgnoreRule[] {
 	const gitignorePath = path.join(dirPath, '.gitignore');
 
 	// 检查缓存
@@ -208,8 +209,10 @@ function getIgnoreRules(dirPath: string): IgnoreRule[] {
 	let rules: IgnoreRule[] = [];
 
 	try {
-		if (fs.existsSync(gitignorePath)) {
-			const content = fs.readFileSync(gitignorePath, 'utf-8');
+		// 优先 platformFs，未传时降级 fs（向后兼容）
+		const exists = pf ? pf.existsSync(gitignorePath) : fs.existsSync(gitignorePath);
+		if (exists) {
+			const content = pf ? pf.readFileSync(gitignorePath, 'utf-8') : fs.readFileSync(gitignorePath, 'utf-8');
 			rules = parseGitignore(content);
 		}
 	} catch {
@@ -291,6 +294,7 @@ export async function listFilesTool(
 	ctx: IToolContext,
 	params: any,
 ): Promise<ToolResponse> {
+	const pf = platformFs(ctx);
 	const dirPath = params.path || '.';
 	const recursive = params.recursive === 'true' || params.recursive === true;
 
@@ -301,12 +305,12 @@ export async function listFilesTool(
 			: path.resolve(ctx.workspacePath, dirPath);
 
 		// 检查目录是否存在
-		if (!fs.existsSync(absolutePath)) {
+		if (!pf.existsSync(absolutePath)) {
 			return `Error: Directory not found: ${dirPath}`;
 		}
 
-		const stat = fs.statSync(absolutePath);
-		if (!stat.isDirectory()) {
+		const stat = pf.statSync(absolutePath);
+		if (!stat.isDirectory) {
 			return `Error: Path is not a directory: ${dirPath}\n\n💡 Use read_file tool to read file contents.`;
 		}
 

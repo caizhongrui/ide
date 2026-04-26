@@ -5,9 +5,10 @@
  *  按 glob 模式匹配文件，结果按 mtime 降序（最近修改优先）。
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';
+import * as fs from 'node:fs';   // 仅用于 fs.Dirent 类型
 import * as path from 'node:path';
 import type { IToolContext } from './IToolContext.js';
+import { platformFs, type ToolFs } from './platformFs.js';
 
 export interface IGlobToolParams {
 	/** glob 模式，例如 "**\/*.ts" */
@@ -58,11 +59,11 @@ const SKIP_DIRS = new Set([
 	'__pycache__', '.pytest_cache', '.idea', '.vscode',
 ]);
 
-function walkFiles(root: string, rel: string, limit: number, out: Array<{ rel: string; mtime: number }>): void {
+function walkFiles(pf: ToolFs, root: string, rel: string, limit: number, out: Array<{ rel: string; mtime: number }>): void {
 	if (out.length >= limit) return;
 	let entries: fs.Dirent[];
 	try {
-		entries = fs.readdirSync(path.join(root, rel), { withFileTypes: true });
+		entries = pf.readdirSync(path.join(root, rel), { withFileTypes: true }) as fs.Dirent[];
 	} catch { return; }
 
 	for (const entry of entries) {
@@ -70,12 +71,12 @@ function walkFiles(root: string, rel: string, limit: number, out: Array<{ rel: s
 		if (entry.name.startsWith('.') && entry.name.length > 1 && !entry.isFile()) continue;
 		if (entry.isDirectory()) {
 			if (SKIP_DIRS.has(entry.name)) continue;
-			walkFiles(root, path.join(rel, entry.name), limit, out);
+			walkFiles(pf, root, path.join(rel, entry.name), limit, out);
 		} else if (entry.isFile()) {
 			const full = path.join(root, rel, entry.name);
 			try {
-				const stat = fs.statSync(full);
-				out.push({ rel: path.join(rel, entry.name), mtime: stat.mtimeMs });
+				const st = pf.statSync(full);
+				out.push({ rel: path.join(rel, entry.name), mtime: st.mtime });
 			} catch { /* ignore */ }
 		}
 	}
@@ -85,6 +86,7 @@ export async function globTool(
 	ctx:    IToolContext,
 	params: IGlobToolParams,
 ): Promise<IGlobToolResult> {
+	const pf = platformFs(ctx);
 	if (!params.pattern) {
 		return { files: [], total: 0, truncated: false };
 	}
@@ -92,7 +94,7 @@ export async function globTool(
 		? (path.isAbsolute(params.path) ? params.path : path.resolve(ctx.workspacePath, params.path))
 		: ctx.workspacePath;
 
-	if (!fs.existsSync(startDir)) {
+	if (!pf.existsSync(startDir)) {
 		return { files: [], total: 0, truncated: false };
 	}
 
@@ -101,7 +103,7 @@ export async function globTool(
 
 	// 收集候选（略宽松，先收集所有文件再过滤）
 	const candidates: Array<{ rel: string; mtime: number }> = [];
-	walkFiles(startDir, '', 10000, candidates);
+	walkFiles(pf, startDir, '', 10000, candidates);
 
 	const matched = candidates.filter(f => {
 		const norm = f.rel.replace(/\\/g, '/');

@@ -7,8 +7,9 @@
 
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
-import * as fs from 'node:fs';
+import * as fs from 'node:fs';   // 仅 findRgPath 系统二进制探测仍走 fs（与平台抽象无关）
 import type { IToolContext } from './IToolContext.js';
+import { platformFs } from './platformFs.js';
 
 export interface IGrepToolParams {
 	/** 正则表达式 */
@@ -54,6 +55,7 @@ export async function grepTool(
 	ctx:    IToolContext,
 	params: IGrepToolParams,
 ): Promise<IGrepToolResult> {
+	const pf = platformFs(ctx);
 	if (!params.pattern) {
 		return { matches: 0, output: 'Error: pattern is required', truncated: false };
 	}
@@ -64,7 +66,7 @@ export async function grepTool(
 
 	// 路径越界检查（工作区外需谨慎）
 	const abs = path.resolve(searchPath);
-	if (!abs.startsWith(path.resolve(ctx.workspacePath)) && !fs.existsSync(abs)) {
+	if (!abs.startsWith(path.resolve(ctx.workspacePath)) && !pf.existsSync(abs)) {
 		return { matches: 0, output: `Error: path not found: ${params.path}`, truncated: false };
 	}
 

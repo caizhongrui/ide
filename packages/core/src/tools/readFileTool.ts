@@ -15,10 +15,11 @@
  */
 
 import * as path from 'path';
-import * as fs from 'fs';
+import * as fs from 'fs';   // 仅模块级 helper + openSync/readSync/closeSync（platformFs 未覆盖）
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
+import { platformFs } from './platformFs.js';
 
 // ========== 配置常量 ==========
 const READ_FILE_CONFIG = {
@@ -525,6 +526,7 @@ export async function readFileTool(
 	ctx: IToolContext,
 	params: any,
 ): Promise<ToolResponse> {
+	const pf = platformFs(ctx);
 	const filePath = params.path || params.args || '';
 	const startLine = params.start_line ? parseInt(params.start_line, 10) : undefined;
 	const endLine = params.end_line ? parseInt(params.end_line, 10) : undefined;
@@ -540,15 +542,15 @@ export async function readFileTool(
 			: path.resolve(ctx.workspacePath, filePath);
 
 		// 检查文件是否存在
-		if (!fs.existsSync(absolutePath)) {
+		if (!pf.existsSync(absolutePath)) {
 			const basename = path.basename(absolutePath);
 			// "Did you mean?" 模糊匹配（参考 OpenCode read.ts）
 			const parentDir = path.dirname(absolutePath);
-			const parentExists = fs.existsSync(parentDir);
+			const parentExists = pf.existsSync(parentDir);
 			const targetName = basename.toLowerCase();
 			if (parentExists) {
 				try {
-					const dirContents = fs.readdirSync(parentDir);
+					const dirContents = pf.readdirSync(parentDir) as string[];
 					const minMatchLen = Math.max(3, Math.floor(targetName.length * 0.6));
 					const suggestions = dirContents
 						.filter(f => {
@@ -576,9 +578,9 @@ export async function readFileTool(
 		}
 
 		// 获取文件状态
-		const stat = fs.statSync(absolutePath);
+		const stat = pf.statSync(absolutePath);
 
-		if (stat.isDirectory()) {
+		if (stat.isDirectory) {
 			return `Error: Path is a directory, not a file: ${filePath}\n\n💡 Use list_files tool to list directory contents.`;
 		}
 
@@ -640,7 +642,7 @@ export async function readFileTool(
 		cleanExpiredCache();
 		const cachedEntry = fileCache.get(absolutePath);
 
-		if (cachedEntry && cachedEntry.mtime === stat.mtimeMs) {
+		if (cachedEntry && cachedEntry.mtime === stat.mtime) {
 			cacheHits++;
 			console.log(`[ReadFileTool] 缓存命中: ${filePath} (命中率: ${getFileCacheStats().hitRate}%)`);
 			return formatFileContent(filePath, cachedEntry.content, cachedEntry.lineCount,
@@ -660,7 +662,7 @@ export async function readFileTool(
 		// 更新缓存
 		fileCache.set(absolutePath, {
 			content,
-			mtime: stat.mtimeMs,
+			mtime: stat.mtime,
 			timestamp: Date.now(),
 			encoding,
 			lineCount: lines.length,

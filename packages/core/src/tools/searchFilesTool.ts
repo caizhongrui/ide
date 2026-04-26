@@ -17,10 +17,11 @@
  */
 
 import * as path from 'path';
-import * as fs from 'fs';
+import * as fs from 'fs';   // 仅 fs.Dirent 类型 + listAllFiles helper（无 ctx 调用方）
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
+import { platformFs, type ToolFs } from './platformFs.js';
 
 // ========== 配置常量 ==========
 const SEARCH_CONFIG = {
@@ -169,6 +170,7 @@ export async function searchFilesTool(
 	ctx: IToolContext,
 	params: any,
 ): Promise<ToolResponse> {
+	const pf = platformFs(ctx);
 	const searchPath = params.path || '.';
 	const regex = params.regex;
 	const filePattern = params.file_pattern;
@@ -184,7 +186,7 @@ export async function searchFilesTool(
 			: path.resolve(ctx.workspacePath, searchPath);
 
 		// 检查路径是否存在
-		if (!fs.existsSync(absolutePath)) {
+		if (!pf.existsSync(absolutePath)) {
 			return `Error: Path not found: ${searchPath}`;
 		}
 
@@ -233,7 +235,7 @@ export async function searchFilesTool(
 
 			let entries: fs.Dirent[];
 			try {
-				entries = fs.readdirSync(dir, { withFileTypes: true });
+				entries = pf.readdirSync(dir, { withFileTypes: true }) as fs.Dirent[];
 			} catch {
 				return; // 跳过无法读取的目录
 			}
@@ -273,7 +275,7 @@ export async function searchFilesTool(
 
 					// 检查文件大小
 					try {
-						const stat = fs.statSync(fullPath);
+						const stat = pf.statSync(fullPath);
 						if (stat.size > SEARCH_CONFIG.MAX_FILE_SIZE) {
 							filesSkipped++;
 							continue;
@@ -283,7 +285,7 @@ export async function searchFilesTool(
 					}
 
 					// 搜索文件
-					const fileResults = searchFile(fullPath, searchRegex, ctx.workspacePath);
+					const fileResults = searchFile(pf, fullPath, searchRegex, ctx.workspacePath);
 					filesSearched++;
 
 					for (const match of fileResults) {
@@ -305,12 +307,12 @@ export async function searchFilesTool(
 		};
 
 		// 开始搜索
-		const stat = fs.statSync(absolutePath);
-		if (stat.isDirectory()) {
+		const stat = pf.statSync(absolutePath);
+		if (stat.isDirectory) {
 			searchDir(absolutePath);
 		} else {
 			// 单文件搜索
-			const fileResults = searchFile(absolutePath, searchRegex, ctx.workspacePath);
+			const fileResults = searchFile(pf, absolutePath, searchRegex, ctx.workspacePath);
 			results.push(...fileResults.slice(0, SEARCH_CONFIG.MAX_RESULTS));
 			totalMatches = fileResults.length;
 		}
@@ -336,11 +338,11 @@ export async function searchFilesTool(
 /**
  * 搜索单个文件
  */
-function searchFile(filePath: string, regex: RegExp, workspacePath: string): SearchMatch[] {
+function searchFile(pf: ToolFs, filePath: string, regex: RegExp, workspacePath: string): SearchMatch[] {
 	const results: SearchMatch[] = [];
 
 	try {
-		const content = fs.readFileSync(filePath, 'utf-8');
+		const content = pf.readFileSync(filePath, 'utf-8');
 		const lines = content.split('\n');
 		const relativePath = path.relative(workspacePath, filePath);
 
