@@ -1,0 +1,93 @@
+/* ============================================================================
+ *  MessageBubble 样式 — 跨形态共用
+ *
+ *  CSS 变量带 fallback：consumer 想换主题就在 :root 重定义同名变量。
+ * ========================================================================== */
+
+.mu-msg {
+	margin: 8px 0;
+	font-family: var(--maxian-font-sans, system-ui, -apple-system, sans-serif);
+	color:       var(--maxian-text-base, #e6e6e6);
+	font-size:   13.5px;
+	line-height: 1.6;
+}
+
+/* ── 用户消息：右侧气泡 ── */
+.mu-msg-user {
+	display: flex;
+	justify-content: flex-end;
+}
+.mu-msg-user .mu-msg-content {
+	background:    var(--maxian-bg-user-bubble, rgba(99, 102, 241, 0.18));
+	border:        1px solid var(--maxian-border, #3a3a3a);
+	border-radius: 10px;
+	padding:       8px 12px;
+	max-width:     85%;
+	white-space:   pre-wrap;
+	word-break:    break-word;
+}
+
+/* ── 助手消息：左侧无气泡，全宽 ── */
+.mu-msg-assistant {
+	padding: 4px 0;
+}
+.mu-msg-assistant .mu-msg-content {
+	white-space: pre-wrap;
+	word-break:  break-word;
+}
+.mu-typing {
+	display:    inline-block;
+	margin-left: 2px;
+	color:      var(--maxian-accent, #6366f1);
+	animation:  mu-blink 1s steps(1) infinite;
+}
+@keyframes mu-blink {
+	50% { opacity: 0; }
+}
+
+/* ── 思考块：折叠淡灰 ── */
+.mu-reasoning {
+	background:    var(--maxian-bg-muted, rgba(255, 255, 255, 0.04));
+	border-left:   3px solid var(--maxian-accent, #6366f1);
+	border-radius: 4px;
+	padding:       6px 12px;
+	margin:        4px 0;
+}
+.mu-reasoning-head {
+	display:    flex;
+	align-items: center;
+	gap:        6px;
+	font-size:  12px;
+	color:      var(--maxian-text-muted, #999);
+	margin-bottom: 4px;
+}
+.mu-reasoning-icon { font-size: 14px; }
+.mu-reasoning-body {
+	white-space: pre-wrap;
+	color:       var(--maxian-text-muted, #888);
+	font-size:   12.5px;
+	max-height:  120px;
+	overflow-y:  auto;
+}
+
+/* ── 错误消息：红框 ── */
+.mu-error {
+	background:    var(--maxian-bg-error, rgba(239, 68, 68, 0.12));
+	border:        1px solid var(--maxian-border-error, rgba(239, 68, 68, 0.4));
+	border-radius: 6px;
+	padding:       8px 12px;
+	color:         var(--maxian-text-error, #ef4444);
+	display:       flex;
+	gap:           8px;
+	align-items:   flex-start;
+	white-space:   pre-wrap;
+}
+.mu-error-icon { flex-shrink: 0; }
+
+/* ── 系统消息：弱化 ── */
+.mu-system {
+	color:     var(--maxian-text-muted, #888);
+	font-size: 12px;
+	font-style: italic;
+	padding:   2px 0;
+}
