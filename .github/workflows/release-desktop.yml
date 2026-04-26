@@ -29,11 +29,13 @@ jobs:
             sidecar: "darwin-arm64"
             rustTarget: "aarch64-apple-darwin"
             isMac: true
-          - os: macos-13
-            name: "macOS (Intel)"
-            sidecar: "darwin-x64"
-            rustTarget: "x86_64-apple-darwin"
-            isMac: true
+          # 注：macOS Intel (macos-13) runner 资源紧张，常常排队数小时；
+          # 当前用户主要在 Apple Silicon。如需 Intel 版本，临时取消注释以下并接受较慢构建。
+          # - os: macos-13
+          #   name: "macOS (Intel)"
+          #   sidecar: "darwin-x64"
+          #   rustTarget: "x86_64-apple-darwin"
+          #   isMac: true
           - os: windows-latest
             name: "Windows x64"
             sidecar: "win32-x64"
