@@ -84,3 +84,6 @@ export * from './lspTool.js';
 export * from './questionTool.js';
 export * from './planExitTool.js';
 export * from './taskTool.js';
+
+// K9-1：暴露 platformFs helper 给消费方（如 IDE 自定义 platform 时需要 ToolFs 类型签名）
+export { platformFs, type ToolFs } from './platformFs.js';
