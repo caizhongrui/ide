@@ -64,6 +64,12 @@ interface AiProxyMessage {
 	tool_calls?: AiProxyToolCall[];
 	tool_call_id?: string;
 	name?: string;
+	/**
+	 * DeepSeek thinking 模式专用：上一轮 assistant 触发 tool_calls 时，
+	 * 必须把该 assistant 消息当时返回的 reasoning_content 原样带回，否则上游 400。
+	 * 后端 AiProxyRequest.Message.reasoningContent（@JsonProperty("reasoning_content")）透传至 DeepSeek。
+	 */
+	reasoning_content?: string;
 }
 
 interface AiProxyTool {
@@ -665,10 +671,15 @@ export class AiProxyHandler implements IApiHandler {
 		// 转换消息
 		for (const msg of messages) {
 			if (typeof msg.content === 'string') {
-				result.push({
+				const m: AiProxyMessage = {
 					role: msg.role,
 					content: msg.content
-				});
+				};
+				// DeepSeek thinking：assistant 字符串形态消息也带回 reasoning_content
+				if (msg.role === 'assistant' && msg.reasoning) {
+					m.reasoning_content = msg.reasoning;
+				}
+				result.push(m);
 			} else {
 				// 处理内容块数组
 				let textContent = '';
@@ -731,6 +742,10 @@ export class AiProxyHandler implements IApiHandler {
 					};
 					if (toolCalls.length > 0) {
 						aiProxyMsg.tool_calls = toolCalls;
+					}
+					// DeepSeek thinking：上一轮 assistant 的思维链必须原样回传
+					if (msg.reasoning) {
+						aiProxyMsg.reasoning_content = msg.reasoning;
 					}
 					result.push(aiProxyMsg);
 				}

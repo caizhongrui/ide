@@ -996,7 +996,7 @@ export class TaskService extends Disposable {
 				const stream = await this.attemptApiRequest(retryAttempt);
 
 				// 处理流式响应
-				const { assistantMessage, toolUses, hasError, stopReason } = await this.processApiStream(stream);
+				const { assistantMessage, toolUses, hasError, stopReason, reasoningContent } = await this.processApiStream(stream);
 
 				if (hasError) {
 					return true;
@@ -1010,7 +1010,7 @@ export class TaskService extends Disposable {
 					if (this._outputLimitHits <= TaskService.MAX_OUTPUT_LIMIT_HITS) {
 						// 添加已有的助手响应（截断的部分）
 						if (assistantMessage || toolUses.length > 0) {
-							await this.addAssistantResponse(assistantMessage, toolUses);
+							await this.addAssistantResponse(assistantMessage, toolUses, reasoningContent);
 						}
 						// 注入续写提示，让模型从中断处继续
 						this.pushHistory({
@@ -1241,8 +1241,10 @@ export class TaskService extends Disposable {
 		toolUses: Array<{ id: string; name: string; input: any }>;
 		hasError: boolean;
 		stopReason: string; // E2优化：'length' 表示命中 max_output_tokens 上限
+		reasoningContent: string; // DeepSeek thinking：本轮 reasoning_content 全文，多轮对话需原样回传
 	}> {
 		let assistantMessage = '';
+		let reasoningContent = ''; // 累积本轮 reasoning_content 全文（DeepSeek thinking 模式必需）
 		const toolUses: Array<{ id: string; name: string; input: any }> = [];
 		let hasError = false;
 		let stopReason = ''; // E2优化：追踪输出截断原因
@@ -1430,6 +1432,9 @@ export class TaskService extends Disposable {
 			} else if (chunk.type === 'reasoning') {
 				// 模型思考链阶段：将思考内容直接透传给UI展示，UI负责在正式内容到来时折叠
 				reasoningCharsCount += chunk.text.length;
+				// DeepSeek thinking：累积全文，落入 apiConversationHistory 的 assistant 消息上，
+				// 下一轮请求会作为 reasoning_content 原样回传（否则上游 400）
+				reasoningContent += chunk.text;
 				this._onStreamChunk.fire({
 					reasoningText: chunk.text,
 					isPartial: true
@@ -1512,7 +1517,7 @@ export class TaskService extends Disposable {
 			await this.say('api_req_finished', 'API请求已完成');
 		}
 
-		return { assistantMessage, toolUses, hasError, stopReason };
+		return { assistantMessage, toolUses, hasError, stopReason, reasoningContent };
 	}
 
 	/**
@@ -1600,10 +1605,14 @@ export class TaskService extends Disposable {
 
 	/**
 	 * 添加助手响应到历史
+	 *
+	 * @param reasoningContent 可选；DeepSeek thinking / OpenAI o1 系列返回的思维链原文。
+	 *   多轮对话时该字段会随 assistant 消息一起回传给上游（aiProxyHandler 的 reasoning_content）。
 	 */
 	private async addAssistantResponse(
 		assistantMessage: string,
-		toolUses: Array<{ id: string; name: string; input: any }>
+		toolUses: Array<{ id: string; name: string; input: any }>,
+		reasoningContent?: string,
 	): Promise<void> {
 		const content: ContentBlock[] = [];
 
@@ -1620,7 +1629,11 @@ export class TaskService extends Disposable {
 			});
 		}
 
-		this.pushHistory({ role: 'assistant', content: content as any });
+		const msg: MessageParam = { role: 'assistant', content: content as any };
+		if (reasoningContent) {
+			msg.reasoning = reasoningContent;
+		}
+		this.pushHistory(msg);
 	}
 
 	/**

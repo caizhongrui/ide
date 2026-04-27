@@ -64,6 +64,13 @@ export type ContentBlock = TextContentBlock | ImageContentBlock | ToolUseContent
 export interface MessageParam {
 	role: MessageRole;
 	content: string | ContentBlock[];
+	/**
+	 * 模型在本轮返回的思维链原文（DeepSeek thinking 模式 / OpenAI o1 系列）
+	 * 多轮对话中：上一轮 assistant 触发了 tool_calls 时，下一轮请求必须把这段 reasoning_content
+	 * 原样回传给上游，否则 DeepSeek 会返回 400 "The reasoning_content in the thinking mode must be passed back to the API"。
+	 * 不需要思维链的 provider 可忽略此字段。
+	 */
+	reasoning?: string;
 }
 
 /**
