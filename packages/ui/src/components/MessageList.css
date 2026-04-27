@@ -12,6 +12,29 @@
 	color:         var(--maxian-text-base, #e6e6e6);
 	background:    transparent;
 }
+/* externalScrollHost 模式：禁用本组件内部滚动，让外部接管 */
+.mu-list-no-scroll {
+	overflow-y: visible;
+	flex:       1 1 auto;
+}
+/* 虚拟化兜底"展开全部"按钮 */
+.mu-list-show-more {
+	align-self:  center;
+	padding:     6px 14px;
+	background:  var(--maxian-bg-subtle, #2a2a2a);
+	border:      1px solid var(--maxian-border, #3a3a3a);
+	border-radius: 16px;
+	color:       var(--maxian-text-muted, #999);
+	cursor:      pointer;
+	font-size:   12px;
+	margin:      4px auto 8px;
+	font-family: inherit;
+	transition:  background 120ms;
+}
+.mu-list-show-more:hover {
+	background: var(--maxian-bg-hover, #2f2f2f);
+	color:      var(--maxian-text-base, #e6e6e6);
+}
 .mu-list::-webkit-scrollbar          { width: 8px; }
 .mu-list::-webkit-scrollbar-thumb    {
 	background:    var(--maxian-scrollbar, rgba(255, 255, 255, 0.15));

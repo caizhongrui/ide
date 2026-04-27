@@ -11,5 +11,7 @@ export {
 } from './ApprovalDialog.js';
 
 export { MessageList,   type MessageListProps   } from './MessageList.js';
-export { MessageBubble, type MessageBubbleProps } from './MessageBubble.js';
+export { MessageBubble, type MessageBubbleProps, type MessageActions } from './MessageBubble.js';
 export { ToolCallCard,  type ToolCallCardProps, type ToolRenderRegistry } from './ToolCallCard.js';
+export { ToolBatchCard, type ToolBatchCardProps } from './ToolBatchCard.js';
+export { EditDiffView } from './EditDiffView.js';

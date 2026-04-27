@@ -124,6 +124,18 @@ export function createSseDispatcher(store: MessagesStoreApi): SseDispatcher {
 				}
 				break;
 			}
+			case 'tool_output_chunk': {
+				// bash / execute_command 等长跑工具的实时 stdout / stderr 流
+				const toolUseId = String(event['toolUseId'] ?? event['toolId'] ?? '');
+				if (!toolUseId) break;
+				const chunk = String(event['chunk'] ?? '');
+				if (!chunk) break;
+				const list = store.messages();
+				const cur = list.find(m => m.role === 'tool' && m.toolId === toolUseId);
+				const accumulated = (cur?.liveOutput ?? '') + chunk;
+				store.upsertTool(toolUseId, { liveOutput: accumulated });
+				break;
+			}
 			case 'tool_call_result': {
 				const toolUseId = String(event['toolUseId'] ?? event['toolId'] ?? '');
 				if (!toolUseId) break;

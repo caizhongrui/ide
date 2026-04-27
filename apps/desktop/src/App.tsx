@@ -15,6 +15,7 @@ import { initI18n, t, setLocale, getLocale } from "./i18n"
 import {
   ApprovalDialog as SharedApprovalDialog,
   MessageList as SharedMessageList,
+  EditDiffView,
   createMessagesStore,
   type ChatMessage as SharedChatMessage,
 } from "@maxian/ui"
@@ -250,7 +251,7 @@ export default function App() {
   const [collapsedGroups, setCollapsedGroups] = createSignal<Set<string>>(new Set())
 
   // Tool card expand state (Set of toolUseIds that are EXPANDED; completed tools are collapsed by default)
-  const [expandedTools, setExpandedTools] = createSignal<Set<string>>(new Set())
+  // expandedTools：旧 viewGroups 时代用，迁移到 SharedMessageList 后由 ToolBatchCard / ToolCallCard 自管
   // Reasoning block expand state (Set of msg IDs that are expanded; completed reasoning collapsed by default)
   const [expandedReasonings, setExpandedReasonings] = createSignal<Set<string>>(new Set())
 
@@ -763,6 +764,8 @@ export default function App() {
       ?? { hideTodos: false, hideReasoning: false, hideInternalTools: false }
   )
   const [showFilterMenu, setShowFilterMenu] = createSignal(false)
+  /** 强制展开所有 reasoning（"展开全部思考"按钮联动） */
+  const [expandAllReasoning, setExpandAllReasoning] = createSignal(false)
   function updateMsgFilter(patch: Partial<MsgFilter>) {
     const next = { ...msgFilter(), ...patch }
     setMsgFilter(next)
@@ -896,6 +899,13 @@ export default function App() {
 
   let chatEndRef: HTMLDivElement | undefined
   let chatTimelineRef: HTMLDivElement | undefined
+  // 滚动位置 reactive 标记（控制"加载更早消息"按钮 + "回到底部"按钮的显示）
+  const [isNearTop, setIsNearTop] = createSignal(false)
+  const [isNearBottomSignal, setIsNearBottomSignal] = createSignal(true)
+  function scrollChatToBottom(): void {
+    if (!chatTimelineRef) return
+    chatTimelineRef.scrollTop = chatTimelineRef.scrollHeight
+  }
   /** 贴底滚动跟踪：用户手动往上翻时暂停 auto-scroll；回到底部重新启用 */
   let stickToBottom = true
   const STICK_THRESHOLD_PX = 80
@@ -912,6 +922,10 @@ export default function App() {
     requestAnimationFrame(() => chatEndRef?.scrollIntoView({ behavior: 'smooth' }))
   }
   let textareaRef: HTMLTextAreaElement | undefined
+  /** 用户通过 composer 顶部拖条调整的输入框总高度；null = auto（默认高度） */
+  const [composerHeight, setComposerHeight] = createSignal<number | null>(null)
+  /** per-session 的 todos 快照（切会话时保留 / 恢复任务清单） */
+  const _sessionTodosSnapshot = new Map<string, { todos: TodoItem[]; leftover: boolean }>()
   let unsubscribe: (() => void) | null = null
   let msgId = 0
 
@@ -1263,6 +1277,12 @@ export default function App() {
       })
     }
 
+    // 切会话前先把当前会话的 todos 快照存起来；
+    // 切到目标会话后从快照恢复（让任务清单跟随会话切换不丢）
+    const prevSid = activeSessionId()
+    if (prevSid) {
+      _sessionTodosSnapshot.set(prevSid, { todos: todos(), leftover: todosLeftover() })
+    }
     setActiveSessionId(id); setMessages([])
     setChangedFiles(new Map())
     setTokenUsed(0)
@@ -1271,8 +1291,9 @@ export default function App() {
     _resetRecv()
     setMsgHasMore(false)
     setMsgOldestTs(undefined)
-    setTodos([])
-    setTodosLeftover(false)
+    const snapTodo = _sessionTodosSnapshot.get(id)
+    setTodos(snapTodo?.todos ?? [])
+    setTodosLeftover(snapTodo?.leftover ?? false)
     setFollowupSuggestions([])
     setFollowupQueue([])
     setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
@@ -2152,7 +2173,28 @@ export default function App() {
       }
     }
 
-    // 消息间键盘导航暂时禁用（迁移到 SharedMessageList 后由 @maxian/ui 自带滚动管理；后续按需补回）
+    // 消息间键盘导航 (j/k or ↑/↓)：滚到对应消息（不在输入框内 + 无 meta）
+    if (!meta) {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
+      const inInput = tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable
+      if (!inInput && (e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        const list = messages()
+        if (list.length === 0) return
+        e.preventDefault()
+        const dir = (e.key === 'j' || e.key === 'ArrowDown') ? 1 : -1
+        const cur = focusedMsgIdx() === -1 ? (dir > 0 ? -1 : list.length) : focusedMsgIdx()
+        const next = Math.max(0, Math.min(list.length - 1, cur + dir))
+        setFocusedMsgIdx(next)
+        const targetId = list[next]?.id
+        if (targetId) {
+          queueMicrotask(() => {
+            const el = document.querySelector(`[data-msg-id="${targetId}"]`) as HTMLElement | null
+            el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+          })
+        }
+        return
+      }
+    }
     if (!meta) return
 
     // Cmd+N — 新建会话（文本框外）
@@ -3539,15 +3581,6 @@ export default function App() {
     return `${(n / 1000).toFixed(1)}K 字`
   }
 
-  function toggleTool(toolUseId: string) {
-    setExpandedTools(prev => {
-      const next = new Set(prev)
-      if (next.has(toolUseId)) next.delete(toolUseId)
-      else next.add(toolUseId)
-      return next
-    })
-  }
-
   function toggleReasoning(id: string) {
     setExpandedReasonings(prev => {
       const next = new Set(prev)
@@ -4436,93 +4469,129 @@ export default function App() {
   }
   const CHANGELOG: ChangelogEntry[] = [
     {
+      version: '0.2.14',
+      date: '2026-04-27',
+      changes: [
+        '👤 用户消息显示头像（取你姓名/账号的首字），AI 消息显示"AI"圆形徽标',
+        '📅 消息时间戳显示完整年月日（YYYY-MM-DD HH:mm），固定在气泡右下不再挤换行',
+        '🎨 代码块强制 GitHub 深色主题（不论 UI 主题），高亮颜色清晰；语言名 + 复制按钮带边框明显可见，"已复制"绿色高亮反馈',
+        '✏ 编辑/多处编辑工具卡片改用红绿 diff 视图：删除行红底、新增行绿底，多处修改逐块罗列',
+        '⚡ bash / 命令工具运行时实时显示 stdout：终端深色背景 + 绿色呼吸灯 + 行数计数 + 自动滚到底',
+        '🛠 多个并行工具调用自动合并卡片（如同时读 5 个文件 → "已执行 5 个工具" 一行），点击展开',
+        '✋ 鼠标悬停消息显示药丸按钮：重新生成 / 从此分叉 / 删除（带 SVG 图标，不再是文字符号）',
+        '⬇ 浏览历史时右下角浮动"回到底部"按钮；⬆ 滚到顶部时才出现"加载更早消息"按钮',
+        '📜 历史拉到最后显示"— 已是最早的消息 —"提示',
+        '↕ 输入框顶部蓝色边线可拖拽调高，最高占窗口 1/3，最低 120px 保证按钮可见',
+        '📋 任务清单（Todos）切换会话不再丢失，每个会话独立保留',
+        '🧠 思考过程：流式输出时全部展开，完成后默认收起（仅一行 header），点击 chevron 手动展开/折叠',
+        '🪄 工具栏新增"展开全部思考"按钮，一键查看本会话所有思考详情',
+        '🎉 任务完成绿色横条带弹性渐入动画',
+        '✅ AI 任务总结直接以 assistant 气泡呈现（attempt_completion 不再藏在工具卡片折叠里）',
+        '🖼 多模态：消息附带图片自动在气泡内显示缩略图，点击新窗口打开原图',
+        '📝 markdown 增强：表格带边框 + 隔行斑马、引用块带左边线 + 灰背景、分割线主题色',
+        '🔍 设置面板的"隐藏 todos / 思考 / 内部工具"过滤开关现在真生效（之前只是空摆）',
+        '🚀 虚拟化：消息超 800 条只渲染最近 800 条，顶部"展开全部"按钮（防止超长会话卡顿）',
+        '⌨️ 键盘 j/k / ↑↓ 在消息间快速跳转（输入框外）',
+        '🔐 修改文件 / 运行命令等危险操作弹出审批对话框（含"本会话允许 / 总是允许"记忆）',
+        '🏠 IDE 与桌面端使用独立数据库（~/.maxian-ide vs ~/.maxian），可同时打开互不干扰',
+        '🔧 修复：AI 写正则用 (?i)/(?ims) 等内联标志报错（自动转 JS 兼容写法）',
+        '♻️ 探索类工具（搜索 / glob / grep 等）的死循环检测阈值放宽到 8 次，AI 正常重试不再被误杀',
+        '⚙️ 架构：桌面端、IDE、未来 Web 共用 @maxian/ui 同一份组件 + store + SSE 适配器，一处改三端生效',
+        '🧹 桌面端净删除 ~400 行老的消息渲染代码（旧 viewGroups 系统下线）',
+      ],
+    },
+    {
+      version: '0.2.13',
+      date: '2026-04-27',
+      changes: [
+        '🎨 桌面端聊天界面整体换新：用户消息右侧蓝色气泡、AI 回复左侧深色气泡，每条带时间戳，整体更清爽',
+        '🧠 思考过程重新设计：流式输出时全部展开，思考完毕自动收起，点击标题可手动展开 / 折叠',
+        '✅ AI 完成任务时显示绿色"任务完成"横条，最终总结直接以 AI 回复气泡呈现，不再藏在工具卡片里',
+        '🛠 多个并行工具调用自动合并成一张卡片（如同时读取 5 个文件 → 一行"已执行 5 个工具"），点击展开查看细节',
+        '✋ 鼠标悬停在消息上显示操作按钮：重新生成 / 从此分叉新会话 / 删除（药丸状下拉式按钮）',
+        '⬇ 浏览历史时聊天区右下角出现"回到底部"按钮，一键回最新消息',
+        '⬆ "加载更早消息"按钮只在你滚到顶部时才出现，不再常驻打扰',
+        '↕ 输入框高度可拖拽：把鼠标放到输入框顶部边线向上拖即可放大，最高占窗口 1/3',
+        '📋 任务清单切换会话不再丢失：每个会话的 todos 独立保留，切回去还在',
+        '🔐 修改文件 / 运行命令等危险操作现在统一弹出审批对话框（Code 模式也生效），可选"允许一次 / 本会话允许 / 总是允许"',
+        '🏠 IDE 与桌面端使用独立数据库（~/.maxian-ide vs ~/.maxian），同时打开两个客户端不会互相干扰',
+        '🔍 修复 AI 写正则用 (?i) 前缀时报错：自动转成 JS 兼容写法',
+        '♻️ 修复 AI 探索类工具（搜索 / glob 等）容易被"重复检测"误杀：阈值从 3 次放宽到 8 次',
+        '⚙️ 架构：桌面端、IDE、未来 Web 形态共用 @maxian/ui 同一份 UI 代码（共享 store + 组件 + SSE 适配器），一处改三端生效',
+        '🧹 删除桌面端约 400 行老的消息渲染代码（旧的 viewGroups 系统），整体代码量大幅精简',
+      ],
+    },
+    {
       version: '0.2.12',
       date: '2026-04-26',
       changes: [
-        '🧠 设置→关于→诊断与维护：「清除当前会话工具失败记忆」按钮 — 删 history 里所有 tool error 历史条目，让 AI 不再被旧错误污染推理（O1）',
-        '📊 设置→关于→诊断与维护：「重新计算所有会话 Token 用量」按钮 — 从 history 按 char/4 估算回填 sessions 表，修复"会话列表 token 用量为 0"（O3）',
-        '🛡 sidecar 父进程死亡 watcher — Tauri spawn 时传 MAXIAN_PARENT_PID，sidecar 每 3s 探测父进程，父死了自动 graceful shutdown。彻底解决 kill -9 desktop 主进程时 sidecar 残留占住 4096 端口（O4）',
-        '🔧 CI 新增版本一致性校验 — tools/version-check/check.mjs 校验 4 处 desktop 版本字段同步，防 hardcode mismatch（O2）',
-        '📦 Token 进度条 ≥ 80% 显示橙色「📦 压缩上下文」按钮，≥ 90% 升级红色 critical 样式 — 一键 /sessions/:id/compact 释放配额（O5）',
-        '⚠️ 工具失败时显示 ❌ 错误详情面板（之前只有红点）— 默认显示一行摘要，多行错误支持「展开 ▾」max-height 320px（O7）',
-        '🪟 窗口尺寸/位置/最大化状态持久化到 ~/.maxian/desktop-window-state.json，重启后还原（O9）',
-        '🔥 修复：sidecar 报 "require is not defined" 导致所有走 platformFs fallback 的工具全炸 — 改静态 import * as nodeFs from "node:fs"，Bun --compile 二进制兼容',
-        '🔥 修复：read_file 缓存命中分支不写 FileTime → sidecar 重启后 multiedit "必须先 read" 死循环',
-        '🔥 修复：移除 readFileTool 的「目录名误判二进制」逻辑 — 之前 dist/out/build/target 等路径段下的 .vue/.ts 等文本文件被错误判定为 binary 拒读',
-        '🔥 修复：关于面板版本号 hardcode 0.2.10 — vite.config.ts 用 define 注入 __APP_VERSION__，唯一真相源 = package.json',
-        '🏗 K8c 收尾：core 9 个工具入口 fs.*Sync 100% 走 platformFs（含 listDirAsync / readFileTool binary buffer / openSync 等之前保留的内部 helper）— 为 Web/IDEA/Cloud 形态接入彻底铺路',
+        '🧹 设置面板新增"诊断与维护"区：一键清除当前会话工具失败记忆，让 AI 不再被旧错误干扰',
+        '📊 一键重新统计所有会话的 Token 用量，修复历史会话显示为 0 的问题',
+        '🛡 关闭桌面端时如果意外强杀，后台 sidecar 会自动检测并退出，不再残留占用端口',
+        '📦 Token 用量 ≥ 80% 出现橙色"压缩上下文"按钮，≥ 90% 变红色，一键释放配额',
+        '⚠️ 工具失败时显示完整的错误详情面板，可展开查看多行错误信息',
+        '🪟 窗口大小、位置、是否最大化下次启动后自动还原',
+        '🔥 修复：sidecar 报"require is not defined"导致部分工具全部失效',
+        '🔥 修复：读取过的文件再编辑时偶发死循环（"必须先 read"反复触发）',
+        '🔥 修复：dist / build / target 等目录下的源码文件被误判为二进制拒绝读取',
+        '🔥 修复：关于页面显示版本号写死 0.2.10，现在和实际版本同步',
       ],
     },
     {
       version: '0.2.11',
       date: '2026-04-26',
       changes: [
-        '✅ 修复：任务清单卡 X/Y 永不完成 —— AI 调 attempt_completion 前未把所有 todo 收尾，前端任务清单永远显示少 1 项，用户误以为任务还在跑、不能中止',
-        '✅ 后端硬规则：HARD RULES 第 8 条强制 AI 在 attempt_completion 之前先用 todo_write 把所有 todo 标 completed/cancelled',
-        '✅ 前端兜底：task_status:completed 收到后若 todos 还有 in_progress/pending → 显示橙色徽章"⚠ AI 提前结束，N 项未收尾"，未完成项渲染为橙色斜体',
-        '✅ TodoItem 类型增加 cancelled 状态，渲染为灰色 + 删除线 + ✕ 图标',
-        '📁 修复：切换会话时右侧"文件变更"面板始终为空 —— 切会话时异步从 /sessions/:id/changed-files 拉取该会话历史',
-        '📁 防竞态：用 activeSessionId() 校验，用户快速切换会话时旧请求结果被丢弃',
-        '📊 修复：设置面板里所有会话 token 用量都显示 0 —— sessions 表 input_tokens/output_tokens 列从未被写入',
-        '📊 runAgentLoop 末尾把本轮 totalInputTokens/totalOutputTokens 累加到 sessions 表（仅对新会话和未来对话生效，历史会话仍为 0）',
-        '🔧 CI: typecheck 前先 build:libs，修复 GitHub Actions 上"Cannot find module @maxian/core"',
+        '✅ 修复：任务清单一直显示 X/Y 不能完成 — AI 调用结束工具前没把所有 todo 标记完成，看起来像还在跑',
+        '✅ AI 提前结束时显示橙色徽章："⚠ AI 提前结束，N 项未收尾"，未完成项用橙色斜体标出',
+        '✅ 任务清单新增"已取消"状态（灰色加删除线）',
+        '📁 修复：切换会话时右侧"文件变更"面板始终为空，现在会从历史拉取该会话的变更记录',
+        '📊 修复：设置面板里所有会话的 Token 用量都显示 0，现在每轮对话结束自动累加（仅对新会话生效）',
       ],
     },
     {
       version: '0.2.10',
       date: '2026-04-24',
       changes: [
-        '🛡 修复：AI 修改代码会覆盖用户在其他 IDE 的手改（"写了 A/B 两个方法→我手改了→让 AI 优化 A→A/B 的手改都被删"）',
-        '🛡 根因：FileTime.assert 只能拦"没读"或"读完后被外部改过"，拦不住"AI 读了但继续用旧脑子里的内容整体覆盖"',
-        '🛡 write_to_file 新增 stale-overwrite 检测：对已存在文件，对比新内容 vs 磁盘现状；如果删除行数 > 10 且 > 新增行数的 2 倍 → 拦截',
-        '🛡 拦截消息直接告诉 AI："用 edit/multiedit 做局部修改，不要 write_to_file 整体重写"',
-        '🛡 系统提示词加硬规则：修改已存在文件一律用 edit/multiedit；write_to_file 仅限新建文件或用户明确要求整体重写',
-        '🛡 TOOL SELECTION 表改注："改已存在文件的局部" → edit，"创建新文件" → write_to_file，明确写上"write_to_file 使用禁区"',
+        '🛡 修复：AI 优化代码时会把你在其他 IDE 里的手改一并删掉',
+        '🛡 写文件工具新增"破坏性覆盖"检测：删除超过 10 行且超过新增行数 2 倍 → 拦截，并提示 AI 改用局部编辑',
+        '🛡 系统提示词新增硬规则：修改已存在文件一律用编辑工具，整文件重写仅限新建文件或用户明确要求',
       ],
     },
     {
       version: '0.2.9',
       date: '2026-04-23',
       changes: [
-        '📊 默认 CONTEXT_WINDOW 调回 1M（Qwen3-coder-plus / Claude 1M / Qwen-max-longcontext 标准）',
-        '📊 L1 剪枝阈值 550K（55%），L2 总结阈值 850K（85%），跟 v0.2.0~v0.2.7 保持一致',
-        '📊 小模型用户（Qwen-plus 128K 等）设 MAXIAN_CONTEXT_WINDOW=128000 环境变量即可',
-        '💡 澄清：token_usage 的 used 字段是模型 tokenizer 真实计算结果（非估算），inputTokens = 整个对话历史 + system prompt 的真实长度',
+        '📊 默认上下文窗口调回 100 万 Token（适配 Qwen3-coder-plus / Claude 1M 等大窗口模型）',
+        '📊 小窗口模型用户可设环境变量 MAXIAN_CONTEXT_WINDOW=128000 切到 128K',
+        '💡 Token 用量是模型实际计算的精确值（含整段对话历史 + system prompt），非估算',
       ],
     },
     {
       version: '0.2.8',
       date: '2026-04-23',
       changes: [
-        '📊 修复：上下文进度条到头但实际没压缩 —— 进度条 limit（硬编码 200K）和压缩阈值（600K/850K）不一致',
-        '📊 后端 CONTEXT_WINDOW 默认改为 128K（Qwen-plus / GPT-4o / Claude Sonnet 标准），阈值 L1=55%、L2=85% 跟着动',
-        '📊 支持环境变量覆盖：MAXIAN_CONTEXT_WINDOW / MAXIAN_COMPACT_L1_THRESHOLD / MAXIAN_COMPACT_L2_THRESHOLD（1M context 模型设 MAXIAN_CONTEXT_WINDOW=1000000）',
-        '📊 后端 token_usage 事件上报的 limit 字段跟 CONTEXT_WINDOW 一致（之前硬编码 200K）',
-        '📊 前端接收后端上报的 limit 动态设置 tokenLimit（之前硬编码 200K 独立一份）',
-        '📊 效果：进度条真实反映当前模型窗口占用率；到 55% 触发 L1 压缩；触发前不会出现"进度条满但未压缩"的错觉',
+        '📊 修复：上下文进度条显示满了但实际并没有触发压缩（进度条上限和压缩阈值不一致）',
+        '📊 现在进度条与压缩阈值统一：到 55% 触发轻度压缩，85% 触发重度压缩',
+        '📊 支持环境变量自定义阈值',
       ],
     },
     {
       version: '0.2.7',
       date: '2026-04-23',
       changes: [
-        '🧠 修复：same_error_loop 导致 AI 误判"文件损坏"并螺旋升级（换工具绕过）',
-        '🧠 A. 重写 block 文案：从"🔴 same_error_loop 签名 XXX"改为第二人称直接指令"🚫 你已经用相同参数调用 read_file 失败了 3 次 + 原因排查清单 + 禁止换工具绕过"',
-        '🧠 A. 按工具类型定制排查清单：read_file 提示用 glob 搜、edit 提示先 read_file 重读、execute_command 提示 Windows 命令等价等',
-        '🧠 B. 原始错误透传：存最近 3 次完整 error（每次前 500 字），在 block 消息里全部返给 AI（之前只给 100 字签名让 AI 猜）',
-        '🧠 D. readFileTool 首次失败就引导：根据父目录是否存在 / ENOENT / EACCES / EISDIR / 编码错误 给出针对性提示，指向正确工具（glob / list_files），避免 AI 原参数重试',
+        '🧠 修复：AI 反复尝试同一失败操作时会误判为"文件损坏"并不停换工具绕过',
+        '🧠 拦截信息改用第二人称直接告知 AI："你已经用相同参数失败 3 次"，并附排查清单',
+        '🧠 完整原始错误（最近 3 次每次 500 字）传回给 AI，避免它凭签名前缀猜测原因',
+        '🧠 读文件工具首次失败时根据错误类型给针对性提示（路径不存在 / 权限不足 / 是目录 / 编码错误）',
       ],
     },
     {
       version: '0.2.6',
       date: '2026-04-23',
       changes: [
-        '🛑 修复：思考阶段点停止后端 AI 还在输出 —— 对照码弦 IDE 实现，前端缺少"事件硬隔离"',
-        '🛑 后端 cancelTask 触发后立刻 emit task_aborted + task_status:aborted 给前端',
-        '🛑 前端收到 task_aborted → 立刻 setSending(false)、收尾所有 isPartial 消息、清 rateLimit',
-        '🛑 全局 _abortedAt 时间戳：abort 后 1500ms 内的 reasoning_delta / assistant_message / tool_input_delta / tool_call_start / tool_call_result / tool_output_chunk / todos_updated 全部静默丢弃（防 SSE buffer 残留事件继续显示）',
-        '🛑 新任务发送时自动 reset _abortedAt=0',
-        '🛑 完整 stop 链路 = AbortController.abort() + POST /ai/proxy/stop/{id} + task_aborted 广播 + 前端事件丢弃，对照码弦 IDE 三层防线齐全',
+        '🛑 修复：思考阶段点"停止"后 AI 仍继续输出',
+        '🛑 后端立即广播任务终止信号，前端立刻停发送状态、收尾流式消息、清限流提示',
+        '🛑 终止后 1.5 秒内的残留 SSE 事件全部丢弃，避免"已停止但消息还在涌出"',
       ],
     },
     {
@@ -4530,180 +4599,159 @@ export default function App() {
       date: '2026-04-23',
       changes: [
         '🛑 修复：思考过程中点"停止"按钮无效，AI 仍继续输出',
-        '🛑 根因：原 cancel 检查只在两块 chunk 之间生效，但思考流的 chunk 可能间隔几秒（R1/QwQ 慢思考），await 阻塞期间 cancel 完全无感',
-        '🛑 新增 active handler 注册表：sessionId → 当前正在 LLM 流的 AiProxyHandler',
-        '🛑 sessionManager.onCancel 注册全局 hook：cancelTask 一触发就主动调 handler.stopCurrentRequest() → AbortController.abort() → fetch 立刻抛 AbortError → for-await 立即退出',
-        '🛑 主路径 + 限流重试路径两个 for-await 都加 register/finally 包裹，确保 abort 能命中',
+        '🛑 根因：原取消机制只在两块输出之间生效，遇到慢思考模型（R1 / QwQ）一卡几秒就感知不到',
+        '🛑 现在能直接中止正在进行的 HTTP 请求，立即生效',
       ],
     },
     {
       version: '0.2.4',
       date: '2026-04-23',
       changes: [
-        '📜 修复：向上翻聊天历史时，新任务的流式消息会强制把页面滚回底部，打断阅读',
-        '📜 新增 stickToBottom 跟踪：仅当用户在底部 80px 内时才自动滚到底，否则保持当前阅读位置',
-        '📜 切换会话 / 用户主动发消息 → 重置 stickToBottom=true，下次消息自动滚底（符合预期）',
-        '📜 SSE 事件处理路径改用 maybeScrollToBottom()，不再无条件 scrollIntoView',
+        '📜 修复：往上翻聊天历史时，新消息会强制把页面滚回底部，打断阅读',
+        '📜 现在仅当你处于底部 80px 内时才自动滚到底，否则保持当前阅读位置',
+        '📜 切换会话或主动发新消息时重置自动滚底（符合预期）',
       ],
     },
     {
       version: '0.2.3',
       date: '2026-04-22',
       changes: [
-        '🔌 修复：关闭 app 再启动连不上服务（需手动 kill node 进程）',
-        '🔌 Tauri 主端：监听 WindowEvent::CloseRequested 关窗即 kill sidecar（原来只在 RunEvent::Exit 里 kill，关 × 根本不触发）',
-        '🔌 硬 kill 升级：Windows 用 taskkill /T /F 杀进程树，Unix 先 SIGTERM 释放端口→250ms 后 SIGKILL 保底',
-        '🔌 maxian-server 优雅关闭升级：listener.stop(false) 立即 close socket，2s 超时+3s 硬退出，保证端口一定释放',
-        '🔌 启动前端口探活：能连 /health=200 就直接复用已有 sidecar，不再重复 spawn',
-        '🔌 双重保险：CloseRequested + RunEvent::Exit 两条路径都 kill，任一触发都能杀干净',
+        '🔌 修复：关闭桌面端再启动连不上服务，需要手动 kill 后台进程',
+        '🔌 关窗口时自动 kill 后台 sidecar，端口立即释放',
+        '🔌 启动前自动探测：如果端口已有可用 sidecar 直接复用，不再重复启动',
+        '🔌 双重保险：异常退出和正常退出两条路径都会清理',
       ],
     },
     {
       version: '0.2.2',
       date: '2026-04-22',
       changes: [
-        '🛑 修复：点"结束"按钮后任务不停止 —— cancelTask 只设了内部 flag，agent loop 从不检查',
-        '🛑 runAgentLoop 三处检查点：每轮迭代开始前、LLM 流式输出每一块、工具执行前',
-        '🛑 流中取消时调用 AiProxyHandler.stopCurrentRequest() 立即 AbortController 中止 HTTP 请求',
-        '🛑 cancelTask 同时唤醒挂起的 question / plan_exit / approval 对话框（不然会一直 await）',
-        '🔁 runAgentLoop 开头自动 reset cancelled 标志，避免上次任务的 cancel 状态影响新任务启动',
+        '🛑 修复：点"结束"按钮后任务并不真停 — 内部只设了标志，主循环根本不检查',
+        '🛑 现在主循环在每轮迭代、每段流式输出、每次工具执行前都检查取消信号',
+        '🛑 取消时同时唤醒挂起的提问 / 计划 / 审批对话框，避免一直卡着等响应',
       ],
     },
     {
       version: '0.2.1',
       date: '2026-04-22',
       changes: [
-        '💰 E. Prompt 静态/动态分离：静态规则前置（哈希稳定），动态信息（workspacePath/platform/项目配置/skills）附加末尾',
-        '💰 DashScope/Qwen 的隐式前缀缓存现在能可靠命中 → 长对话 token 成本预计降低 40-60%',
-        '💰 新增静态段哈希追踪日志：每次调用打出「静态 prompt 前缀哈希一致」→ 直观看到缓存状态',
-        '🗜 F. contextCompaction 精细化占位符：从「已清理 edit 第 3/5 次（1200 字）」升级为「已清理 edit 第 3/5 次 | path=src/foo.ts | 结果摘要：Successfully edited ...」',
-        '🗜 保留工具名 + 序号 + 关键参数（path/command/pattern 等）+ 结果首 60% + 尾 40%（约 200 字）',
-        '🗜 每种工具专属参数摘要规则（read_file 取 path、bash 取 command、grep 取 pattern+path、web_fetch 取 url）',
+        '💰 系统提示词分静态 / 动态两段，让 DashScope / Qwen 的隐式前缀缓存能稳定命中',
+        '💰 长对话场景下 Token 成本预计降低 40%~60%',
+        '🗜 上下文压缩后的占位符更详细：保留工具名、序号、关键参数（路径 / 命令 / 模式）以及结果摘要',
       ],
     },
     {
       version: '0.2.0',
       date: '2026-04-22',
       changes: [
-        '🎯 Edit 工具启用 9-strategy 级联匹配（对标 OpenCode）：SimpleReplacer / LineTrimmed / BlockAnchor（Levenshtein 距离）/ WhitespaceNormalized / IndentationFlexible / EscapeNormalized / TrimmedBoundary / ContextAware / MultiOccurrence',
-        '📈 编辑成功率预估提升 2-3x —— AI 生成缩进差 2 空格、混用 tab/space、多/少空行的 old_string 都能匹配成功',
-        '🛡 FileTime.assert() 文件陈旧检测：read 时记录 mtime+size，edit 前验证"必须读过"+"未被外部改过"，消除一整类"陈旧内容覆盖用户编辑"bug',
-        '⚡ 工具执行三层调度：只读工具全部并行；不同文件的破坏性工具并行，同文件串行；bash/execute_command 全局串行',
-        '🤖 Agent-specific prompts：新增 explore 子 agent 模式（精简 prompt + 只读工具集），task 工具派发 subagentType=explore 时自动启用',
-        '🧹 session 删除时自动清理 FileTime 内部状态，防止长期运行内存泄漏',
+        '🎯 编辑工具改用 9 种匹配策略级联（对标 OpenCode）：精确 / 行裁 / 块锚 / 空白容忍 / 缩进灵活 / 转义归一 / 边界裁剪 / 上下文感知 / 多匹配处理',
+        '📈 编辑成功率预估提升 2-3 倍 — AI 生成的 old_string 即使缩进 / 制表符 / 空行有差异也能匹配上',
+        '🛡 文件陈旧检测：读取时记录修改时间和大小，编辑前验证"必须读过 + 未被外部改过"',
+        '⚡ 工具执行三层调度：只读工具全并行；不同文件的写操作并行，同文件串行；命令执行全局串行',
+        '🤖 新增 explore 子 Agent 模式（精简提示词 + 只读工具集），适合纯探索类任务',
       ],
     },
     {
       version: '0.1.3',
       date: '2026-04-22',
       changes: [
-        '🪟 Windows / Linux 隐藏自定义标题栏，改用系统原生标题栏（修复双标题栏重叠）',
-        '🔓 Tauri HTTP 插件白名单放行任意 http/https host，修复打包后内网 HTTP 后端登录被拦',
-        '💬 登录错误提示显示真实原因（plugin-http 权限拒绝 / 网络不通 / 账号密码错误）而不是固定 fallback',
-        '📦 Sidecar 机制：maxian-server 用 Bun --compile 打包成 58MB 单文件二进制',
-        '🎯 跨平台支持：Tauri externalBin 自动按平台选 bin，用户无需单独装 Node.js',
-        '🚀 GitHub Actions CI：macOS(arm64/x64) + Windows + Linux 四平台矩阵自动打包',
-        '💿 macOS DMG 用 hdiutil 手工打包（绕开 create-dmg 中文 productName 的 bug）',
-        '📏 Node.js 20 → 22 LTS，加 FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 消除 deprecation 警告',
+        '🪟 Windows / Linux 改用系统原生标题栏（修复双标题栏重叠）',
+        '🔓 修复打包后内网 HTTP 后端登录被 Tauri HTTP 白名单拦截',
+        '💬 登录错误显示真实原因（权限被拒 / 网络不通 / 账号密码错误），不再统一报错',
+        '📦 后台服务（sidecar）用 Bun 编译成 58MB 单文件，跨平台无需用户单独装 Node.js',
+        '🚀 自动构建支持 macOS（M 系/Intel）+ Windows + Linux 四平台',
       ],
     },
     {
       version: '0.1.1',
       date: '2026-04-22',
       changes: [
-        '🔗 聊天里 `file.ext:42` 自动识别成可点击链接，点击直接在预览面板打开并高亮定位到指定行',
-        '📥 Markdown 代码块新增"应用到文件…"按钮：选择目标路径 / 覆盖 or 追加 / 实时预览内容后一键写入',
-        '🔍 会话内 Cmd+F / Ctrl+F 搜索：实时命中计数（n/N）、Enter 下一个、Shift+Enter 上一个、Esc 关闭',
-        '👀 预览面板外部变更检测：每 3s 轮询 mtime，检测到外部修改显示黄色 banner（重新加载 / 忽略）',
-        '💡 AI followup 建议区块：chat 模式下 AI 可通过 `<<<FOLLOWUP>>>` 追加建议问题，前端渲染为可点击按钮',
-        '⚡ 消息列表软截断：超过 600 条只渲染最近 600 条，顶部"展开全部"按钮（避免超长会话卡顿）',
-        '📚 插件开发完整文档 + 设置页"插件开发"标签：一键打开 `~/.maxian/plugins/`、复制文档到剪贴板',
-        '▶️ bash / execute_command 实时流式输出：工具卡片内嵌终端面板，stdout/stderr 实时刷新 + 绿色呼吸灯 + 自动滚动到底',
-        '🧹 ANSI 色码自动剥离 + `TERM=dumb / NO_COLOR=1 / FORCE_COLOR=0` 环境变量保护',
-        '🛰 dev server 智能托管：识别 `npm/yarn/pnpm dev|start|watch`、`vite`、`next dev`、`tail -f`、`nodemon` 等模式，3 秒空闲即 detach，进程后台继续运行不被杀',
-        '🔁 限流重试正则扩展：覆盖 429 / rate limit / too many requests / throttled / capacity limits / InternalError.Algo，真正重试满 3 次',
-        '♻️ AiProxyHandler 实例池复用（按 apiUrl + username + businessCode 缓存），修复每请求 new 实例导致客户端缓存统计永远 0% 的 bug',
-        '💓 SSE 心跳 keepalive（服务端每 15s）：防止限流静默期被代理/防火墙/HTTP idle 断连',
-        '🩺 任务卡死 watchdog：60s 未收到任何 SSE 事件时自动补拉消息快照，避免"回复中"卡壳需手动切会话',
-        '🧼 错误事件智能收尾：所有 isPartial 的 reasoning/tool/assistant 统一标记完成 + 清除 rateLimit 残留状态',
-        '💾 修复历史思考过程不显示：isChatMode 不再短路 reasoning 持久化（messages / history 两表解耦）',
-        '🖱 修复 reasoning/tool 流式更新时滚动条被重置：viewGroups wrapper 引用缓存，msg 引用不变则复用，For 不重建 DOM',
-        '📏 思考过程块移除 280px 高度限制 + 内部滚动条，完整展开随页面滚动',
+        '🔗 聊天里 `文件.ext:42` 自动识别为可点击链接，点击直接定位到对应行',
+        '📥 Markdown 代码块新增"应用到文件"按钮：选目标路径、覆盖或追加、预览后一键写入',
+        '🔍 会话内 Cmd+F / Ctrl+F 搜索：实时计数 + Enter 下一个 / Shift+Enter 上一个',
+        '👀 预览面板检测外部修改：每 3 秒检查文件，被改了就显示黄色提示条（重载 / 忽略）',
+        '💡 AI 给出后续追问建议时，前端渲染成可点击按钮',
+        '▶️ bash / 命令工具卡片内嵌终端：实时刷新输出、绿色呼吸灯、自动滚底',
+        '🧹 自动剥离命令输出里的 ANSI 颜色码',
+        '🛰 智能识别开发服务器命令（npm dev / vite / next dev / tail -f / nodemon 等），3 秒空闲后转入后台运行不被杀',
+        '🔁 限流重试规则扩展：覆盖 429 / rate limit / 算法限流 等多种格式',
+        '💓 SSE 心跳保活（每 15 秒），防止长任务连接被代理 / 防火墙断开',
+        '🩺 任务卡死自动恢复：60 秒未收到任何事件时自动重新拉取消息快照',
+        '💾 修复历史会话的"思考过程"不显示',
+        '🖱 修复流式更新时滚动条被重置（消息引用复用，DOM 不重建）',
       ],
     },
     {
       version: '0.1.0',
       date: '2026-04-22',
       changes: [
-        '🎯 read_file 专业化：图片直接以 data URL 渲染、PDF 提示、超长行 2000 字符截断',
-        '🔧 LSP 新增 4 个编辑动作：rename / codeAction / formatDocument / organizeImports',
-        '📋 edit 工具返回 LSP 诊断摘要（error/warning 前 20 条）+ 自动保留 CRLF 行尾符',
-        '🗜 上下文压缩进度 banner（实时耗时 + 级别提示）+ 完成系统消息',
-        '⚙️  项目级配置 .maxian/config.json + 自定义 agent/command（.maxian/agents|commands/*.md）',
-        '🔌 Plugin 生命周期 hooks：tool.execute.before/after、session.created、message.sent、agent.iteration',
-        '💬 消息操作：编辑重跑、重新生成、从消息 fork 新会话、删除单条',
-        '📌 会话归档/置顶 + 独立归档视图',
-        '🎹 全局 ⌘P 命令面板：搜索会话/文件/符号/斜杠命令',
-        '🔍 符号搜索（LSP workspaceSymbol + 文件名 fallback）',
-        '⌨️  自定义快捷键 UI：录制按键 + 重置默认',
-        '📄 会话模板系统（localStorage 持久化）',
-        '📊 Token 用量 dashboard + 错误日志页',
-        '🖱 Vim 模式（h/j/k/l/i/a/o/x/D/p/w/b/0/$ 基础 modal 编辑）',
-        '🏷 消息时间戳显示（yyyy-mm-dd hh:mm:ss）hover 高亮',
-        '📁 工具调用显示完整 diff + 点击跳转预览面板',
-        '🔐 Tauri 签名 & 增量更新包配置',
+        '🎯 读文件工具增强：图片直接显示、PDF 提示、超长行截断',
+        '🔧 LSP 新增 4 个编辑动作：重命名 / 代码动作 / 格式化 / 整理 import',
+        '📋 编辑工具执行后返回 LSP 诊断摘要（错误 / 警告前 20 条），自动保留 Windows 行尾',
+        '🗜 上下文压缩时显示进度条，完成后系统消息提示',
+        '⚙️ 项目级配置文件 .maxian/config.json + 自定义 agent / command 命令',
+        '🔌 插件生命周期 hooks：工具执行前后、会话创建、消息发送、Agent 每轮',
+        '💬 消息操作：编辑重跑、重新生成、从消息分叉新会话、删除单条',
+        '📌 会话归档 / 置顶 + 独立归档视图',
+        '🎹 全局 ⌘P 命令面板：搜索会话 / 文件 / 符号 / 斜杠命令',
+        '🔍 符号搜索（LSP 优先 + 文件名兜底）',
+        '⌨️ 自定义快捷键：可录制按键 + 一键重置默认',
+        '📄 会话模板系统',
+        '📊 Token 用量看板 + 错误日志页',
+        '🖱 Vim 模式（基础 modal 编辑）',
+        '🏷 消息时间戳显示',
+        '📁 工具调用显示完整 diff，点击跳转到预览面板',
       ],
     },
     {
       version: '0.0.9',
       date: '2026-04-21',
       changes: [
-        '🧠 上下文自动压缩（1M 窗口）：Level 1 按工具类型剪枝 + Level 2 LLM 总结',
-        '/compact 斜杠命令手动触发压缩',
-        '💾 Tool / reasoning / assistant 全部持久化到 DB（切会话完整还原）',
-        '📡 流式 tool input 推送：实时看到工具 JSON 生成进度（修累积 delta 翻倍 bug）',
-        '⚡ 工具并行执行（只读并行 + 破坏性串行）',
-        '📖 AGENTS.md / CLAUDE.md 自动加载到 system prompt',
-        '🌟 Skills 列表预注入 system prompt（AI 知道有哪些技能可用）',
-        '🔁 doom-loop 检测接入（ToolRepetitionDetector 字节级+窗口+签名三重保护）',
+        '🧠 上下文自动压缩：超 55% 时按工具类型剪枝，超 85% 时让 LLM 总结整段历史',
+        '✂️ /compact 斜杠命令手动触发压缩',
+        '💾 工具调用 / 思考过程 / AI 回复全部存入数据库，切换会话能完整还原',
+        '📡 工具调用参数实时流式显示（生成中可看到 JSON 一字一字出来）',
+        '⚡ 工具并行执行（只读并行 / 写操作串行）',
+        '📖 自动加载 AGENTS.md / CLAUDE.md 到系统提示词',
+        '🌟 把 Skills 列表预先告诉 AI（让它知道有哪些技能可用）',
+        '🔁 死循环检测：连续 3 次相同参数就拦截',
       ],
     },
     {
       version: '0.0.8',
       date: '2026-04-21',
       changes: [
-        '🛠 新增 9 个工具：bash / grep / glob / ls / apply_patch / lsp（完整 LSP）/ question / plan_exit / task（子 Agent）',
-        '🧩 Plugin 系统（~/.maxian/plugins/*.js 动态加载）',
-        '🔒 per-tool 权限记忆（session + 全局 Always Allow）',
-        '💡 工具输出截断服务（2000 行/50KB 写盘避免 token 爆炸）',
-        '🎛 会话搜索 + 消息过滤器 + 权限记忆 + 快捷键速查面板 ⌘/',
-        '🎨 diff 视图 Split/Unified 切换 + 预览标签拖拽重排',
-        '🔔 Toast 带 action 按钮 + 动画数字计数器',
-        '📈 Prompt 历史上下箭头 + 消息 j/k 键盘导航',
+        '🛠 新增 9 个工具：bash / grep / glob / ls / apply_patch / lsp / question / plan_exit / task（子 Agent）',
+        '🧩 插件系统：~/.maxian/plugins/*.js 自动加载',
+        '🔒 工具权限记忆：本会话允许 / 永久允许',
+        '💡 工具输出超 2000 行 / 50KB 自动截断写盘，避免 Token 爆炸',
+        '🎛 会话搜索、消息过滤器、快捷键速查面板（⌘/）',
+        '🎨 diff 视图支持 Split / Unified 切换',
+        '🔔 Toast 通知带操作按钮 + 数字滚动动画',
       ],
     },
     {
       version: '0.0.7',
       date: '2026-04-21',
       changes: [
-        '📄 文件预览面板：语法高亮（highlight.js）+ Diff + Image + Markdown 多视图',
+        '📄 文件预览面板：语法高亮 / Diff / 图片 / Markdown 多视图',
         '🗂 工作区文件浏览器（层级树 + 搜索）',
-        '⭐ Skills 面板（.maxian/skills + .claude/skills 扫描，frontmatter 解析）',
-        '💓 心跳服务（每 60s POST /knowledge/userOnline/heartbeat）',
-        '📝 AI 调用日志推送（POST /ai/call-log）',
+        '⭐ Skills 面板：自动扫描 .maxian/skills 和 .claude/skills',
+        '💓 心跳服务：每 60 秒上报在线状态',
+        '📝 AI 调用日志自动推送到后端',
       ],
     },
     {
       version: '0.0.6',
       date: '2026-04-21',
       changes: [
-        '🎬 OpenCode 风格功能对标首批：权限审批、文件变更面板、文件快照/撤销、Context 条',
+        '🎬 OpenCode 风格功能对标首批：权限审批 / 文件变更面板 / 文件快照撤销 / 上下文条',
         '🔀 Git Worktree 管理 + 分支切换',
-        '🖥 集成终端（xterm.js + node-pty）多标签',
-        '🔄 自动更新（tauri-plugin-updater）',
-        '🌍 i18n（中/英）+ Plan 模式（只规划不执行）',
-        '⌘+ 快捷键体系（N/W/[/]/K/`/,）',
-        '🖼 图片粘贴/拖拽作为多模态输入',
+        '🖥 集成终端（多标签）',
+        '🔄 自动更新',
+        '🌍 中英文 + Plan 模式（只规划不执行）',
+        '⌘+ 全套快捷键',
+        '🖼 图片粘贴 / 拖拽作为多模态输入',
       ],
     },
   ]
@@ -5062,7 +5110,7 @@ export default {
             <div class="settings-row">
               <div class="settings-row-label">
                 <div class="settings-row-name">构建于</div>
-                <div class="settings-row-desc">Tauri 2 · SolidJS · Hono · Claude Sonnet</div>
+                <div class="settings-row-desc">Tauri 2 · SolidJS · Hono · Zhongrui Cai</div>
               </div>
             </div>
             <div class="settings-row">
@@ -7852,6 +7900,25 @@ export default {
                       </div>
                     </Show>
                   </div>
+                  {/* 全部展开 / 折叠思考 */}
+                  <button
+                    class="icon-btn"
+                    classList={{ active: expandAllReasoning() }}
+                    onClick={() => setExpandAllReasoning(v => !v)}
+                    title={expandAllReasoning() ? '折叠所有思考' : '展开所有思考'}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <Show when={expandAllReasoning()} fallback={
+                        <>
+                          <polyline points="6 9 12 15 18 9"/>
+                          <polyline points="6 4 12 10 18 4" opacity="0.4"/>
+                        </>
+                      }>
+                        <polyline points="18 15 12 9 6 15"/>
+                        <polyline points="18 20 12 14 6 20" opacity="0.4"/>
+                      </Show>
+                    </svg>
+                  </button>
                   {/* 集成终端切换按钮 */}
                   <button
                     class="icon-btn"
@@ -7975,17 +8042,22 @@ export default {
                   </div>
                 }
               >
+                <div class="chat-timeline-wrap">
                 <div
                   class="chat-timeline"
                   ref={chatTimelineRef}
                   onScroll={(e) => {
                     const el = e.currentTarget
-                    // 滚到顶部 80px 内时触发加载更多
-                    if (el.scrollTop < 80 && msgHasMore() && !msgLoadingMore()) {
+                    // 滚到顶部 80px 内时触发加载更多 + 显示按钮
+                    const nearTop = el.scrollTop < 80
+                    setIsNearTop(nearTop)
+                    if (nearTop && msgHasMore() && !msgLoadingMore()) {
                       void loadMoreMessages()
                     }
                     // 贴底跟踪：用户近底 → 保持 auto-scroll；离底 → 暂停（不打断阅读）
-                    stickToBottom = isNearBottom(el)
+                    const nearBot = isNearBottom(el)
+                    stickToBottom = nearBot
+                    setIsNearBottomSignal(nearBot)
                   }}
                   onClick={(e) => {
                     const target = e.target as HTMLElement
@@ -8016,15 +8088,20 @@ export default {
                     }
                   }}
                 >
-                  {/* 顶部加载提示 */}
-                  <Show when={msgHasMore() || msgLoadingMore()}>
+                  {/* "加载更早的消息" 仅在用户滚到顶部附近时出现；加载完所有历史时给提示 */}
+                  <Show when={isNearTop() && messages().length > 0}>
                     <div class="msg-load-more">
                       <Show
                         when={msgLoadingMore()}
                         fallback={
-                          <button class="msg-load-more-btn" onClick={loadMoreMessages}>
-                            加载更早的消息
-                          </button>
+                          <Show
+                            when={msgHasMore()}
+                            fallback={<span class="msg-load-more-end">— 已是最早的消息 —</span>}
+                          >
+                            <button class="msg-load-more-btn" onClick={loadMoreMessages}>
+                              加载更早的消息
+                            </button>
+                          </Show>
                         }
                       >
                         <span class="msg-load-more-spinning">加载中…</span>
@@ -8036,6 +8113,30 @@ export default {
                     messages={sharedMessagesStore.messages}
                     renderContent={(text) => <div innerHTML={renderMarkdown(text)} />}
                     getToolLabel={(n) => TOOL_LABELS[n] ?? n}
+                    renderAvatar={(role) => {
+                      if (role === 'user') {
+                        const u = currentUser()
+                        return u ? userInitials(u) : '我'
+                      }
+                      return null  // assistant 走默认 'AI'
+                    }}
+                    /* edit / multiedit 用红绿 diff 视图替代默认工具卡片 */
+                    toolRenderers={{
+                      edit:      (p) => EditDiffView(p),
+                      multiedit: (p) => EditDiffView(p),
+                    }}
+                    actions={{
+                      onRegenerate: (m) => { void regenerateMessage(m.id) },
+                      onFork:       (m) => { void forkFromMessage(m.id) },
+                      onDelete:     (m) => { void deleteMessage(m.id) },
+                    }}
+                    /* 让外层 .chat-timeline 接管 scroll，使 onScroll 能触发滚动跟踪 */
+                    externalScrollHost={() => chatTimelineRef}
+                    /* 设置面板里的"隐藏 todos / 思考 / 内部工具"开关现在真生效 */
+                    filter={msgFilter()}
+                    internalToolNames={INTERNAL_TOOL_NAMES}
+                    maxRender={800}
+                    expandAllReasoning={expandAllReasoning()}
                   />
                   {/* 任务进行中：实时接收计数（直接写 DOM，不走 SolidJS 批更新） */}
                   <Show when={sending()}>
@@ -8058,6 +8159,15 @@ export default {
                     </div>
                   </Show>
                   <div ref={chatEndRef} />
+                </div>
+                {/* 浮动"回到底部"按钮：absolute 定位在 wrap 右下角 */}
+                <Show when={!isNearBottomSignal()}>
+                  <button class="scroll-to-bottom-btn" onClick={scrollChatToBottom} title="回到底部">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                </Show>
                 </div>
 
                 {/* Git 状态栏 */}
@@ -8097,7 +8207,28 @@ export default {
 
                   {/* Slash / @ 面板通过 fixed 定位渲染（已在 body 级别，无需特殊包装） */}
 
-                  <div class="composer-inner">
+                  <div class="composer-inner" style={{ height: composerHeight() ? `${composerHeight()}px` : undefined }}>
+                    {/* 顶部拖条：用户拖拽调整 composer 高度（最高占整窗 1/3） */}
+                    <div
+                      class="composer-resize-handle"
+                      title="拖动调整输入框高度"
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        const startY = e.clientY
+                        const startH = composerHeight() ?? (textareaRef?.offsetHeight ? textareaRef.offsetHeight + 60 : 100)
+                        const maxH = Math.floor(window.innerHeight / 3)
+                        const onMove = (mv: MouseEvent) => {
+                          const dy = startY - mv.clientY  // 往上拖 dy>0 → 高度增
+                          setComposerHeight(Math.max(120, Math.min(maxH, startH + dy)))
+                        }
+                        const onUp = () => {
+                          window.removeEventListener('mousemove', onMove)
+                          window.removeEventListener('mouseup', onUp)
+                        }
+                        window.addEventListener('mousemove', onMove)
+                        window.addEventListener('mouseup', onUp)
+                      }}
+                    />
                     {/* 图片附件预览 */}
                     <Show when={attachedImages().length > 0}>
                       <div class="image-attachments">

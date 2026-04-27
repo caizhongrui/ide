@@ -792,11 +792,46 @@
 
   /* ─── Chat Timeline ─────────────────────────────────────── */
   .chat-timeline {
+    position: relative; /* scroll-to-bottom 浮动按钮锚点 */
     flex: 1;
     overflow-y: auto;
     padding: 24px 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* chat-timeline 包装层：让 scroll-to-bottom 按钮 absolute 定位 */
+  .chat-timeline-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .chat-timeline-wrap .chat-timeline { flex: 1; }
+  /* "回到底部"浮动按钮 */
+  .scroll-to-bottom-btn {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-strong);
+    color: var(--text-base);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    z-index: 50;
+    transition: background 120ms, transform 120ms, box-shadow 120ms;
+  }
+  .scroll-to-bottom-btn:hover {
+    background: var(--bg-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.4);
   }
 
   /* 加载更多消息提示条 */
@@ -822,6 +857,11 @@
   .msg-load-more-spinning {
     font-size: 11.5px;
     color: var(--text-faint);
+  }
+  .msg-load-more-end {
+    font-size: 11.5px;
+    color: var(--text-faint);
+    padding: 4px 12px;
   }
 
   .turn { display: flex; flex-direction: column; gap: 0; }
@@ -1255,6 +1295,10 @@
     overflow: visible;
     transition: border-color 150ms;
     position: relative;
+    display: flex;
+    flex-direction: column;
+    /* 最低高度 = textarea 44 + footer ~36 + padding；保证按钮总能被看见 */
+    min-height: 120px;
   }
   .composer-inner:focus-within {
     border-color: color-mix(in srgb, var(--accent) 70%, transparent);
@@ -1262,6 +1306,7 @@
   }
   .composer-textarea {
     width: 100%;
+    flex: 1;             /* 由 composer-inner 高度撑开（用户拖条调整） */
     background: transparent;
     border: none;
     outline: none;
@@ -1270,7 +1315,20 @@
     padding: 12px 14px 8px;
     resize: none;
     min-height: 44px;
-    max-height: 200px;
+    overflow-y: auto;
+  }
+  /* composer 顶部拖条：鼠标悬浮变色，按下拖动调整高度 */
+  .composer-resize-handle {
+    height: 6px;
+    cursor: ns-resize;
+    background: transparent;
+    border-top: 1px solid transparent;
+    transition: background 120ms, border-color 120ms;
+    flex-shrink: 0;
+  }
+  .composer-resize-handle:hover {
+    background: var(--bg-hover);
+    border-top-color: var(--accent);
   }
   .composer-textarea::placeholder { color: var(--text-faint); }
   .composer-footer {
@@ -2538,54 +2596,69 @@
    代码块复制按钮
 ═══════════════════════════════════════════════════════════════════════════ */
 .code-block-wrap {
+  position: relative;
   margin: 8px 0;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid var(--border);
-  background: var(--bg-muted);
+  border: 1px solid #30363d;
+  background: #0d1117;        /* 强制 GitHub-dark 风格代码背景，不跟 UI 主题走 */
 }
 .code-block-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  background: var(--bg-hover);
-  border-bottom: 1px solid var(--border);
-  min-height: 32px;
+  padding: 4px 10px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  min-height: 26px;
 }
 .code-block-lang {
-  font-size: 11px;
-  color: var(--text-muted);
+  font-size: 10.5px;
+  color: #8b949e;
   font-family: var(--font-mono, 'Menlo', 'Monaco', monospace);
   text-transform: lowercase;
+  letter-spacing: 0.3px;
 }
+/* 复制按钮：常显淡灰，hover 高亮（之前 opacity 0.55 在浅色 header 上几乎看不见） */
 .code-copy-btn {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg-muted);
-  color: var(--text-muted);
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid #30363d;
+  background: #21262d;
+  color: #c9d1d9;
   cursor: pointer;
-  transition: background 120ms, color 120ms;
+  transition: background 120ms, color 120ms, border-color 120ms;
   font-family: inherit;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .code-copy-btn:hover {
-  background: var(--accent);
+  background: #30363d;
   color: #fff;
-  border-color: var(--accent);
+  border-color: #58a6ff;
+}
+.code-copy-btn.copied {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(16, 185, 129, 0.6);
 }
 .code-block-wrap pre {
   margin: 0;
   padding: 12px;
   overflow-x: auto;
-  background: transparent;
+  background: transparent;        /* hljs theme 提供颜色 */
 }
-.code-block-wrap pre code {
+.code-block-wrap pre code,
+.code-block-wrap pre code.hljs {
   font-family: var(--font-mono, 'Menlo', 'Monaco', 'Consolas', monospace);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.55;
+  background: transparent;
+  color: #c9d1d9;                 /* 默认色，被 hljs token 颜色覆盖 */
+  padding: 0;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@
  *  read_file 的语法高亮等），未注册的回退默认 KV 视图。
  *--------------------------------------------------------------------------------------------*/
 
-import { Show, For, createSignal } from 'solid-js';
+import { Show, For, createSignal, createEffect } from 'solid-js';
 import type { JSX } from 'solid-js';
 // @ts-expect-error vite ?inline → string
 import css from './ToolCallCard.css?inline';
@@ -98,6 +98,10 @@ export function ToolCallCard(props: ToolCallCardProps): JSX.Element {
 					<span class="mu-tool-status">{statusText(status())}</span>
 				</div>
 
+				{/* 流式 liveOutput：bash/execute_command 等运行时显示，自动滚到底 */}
+				<Show when={props.isPartial && props.liveOutput}>
+					<LiveOutputView text={props.liveOutput!} />
+				</Show>
 				<Show when={!props.isPartial && (props.toolResult || props.liveOutput)}>
 					<ToolDetails result={props.toolResult} liveOutput={props.liveOutput} />
 				</Show>
@@ -108,6 +112,39 @@ export function ToolCallCard(props: ToolCallCardProps): JSX.Element {
 			</div>
 		</Show>
 	);
+}
+
+/** bash / execute_command 等运行中工具的实时 stdout 视图，行数自增 + 自动滚到底 */
+function LiveOutputView(props: { text: string }): JSX.Element {
+	let preEl: HTMLPreElement | undefined;
+	let userScrolled = false;
+	const onScroll = (): void => {
+		if (!preEl) return;
+		const dist = preEl.scrollHeight - preEl.scrollTop - preEl.clientHeight;
+		userScrolled = dist > 30;
+	};
+	createEffect(() => {
+		void props.text;   // 任何 text 变化触发
+		if (!preEl || userScrolled) return;
+		queueMicrotask(() => { preEl!.scrollTop = preEl!.scrollHeight; });
+	});
+	return (
+		<div class="mu-tool-live">
+			<div class="mu-tool-live-head">
+				<span class="mu-tool-live-dot" />
+				<span>实时输出 · {props.text.split('\n').length} 行</span>
+			</div>
+			<pre class="mu-tool-result mu-tool-result-live" ref={el => (preEl = el)} onScroll={onScroll}>
+				{stripAnsi(props.text)}
+			</pre>
+		</div>
+	);
+}
+
+/** 简单去除 ANSI 颜色码（避免 \x1b[31m 等乱码出现在视图） */
+function stripAnsi(s: string): string {
+	// eslint-disable-next-line no-control-regex
+	return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
 function ToolDetails(props: { result?: string; liveOutput?: string }): JSX.Element {

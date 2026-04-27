@@ -5,6 +5,7 @@
  * ========================================================================== */
 
 .mu-msg {
+	position:    relative;
 	margin: 8px 0;
 	font-family: var(--maxian-font-sans, system-ui, -apple-system, sans-serif);
 	color:       var(--maxian-text-base, #e6e6e6);
@@ -12,44 +13,148 @@
 	line-height: 1.6;
 }
 
-/* ── 用户消息：右侧气泡 ── */
+/* 单条消息操作按钮：hover 时浮在气泡正上方（连成胶囊状） */
+.mu-msg-actions {
+	position: absolute;
+	top:      -14px;
+	right:    8px;
+	display:  inline-flex;
+	gap:      0;
+	opacity:  0;
+	transform: translateY(4px);
+	transition: opacity 140ms ease, transform 140ms ease;
+	pointer-events: none;
+	z-index:  3;
+	background:    var(--maxian-bg-subtle, #2a2a2a);
+	border:        1px solid var(--maxian-border-strong, #4a4a4a);
+	border-radius: 999px;
+	padding:       2px;
+	box-shadow:    0 2px 8px rgba(0,0,0,0.18);
+}
+.mu-msg:hover .mu-msg-actions {
+	opacity: 1;
+	transform: translateY(0);
+	pointer-events: auto;
+}
+.mu-msg-action {
+	width:           22px;
+	height:          22px;
+	border-radius:   50%;
+	background:      transparent;
+	border:          none;
+	color:           var(--maxian-text-muted, #999);
+	cursor:          pointer;
+	display:         inline-flex;
+	align-items:     center;
+	justify-content: center;
+	font-family:     inherit;
+	padding:         0;
+	transition:      background 120ms, color 120ms;
+}
+.mu-msg-action:hover {
+	background: var(--maxian-bg-hover, rgba(255,255,255,0.08));
+	color:      var(--maxian-text-base, #e6e6e6);
+}
+.mu-msg-action-danger:hover {
+	background: rgba(239, 68, 68, 0.18);
+	color:      #ef4444;
+}
+.mu-msg-action svg { display: block; }
+
+/* ── 用户消息：右侧气泡 + 头像 ── */
 .mu-msg-user {
-	display: flex;
+	display:         flex;
 	justify-content: flex-end;
+	align-items:     flex-start;
+	gap:             8px;
 }
 .mu-msg-user .mu-msg-content {
 	background:    var(--maxian-bg-user-bubble, rgba(99, 102, 241, 0.18));
 	border:        1px solid var(--maxian-border, #3a3a3a);
 	border-radius: 10px;
 	padding:       8px 12px;
-	max-width:     85%;
+	max-width:     calc(85% - 36px);
 	white-space:   pre-wrap;
 	word-break:    break-word;
+	order:         1;
 }
 
-/* ── 时间戳（user / assistant 共享） ── */
+/* ── 头像 ── */
+.mu-avatar {
+	width:           28px;
+	height:          28px;
+	border-radius:   50%;
+	display:         flex;
+	align-items:     center;
+	justify-content: center;
+	font-size:       11px;
+	font-weight:     600;
+	flex-shrink:     0;
+	user-select:     none;
+	margin-top:      2px;
+}
+.mu-avatar-user {
+	background: linear-gradient(135deg, var(--maxian-accent, #6366f1), color-mix(in srgb, var(--maxian-accent, #6366f1) 60%, #ffffff));
+	color:      #fff;
+	order:      2;
+}
+.mu-avatar-assistant {
+	background: var(--maxian-bg-subtle, #2a2a2a);
+	border:     1px solid var(--maxian-border-strong, #4a4a4a);
+	color:      var(--maxian-text-muted, #999);
+}
+
+/* ── 图片附件缩略图 ── */
+.mu-msg-images {
+	display:   flex;
+	flex-wrap: wrap;
+	gap:       6px;
+	margin-bottom: 6px;
+}
+.mu-msg-image-link {
+	display: block;
+	border:  1px solid var(--maxian-border, #3a3a3a);
+	border-radius: 6px;
+	overflow: hidden;
+	transition: transform 120ms;
+}
+.mu-msg-image-link:hover {
+	transform: scale(1.03);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.mu-msg-image {
+	display:    block;
+	max-width:  180px;
+	max-height: 180px;
+	object-fit: cover;
+}
+
+/* ── 时间戳（user / assistant 共享）：固定在气泡右下角，不参与换行 ── */
 .mu-msg-time {
-	display:      inline-block;
-	margin-left:  8px;
-	font-size:    11px;
+	display:      block;
+	font-size:    10.5px;
 	color:        var(--maxian-text-muted, #999);
 	user-select:  none;
-	vertical-align: baseline;
 	opacity:      0.7;
+	margin-top:   4px;
+	text-align:   right;
 }
 
-/* ── 助手消息：左侧气泡 ── */
+/* ── 助手消息：左侧气泡 + 头像 ── */
 .mu-msg-assistant {
-	display: flex;
+	display:         flex;
 	justify-content: flex-start;
+	align-items:     flex-start;
+	gap:             8px;
 }
 .mu-msg-assistant .mu-msg-content {
 	background:    var(--maxian-bg-assistant-bubble, var(--maxian-bg-subtle, #2a2a2a));
 	border:        1px solid var(--maxian-border, #3a3a3a);
 	border-radius: 10px;
 	padding:       8px 12px;
-	max-width:     90%;
+	max-width:     calc(90% - 36px);
 	word-break:    break-word;
+	flex:          1 1 auto;
 }
 /* renderContent 输出的是 markdown HTML（含 <p><h><ul> 等），不要再 pre-wrap，
    否则段落 margin + 原始换行 \n 双重生效，行距翻倍。raw text 才需要 pre-wrap。 */
@@ -103,9 +208,32 @@
 .mu-reasoning-icon { font-size: 14px; }
 .mu-reasoning-title { flex: 1; }
 .mu-reasoning-toggle {
-	font-size: 10px;
-	color:     var(--maxian-text-muted, #999);
-	transition: transform 0.15s;
+	background: transparent;
+	border: none;
+	color: var(--maxian-text-muted, #999);
+	margin-left: auto;
+	flex-shrink: 0;
+	padding: 4px;
+	border-radius: 4px;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-family: inherit;
+	transition: background 120ms, color 120ms;
+}
+.mu-reasoning-toggle:hover {
+	background: var(--maxian-bg-hover, rgba(255,255,255,0.06));
+	color: var(--maxian-text-base, #e6e6e6);
+}
+/* 折叠态：去掉左边框 + 缩小 padding，只保留一行 header（不显预览） */
+.mu-reasoning-collapsed {
+	border-left-color: var(--maxian-border, #3a3a3a);
+	padding: 2px 10px;
+	background: transparent;
+}
+.mu-reasoning-collapsed .mu-reasoning-head {
+	margin-bottom: 0;
 }
 .mu-reasoning-done .mu-reasoning-head:hover {
 	color: var(--maxian-text-base, #e6e6e6);
@@ -143,7 +271,7 @@
 	padding:   2px 0;
 }
 
-/* ── 任务完成横条 ── */
+/* ── 任务完成横条（带渐入动画） ── */
 .mu-task-done {
 	display:       flex;
 	align-items:   center;
@@ -156,6 +284,11 @@
 	color:         #10b981;
 	font-weight:   600;
 	font-size:     13px;
+	animation:     mu-task-done-in 380ms cubic-bezier(0.2, 0.7, 0.3, 1.2);
+}
+@keyframes mu-task-done-in {
+	0%   { opacity: 0; transform: translateY(8px) scale(0.96); }
+	100% { opacity: 1; transform: translateY(0)   scale(1);    }
 }
 .mu-task-done-icon {
 	display:         inline-flex;
@@ -195,3 +328,40 @@
 	margin:        6px 0;
 }
 .mu-msg a { color: var(--maxian-accent, #6366f1); text-decoration: underline; }
+
+/* markdown 引用块 / 表格 增强 */
+.mu-msg-content-rich blockquote {
+	margin:        6px 0;
+	padding:       6px 12px;
+	border-left:   3px solid var(--maxian-accent, #6366f1);
+	background:    var(--maxian-bg-muted, rgba(255,255,255,0.04));
+	color:         var(--maxian-text-muted, #999);
+	border-radius: 0 4px 4px 0;
+}
+.mu-msg-content-rich table {
+	border-collapse: collapse;
+	margin:          6px 0;
+	font-size:       12.5px;
+	width:           auto;
+	max-width:       100%;
+	overflow-x:      auto;
+	display:         block;
+}
+.mu-msg-content-rich th,
+.mu-msg-content-rich td {
+	border:  1px solid var(--maxian-border, #3a3a3a);
+	padding: 5px 10px;
+	text-align: left;
+}
+.mu-msg-content-rich th {
+	background:  var(--maxian-bg-subtle, #2a2a2a);
+	font-weight: 600;
+}
+.mu-msg-content-rich tr:nth-child(even) td {
+	background: var(--maxian-bg-muted, rgba(255,255,255,0.02));
+}
+.mu-msg-content-rich hr {
+	border: none;
+	border-top: 1px solid var(--maxian-border, #3a3a3a);
+	margin: 12px 0;
+}

@@ -17,6 +17,15 @@ export * from './stores/index.js';
 // Solid 挂载入口（封装 solid-js/web.render，consumer 无需直接依赖 solid-js）
 export * from './mount.js';
 
+/**
+ * AI 调用但通常对终端用户价值较低的"内部"工具名（小写）。
+ * Consumer 可以扩展或替换该集合；内置最常见 4 个。
+ */
+export const INTERNAL_TOOL_NAMES: Set<string> = new Set([
+	'todo_write', 'update_todo_list',
+	'load_skill', 'ask_followup_question',
+]);
+
 // Solid reactive 原语 re-export
 // 让无法 bare specifier 解析 solid-js 的宿主（vscode renderer 等）
 // 也能从本包统一入口拿到 createSignal/createMemo/createEffect 等。

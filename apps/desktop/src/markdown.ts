@@ -4,38 +4,56 @@
  */
 import { marked, type Renderer } from "marked"
 import DOMPurify from "dompurify"
+import hljs from "highlight.js/lib/common"
 
-// ─── 自定义渲染器：为代码块添加复制 + 应用到文件按钮 ──────────────────────
+// ─── 自定义渲染器：代码块带语法高亮 + 复制按钮 ────────────────────────
 const renderer: Partial<Renderer> = {
   code({ text, lang }: { text: string; lang?: string }): string {
-    const escaped = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-    const langClass = lang ? ` class="language-${lang}"` : ''
-    const langLabel = lang ? `<span class="code-block-lang">${lang}</span>` : ''
-    // data-code 使用 base64 编码以避免 HTML 属性转义 + 多行符丢失
+    // 用 highlight.js 高亮（已知 lang 走指定语言，未知走 auto-detect）
+    let highlighted: string
+    let detectedLang = lang ?? ''
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        highlighted = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value
+      } else {
+        const auto = hljs.highlightAuto(text)
+        highlighted = auto.value
+        if (!detectedLang && auto.language) detectedLang = auto.language
+      }
+    } catch {
+      // 高亮失败回退原文（HTML 转义）
+      highlighted = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    }
+    const langClass = detectedLang ? ` class="language-${detectedLang} hljs"` : ' class="hljs"'
+    const langLabel = detectedLang ? `<span class="code-block-lang">${detectedLang}</span>` : ''
     const b64 = btoa(unescape(encodeURIComponent(text)))
     return `<div class="code-block-wrap">
   <div class="code-block-header">
     ${langLabel}
     <div style="flex:1"></div>
-    <button class="code-copy-btn" data-code-b64="${b64}" onclick="
+    <button class="code-copy-btn" data-code-b64="${b64}" title="复制" onclick="
       const btn=this;
       try {
         const b=btn.getAttribute('data-code-b64');
         const text=decodeURIComponent(escape(atob(b)));
         navigator.clipboard.writeText(text).then(()=>{
-          btn.textContent='✓ 已复制';
-          setTimeout(()=>{btn.textContent='复制'},1500)
+          btn.classList.add('copied');
+          setTimeout(()=>{btn.classList.remove('copied')},1500)
         })
-      } catch(e) { btn.textContent='复制失败' }
-    ">复制</button>
-    <button class="code-apply-btn" data-code-b64="${b64}" data-apply="1"${lang ? ` data-lang="${lang}"` : ''}>应用到文件…</button>
+      } catch(e) {}
+    ">
+      <svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>
+        <rect x='9' y='9' width='13' height='13' rx='2' ry='2'/>
+        <path d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/>
+      </svg>
+    </button>
   </div>
-  <pre><code${langClass}>${escaped}</code></pre>
+  <pre><code${langClass}>${highlighted}</code></pre>
 </div>`
-  }
+  },
 }
 
 marked.use({ renderer })

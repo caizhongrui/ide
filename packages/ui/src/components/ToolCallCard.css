@@ -101,3 +101,33 @@
 	font-family: var(--maxian-font-mono, ui-monospace, Menlo, Consolas, monospace);
 	word-break:  break-all;
 }
+
+/* ── 实时 stdout（bash / execute_command 运行中） ── */
+.mu-tool-live {
+	margin-top: 6px;
+}
+.mu-tool-live-head {
+	display:     flex;
+	align-items: center;
+	gap:         6px;
+	font-size:   11px;
+	color:       var(--maxian-text-muted, #999);
+	margin-bottom: 4px;
+}
+.mu-tool-live-dot {
+	width:         8px;
+	height:        8px;
+	border-radius: 50%;
+	background:    #10b981;
+	box-shadow:    0 0 6px rgba(16, 185, 129, 0.8);
+	animation:     mu-live-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mu-live-pulse {
+	0%, 100% { opacity: 1; }
+	50%      { opacity: 0.35; }
+}
+.mu-tool-result-live {
+	background: var(--maxian-bg-terminal, #0d0d0d);
+	color:      #d4d4d4;
+	max-height: 220px;
+}
