@@ -15,6 +15,17 @@ import { ToolCallCard, type ToolRenderRegistry } from './ToolCallCard.js';
 import css from './ToolBatchCard.css?inline';
 import { injectStyleOnce } from './_injectStyle.js';
 
+/** 按 batch key（tool id 拼接）持久化 userOpen。LRU 上限 200 防长会话累积 OOM */
+const BATCH_MAP_CAP = 200;
+const batchOpenByKey = new Map<string, boolean>();
+function setBatchOpenCapped(key: string, v: boolean): void {
+	if (batchOpenByKey.size >= BATCH_MAP_CAP && !batchOpenByKey.has(key)) {
+		const firstKey = batchOpenByKey.keys().next().value as string | undefined;
+		if (firstKey) batchOpenByKey.delete(firstKey);
+	}
+	batchOpenByKey.set(key, v);
+}
+
 export interface ToolBatchCardProps {
 	tools: ChatMessage[];   // 必为 role='tool' 且按出现顺序
 	getToolLabel?: (n: string) => string;
@@ -24,8 +35,13 @@ export interface ToolBatchCardProps {
 export function ToolBatchCard(props: ToolBatchCardProps): JSX.Element {
 	injectStyleOnce('maxian-ui-tool-batch', css as string);
 
+	const batchKey = (): string => props.tools.map(t => t.id).join('|');
 	const anyRunning = (): boolean => props.tools.some(t => t.isPartial);
-	const [userOpen, setUserOpen] = createSignal(false);
+	const [userOpen, _setUserOpenInner] = createSignal(batchOpenByKey.get(batchKey()) ?? false);
+	const setUserOpen = (v: boolean): void => {
+		setBatchOpenCapped(batchKey(), v);
+		_setUserOpenInner(v);
+	};
 	const expanded = (): boolean => anyRunning() || userOpen();
 
 	const dot = (t: ChatMessage): string => {

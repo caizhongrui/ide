@@ -2911,6 +2911,34 @@
   color: var(--text-faint);
 }
 
+/* 进程资源监控（左下，git status bar 内右侧） */
+.proc-stats {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  cursor: default;
+  user-select: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  transition: background 120ms;
+  margin-left: auto;
+}
+.proc-stats:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.04));
+  color: var(--text-base);
+}
+.proc-stats-icon {
+  font-size: 11px;
+  opacity: 0.6;
+}
+.proc-stats-text {
+  white-space: nowrap;
+}
+
 .git-status-branch-btn {
   display: inline-flex;
   align-items: center;

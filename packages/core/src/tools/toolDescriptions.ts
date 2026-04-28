@@ -83,15 +83,16 @@ export const TOOL_DESCRIPTIONS: Record<string, ToolDescription> = {
 **重要：** 在使用任何编辑工具（edit、write_to_file、apply_diff）之前，必须先使用此工具读取文件当前内容。这是强制要求！
 
 **支持的文件类型：**
-- 普通文本文件（默认，最多读取 2000 行）
+- 普通文本文件（默认从头读 500 行；超长文件附结构大纲让你定位 offset）
 - 图片文件（PNG、JPG 等）— 以视觉方式呈现给 AI
 - Jupyter Notebook（.ipynb）— 返回所有单元格及输出
 - 目录无法读取，请使用 list_files 或 glob
 
-**分段读取指导（对大文件至关重要）：**
-- 若已知需要哪部分，请只读取该部分（使用 start_line/end_line），这对大文件非常重要
-- 若不指定，默认从头读取最多 2000 行
-- 超过 2000 行的大文件必须用 start_line/end_line 分段读取
+**分段读取指导（对大文件至关重要 — 一次读全文是 token 浪费）：**
+- 默认只返回前 500 行；> 500 行的文件必须基于"文件结构大纲"定位关键 offset 再读
+- 大纲会列出该文件主要 class/function/method 各自的行号，照着定位最快
+- 若已知具体行号区间（比如错误堆栈给的行号），直接 start_line/end_line 命中
+- 完整读全文很少需要，绝大多数任务只需关键 200-500 行片段
 
 **文件未变更时的行为：**
 - 若该文件在本次对话中已被读取且内容未发生变化，工具将返回"文件未变更"提示
@@ -116,7 +117,7 @@ export const TOOL_DESCRIPTIONS: Record<string, ToolDescription> = {
 				type: 'number',
 				required: false,
 				description: '结束行号（包含）',
-				default: '文件末尾（最多 2000 行）',
+				default: '文件末尾（最多 500 行）',
 			},
 		],
 		examples: [

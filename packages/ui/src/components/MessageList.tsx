@@ -64,6 +64,9 @@ export function MessageList(props: MessageListProps): JSX.Element {
 
 	let innerHost: HTMLDivElement | undefined;
 	let userScrolledUp = false;
+	let lastMessageCount = 0;
+	let scrollPending = false;
+	let pointerOnList = false;     // 鼠标在列表区域时暂停自动滚动（避免 hover 元素被滚走闪动）
 
 	/** 实际监听 scroll 的元素：外部 host > 内部 mu-list */
 	const getScrollEl = (): HTMLElement | undefined =>
@@ -79,15 +82,43 @@ export function MessageList(props: MessageListProps): JSX.Element {
 	onMount(() => {
 		const el = getScrollEl();
 		el?.addEventListener('scroll', handleScroll, { passive: true });
+		// 鼠标进出列表 → 暂停 / 恢复自动滚动
+		const onEnter = (): void => { pointerOnList = true; };
+		const onLeave = (): void => { pointerOnList = false; };
+		el?.addEventListener('mouseenter', onEnter);
+		el?.addEventListener('mouseleave', onLeave);
 	});
 
+	// 自动滚到底：
+	//  - 只在「消息条数增加」（追加了新行）时滚动；patchById / patchLast 仅
+	//    更新现有消息内容时不滚——否则流式 chunk 每 ms 触发滚动，鼠标悬停
+	//    在某行上时由于布局微动，:hover 反复触发/解除导致闪动。
+	//  - rAF 节流：同一帧内多次更新只滚一次。
+	//  - 流式中最后一条仍在长大时，由 LiveOutputView 内部自己滚到底，本组件
+	//    不需要每个 chunk 都强制全局滚动。
 	createEffect(() => {
-		void props.messages();
-		if (props.autoScroll === false) return;
+		const list  = props.messages();
+		const count = list.length;
+		if (props.autoScroll === false) {
+			lastMessageCount = count;
+			return;
+		}
 		const el = getScrollEl();
-		if (!el) return;
+		if (!el) {
+			lastMessageCount = count;
+			return;
+		}
+		const grew = count > lastMessageCount;
+		lastMessageCount = count;
+		if (!grew) return;          // 只有同一条消息内容更新 → 不滚
 		if (userScrolledUp) return;
-		queueMicrotask(() => { el.scrollTop = el.scrollHeight; });
+		if (pointerOnList) return;  // 鼠标在列表里 → 暂停自动滚动，避免 hover 元素被推走闪动
+		if (scrollPending) return;
+		scrollPending = true;
+		requestAnimationFrame(() => {
+			scrollPending = false;
+			el.scrollTop = el.scrollHeight;
+		});
 	});
 
 	const [expandAll, setExpandAll] = createSignal(false);
@@ -121,29 +152,72 @@ export function MessageList(props: MessageListProps): JSX.Element {
 		return total > RENDER_LIMIT() ? total - RENDER_LIMIT() : 0;
 	});
 
-	/** 把连续的 role='tool' 合并成 batch 行 */
+	/** 把连续的 role='tool' 合并成 batch 行
+	 *
+	 * ⚠️ 重要：row 对象引用必须稳定 —— Solid <For> 按引用判等。
+	 * 若每次 memo 重新生成新的 { kind:'msg', m } 包装对象，<For> 会全量重建所有
+	 * MessageBubble 组件，导致组件内本地 signals（reasoningOpen / autoCollapsed
+	 * 等）被重置，reasoning 气泡 createEffect 再次自动折叠 —— 用户感知就是"展
+	 * 开后立刻闪关"。
+	 *
+	 * 解决：用消息 id 缓存上一轮的 row 对象，未变化的消息复用同一个 row 引用。
+	 */
+	let rowCache = new Map<string, Row>();
 	const rows = createMemo<Row[]>(() => {
-		const list = visibleMessages();
-		const grp = props.groupTools !== false;
-		if (!grp) return list.map(m => ({ kind: 'msg', m } as Row));
+		const list    = visibleMessages();
+		const grp     = props.groupTools !== false;
+		const newCache = new Map<string, Row>();
 		const out: Row[] = [];
-		let i = 0;
-		while (i < list.length) {
-			const m = list[i];
-			if (m.role === 'tool') {
-				const tools: ChatMessage[] = [];
-				while (i < list.length && list[i].role === 'tool') { tools.push(list[i]); i++; }
-				// 单个工具不必走 batch（就是普通 ToolCallCard）
-				if (tools.length === 1) {
-					out.push({ kind: 'msg', m: tools[0] });
-				} else {
-					out.push({ kind: 'batch', tools, key: tools.map(t => t.id).join('|') });
-				}
+
+		const pushMsg = (m: ChatMessage): void => {
+			const cached = rowCache.get(m.id);
+			// 缓存命中且消息引用未变 → 复用 row（保持组件不重挂）
+			if (cached && cached.kind === 'msg' && cached.m === m) {
+				out.push(cached);
+				newCache.set(m.id, cached);
 			} else {
-				out.push({ kind: 'msg', m });
-				i++;
+				const fresh: Row = { kind: 'msg', m };
+				out.push(fresh);
+				newCache.set(m.id, fresh);
+			}
+		};
+
+		if (!grp) {
+			for (const m of list) pushMsg(m);
+		} else {
+			let i = 0;
+			while (i < list.length) {
+				const m = list[i];
+				if (m.role === 'tool') {
+					const tools: ChatMessage[] = [];
+					while (i < list.length && list[i].role === 'tool') { tools.push(list[i]); i++; }
+					// 单个工具不必走 batch（就是普通 ToolCallCard）
+					if (tools.length === 1) {
+						pushMsg(tools[0]);
+					} else {
+						const key = tools.map(t => t.id).join('|');
+						const cached = rowCache.get(key);
+						// batch row 缓存：tool 数组每个引用都未变才复用
+						const sameRefs = cached && cached.kind === 'batch'
+							&& cached.tools.length === tools.length
+							&& cached.tools.every((t, idx) => t === tools[idx]);
+						if (sameRefs) {
+							out.push(cached!);
+							newCache.set(key, cached!);
+						} else {
+							const fresh: Row = { kind: 'batch', tools, key };
+							out.push(fresh);
+							newCache.set(key, fresh);
+						}
+					}
+				} else {
+					pushMsg(m);
+					i++;
+				}
 			}
 		}
+
+		rowCache = newCache;
 		return out;
 	});
 

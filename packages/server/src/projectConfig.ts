@@ -37,6 +37,22 @@ export interface ProjectConfig {
 	plugins?: string[];
 	/** 禁用的内置工具名 */
 	disabledTools?: string[];
+	/**
+	 * 工具钩子（对标 Claude Code settings.json 的 PreToolUse / PostToolUse）。
+	 * 形如：
+	 *   "hooks": {
+	 *     "PostToolUse": {
+	 *       "edit":      "tsc --noEmit -p .",
+	 *       "multiedit": "tsc --noEmit -p ."
+	 *     }
+	 *   }
+	 * 命令在 workspace 根目录下用 sh -c 执行；stdout/stderr 截断后追加到工具结果末尾，
+	 * AI 下一轮即可看见编译/lint 错误自行修复（一次过率显著提升）。
+	 */
+	hooks?: {
+		PostToolUse?: Record<string, string>;
+		PreToolUse?:  Record<string, string>;
+	};
 }
 
 export interface CustomAgent {

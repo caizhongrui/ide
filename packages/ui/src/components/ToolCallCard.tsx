@@ -16,6 +16,25 @@ import type { JSX } from 'solid-js';
 import css from './ToolCallCard.css?inline';
 import { injectStyleOnce } from './_injectStyle.js';
 
+/**
+ * 工具卡片"全部参数 / 输出"的展开状态按 toolId 全局记忆。
+ * Solid <For> 在父级新消息进来时可能整体重建子组件（即使我们做了 row cache，
+ * 流式过程中工具卡的 isPartial / liveOutput 反复变化也会让组件 re-create）；
+ * 用模块级 Map 把状态外置，组件再生不重置展开。
+ *
+ * LRU 上限 500 条避免长会话累积无限增长（webview OOM 防御）。
+ */
+const TOOL_MAP_CAP = 500;
+const detailsOpenById = new Map<string, boolean>();
+const paramsOpenById  = new Map<string, boolean>();
+function setMapCapped(map: Map<string, boolean>, key: string, v: boolean): void {
+	if (map.size >= TOOL_MAP_CAP && !map.has(key)) {
+		const firstKey = map.keys().next().value as string | undefined;
+		if (firstKey) map.delete(firstKey);
+	}
+	map.set(key, v);
+}
+
 export interface ToolCallCardProps {
 	toolName:     string;
 	toolId:       string;
@@ -103,11 +122,11 @@ export function ToolCallCard(props: ToolCallCardProps): JSX.Element {
 					<LiveOutputView text={props.liveOutput!} />
 				</Show>
 				<Show when={!props.isPartial && (props.toolResult || props.liveOutput)}>
-					<ToolDetails result={props.toolResult} liveOutput={props.liveOutput} />
+					<ToolDetails toolId={props.toolId} result={props.toolResult} liveOutput={props.liveOutput} />
 				</Show>
 
 				<Show when={Object.keys(props.toolParams ?? {}).length > 1}>
-					<ToolParamsExpanded params={props.toolParams} />
+					<ToolParamsExpanded toolId={props.toolId} params={props.toolParams} />
 				</Show>
 			</div>
 		</Show>
@@ -147,8 +166,12 @@ function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
-function ToolDetails(props: { result?: string; liveOutput?: string }): JSX.Element {
-	const [open, setOpen] = createSignal(false);
+function ToolDetails(props: { toolId: string; result?: string; liveOutput?: string }): JSX.Element {
+	const [open, _setOpenInner] = createSignal(detailsOpenById.get(props.toolId) ?? false);
+	const setOpen = (v: boolean): void => {
+		setMapCapped(detailsOpenById, props.toolId, v);
+		_setOpenInner(v);
+	};
 	const text = () => props.liveOutput ?? props.result ?? '';
 	const lines = () => text().split('\n').length;
 
@@ -164,8 +187,12 @@ function ToolDetails(props: { result?: string; liveOutput?: string }): JSX.Eleme
 	);
 }
 
-function ToolParamsExpanded(props: { params: Record<string, unknown> }): JSX.Element {
-	const [open, setOpen] = createSignal(false);
+function ToolParamsExpanded(props: { toolId: string; params: Record<string, unknown> }): JSX.Element {
+	const [open, _setOpenInner] = createSignal(paramsOpenById.get(props.toolId) ?? false);
+	const setOpen = (v: boolean): void => {
+		setMapCapped(paramsOpenById, props.toolId, v);
+		_setOpenInner(v);
+	};
 	const entries = () => Object.entries(props.params).filter(([k]) => !PRIMARY_PARAM_KEYS.includes(k));
 
 	return (

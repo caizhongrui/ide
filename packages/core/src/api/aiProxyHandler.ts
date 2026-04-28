@@ -542,6 +542,10 @@ export class AiProxyHandler implements IApiHandler {
 		}
 
 			// 调试日志：确认工具是否正确发送
+			const assistantWithReasoningField = aiProxyMessages.filter(m => m.role === 'assistant' && 'reasoning_content' in (m as any)).length;
+			const assistantWithReasoningNonEmpty = aiProxyMessages.filter(m => m.role === 'assistant' && (m as any).reasoning_content).length;
+			const assistantTotal = aiProxyMessages.filter(m => m.role === 'assistant').length;
+			const assistantWithToolCalls = aiProxyMessages.filter(m => m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0).length;
 			console.log('[Maxian] AiProxy 请求:', {
 				businessCode: requestBody.businessCode,
 				provider: requestBody.provider,
@@ -553,6 +557,8 @@ export class AiProxyHandler implements IApiHandler {
 				parallelToolCalls: requestBody.parallelToolCalls,  // ✅ 显示并行工具调用状态
 				promptCached: cacheResult.cached,  // P1优化：显示缓存状态
 				promptCacheHitRate: this.getPromptCacheStats().hitRate + '%',
+				assistantWithReasoning: `${assistantWithReasoningNonEmpty}非空/${assistantWithReasoningField}带字段/${assistantTotal}总`,
+				assistantWithToolCalls,
 			});
 			if (aiProxyTools && aiProxyTools.length > 0) {
 				console.log('[Maxian] 工具列表:', aiProxyTools.map(t => t.function.name));
@@ -675,9 +681,14 @@ export class AiProxyHandler implements IApiHandler {
 					role: msg.role,
 					content: msg.content
 				};
-				// DeepSeek thinking：assistant 字符串形态消息也带回 reasoning_content
-				if (msg.role === 'assistant' && msg.reasoning) {
-					m.reasoning_content = msg.reasoning;
+				// DeepSeek thinking：assistant 消息必须带 reasoning_content（多轮回传必需）。
+				// 跨模型切换 / 老会话 / 非思考模型生成的历史，msg.reasoning 缺失 → 兜底空串，
+				// 让上游通过"已回传"检查（DeepSeek 接受空 reasoning_content 表示该轮无思维链）。
+				if (msg.role === 'assistant') {
+					// 缺失时注入占位符（空串 DeepSeek 不接受，会再次 400）
+					m.reasoning_content = (msg.reasoning && msg.reasoning.length > 0)
+						? msg.reasoning
+						: '(no reasoning recorded for this turn)';
 				}
 				result.push(m);
 			} else {
@@ -743,9 +754,13 @@ export class AiProxyHandler implements IApiHandler {
 					if (toolCalls.length > 0) {
 						aiProxyMsg.tool_calls = toolCalls;
 					}
-					// DeepSeek thinking：上一轮 assistant 的思维链必须原样回传
-					if (msg.reasoning) {
-						aiProxyMsg.reasoning_content = msg.reasoning;
+					// DeepSeek thinking：assistant 消息必须带 reasoning_content（多轮回传必需）。
+					// 跨模型切换 / 老会话 / 非思考模型生成的历史，msg.reasoning 缺失 → 兜底空串，
+					// 让上游通过"已回传"检查（DeepSeek 接受空 reasoning_content 表示该轮无思维链）。
+					if (aiProxyMsg.role === 'assistant') {
+						aiProxyMsg.reasoning_content = (msg.reasoning && msg.reasoning.length > 0)
+							? msg.reasoning
+							: '(no reasoning recorded for this turn)';
 					}
 					result.push(aiProxyMsg);
 				}
@@ -777,7 +792,7 @@ export class AiProxyHandler implements IApiHandler {
 	 * 转换工具定义为 AiProxy 格式
 	 */
 	private convertTools(tools: ToolDefinition[]): AiProxyTool[] {
-		return tools.map(tool => ({
+		const out = tools.map(tool => ({
 			type: 'function',
 			function: {
 				name: tool.name,
@@ -785,6 +800,14 @@ export class AiProxyHandler implements IApiHandler {
 				parameters: tool.parameters
 			}
 		}));
+		// 在最后一个工具上挂 cache_control:ephemeral（Anthropic prompt caching 约定：
+		// 末位 cache_control 标记会让其前的所有 tool 定义一并进入缓存段）。
+		// tools 列表按 mode 是稳定的，下次调用同 mode 同 tools → 整个 tools 段命中缓存，
+		// 每请求节省 1.5-3K input tokens。OpenAI/Qwen 等 provider 不识别该字段会自动忽略，无副作用。
+		if (out.length > 0) {
+			(out[out.length - 1] as any).cache_control = { type: 'ephemeral' };
+		}
+		return out;
 	}
 
 	/**

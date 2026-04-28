@@ -82,6 +82,7 @@ import { LSP } from './lsp/index.js';
 import { loadAllPlugins, triggerPluginHook, type PluginToolDef, type LoadedPlugin } from './pluginLoader.js';
 import { compactIfNeeded, forceCompact, CONTEXT_WINDOW } from './contextCompaction.js';
 import { loadProjectConfig, loadCustomAgents, loadCustomCommands } from './projectConfig.js';
+import { runHookCommand, formatHookResult } from './hookRunner.js';
 import type { IToolContext } from '@maxian/core/tools';
 import type {
 	IConfiguration,
@@ -2090,6 +2091,10 @@ async function main() {
 	// ═════════════════════════════════════════════════════════════════════
 
 	/** 静态 prompt 段（只依赖 mode，哈希稳定，可被 LLM 缓存）*/
+	// 共享尾部语言提醒：长 prompt + 大量英文工具结果会让模型遗忘开头语言锚，
+	// 在每个静态 prompt 末尾再次强约束（参考 SystemPromptGenerator.generateLeanPrompt 的设计）。
+	const LANG_TAIL_REMINDER = `\n\n====\n\n⚠️ 输出语言收尾强约束（绝对不可违反）\n\n- 所有自然语言输出（说明、分析、思考、reasoning_content、总结、错误解释、追问）必须使用简体中文\n- 严禁输出任何英文句子或英文段落，包括思考阶段（reasoning_content）\n- 工具结果中如果是英文代码 / 英文 stderr / 英文路径，**保留原文不翻译**，但你对它的解读必须用中文\n- 即便用户是用英文提问，你也必须用简体中文回答`;
+
 	const STATIC_PROMPT_EXPLORE = `【语言】简体中文输出。代码/路径/标识符保持原文。
 
 你是码弦代码探索专家，专门高效导航和搜索代码库。
@@ -2196,6 +2201,13 @@ HARD RULES
    - **不允许**留任何 in_progress 或 pending 的项目就调 attempt_completion
    - 否则前端会显示 "X/Y（AI 提前结束，N 项未完成）"，用户视为任务失败
 
+9. **🔥 完成前必须验证（Verify-before-done）**：声明任务"完成 / 修好 / done / 实现完毕"之前，必须满足以下至少一项作为客观证据：
+   - **a) PostToolUse hook 全过**：edit/write 后 .maxian/config.json 配置的 hook（如 tsc --noEmit）退出码 0
+   - **b) 显式跑过验证命令**：最近 1 轮内有 bash 或 execute_command 工具调用，结果显示 PASS（typecheck/build/test/lint 任一通过）
+   - **c) 任务范围内 todos 全 completed/cancelled**（且任务不涉及代码运行验证）
+   - 都不满足 → **不要**说"完成了"，要么自己跑验证，要么明确告知用户"已写完未验证，建议你跑一次 X"
+   - 严禁"我已经修好了"+ 实际没跑过 build/test 这种假完成
+
 ====
 
 TOOL SELECTION
@@ -2215,6 +2227,61 @@ TOOL SELECTION
 - 目标文件**已存在** → 必须改用 edit / multiedit
 - 你没 read_file 就想 write_to_file 覆盖 → 拦截
 - 新内容删除行数远大于新增 → 拦截（防止覆盖用户/他人手改）
+
+====
+
+PLAN-FIRST 强制清单（满足任一项 → 必须先调 plan_exit 输出计划等用户确认 → 再开始 edit）
+
+1. **新增功能** —— "实现/添加 X 功能"、"做一个 X 模块"、"加上 X"
+2. **跨多文件修改** —— 预估要改 ≥ 3 个文件
+3. **重构** —— "整理/拆分/重构 X"
+4. **修一类 bug** —— 排查"这种问题/这类错误"（vs 修单个具体行号）
+5. **架构/数据流变化** —— 改接口签名、数据库 schema、新增 service / store
+6. **不确定方案** —— 用户描述模糊或需要在两条路径里选
+
+**MEGA-TASK 强制拆分（识别任务形态 → 选对拆分模式）**
+
+直接在主上下文硬刚大任务会爆 token + 撑爆 UI 内存。先识别任务形态再用对应模式：
+
+**形态 A：N 个相似独立单元（fan-out 模式）**
+
+特征：≥ 10 个相似且彼此独立的活儿（10+ 表的 CRUD 生成、10+ endpoint 改、10+ 组件迁移）
+
+做法：plan_exit → 主 agent 用 task() 按批 dispatch 子 agent，每批 5-10 并行；每个 subagent 收一个聚焦小任务 + 输出 200 字摘要回主 agent。
+
+**形态 B：1 个大单元 + N 个依赖（gather-summarize 模式）**
+
+特征：要处理一个大文件（如 2000 行存储过程 / 1500 行 monolith service）但需要参考 N 个外部依赖（表 schema / API 文档 / 配置）。
+
+❌ 错误做法：主 agent 自己一个个 read 所有依赖 → 100 张表 full schema = 125K token 噪声 + UI OOM。
+
+✅ 正确做法：
+1. plan_exit 阶段先声明：会用 1 个 explore subagent 收敛依赖
+2. 主 agent **完整读**那个大单元（必须的，无法省）
+3. 主 agent 调 1 次 task(subagent_type='explore', prompt='...'):
+   - 任务：读取 N 个依赖，**只提取实际被大单元引用的字段/方法**
+   - 输出格式：紧凑 JSON 或表格，每个依赖 ≤ 200 字
+   - 例：100 张表 → 每张只列被 SP 引用的 3-5 列，完整摘要 5-10K token（vs 全读 125K token）
+4. 主 agent 拿到精炼摘要（5-10K token）→ 开始写代码
+
+**形态 C：超长源文件重构（chunk-then-stitch 模式）**
+
+特征：单源文件 ≥ 1500 行需要全重构。
+
+做法：plan_exit 先按职责切段（如"L1-300 配置加载 / L301-800 数据获取 / L801-1500 计算 / L1501-2000 输出"）→ 用户确认 → 每段一次 multiedit，避免一次性 multiedit 整个文件参数过大。
+
+**反面教训**：直接 "读 100 张表 + 写 N 个文件" 在主上下文一锅炖 → 上下文 150K+ token + UI OOM + token 成本 10 倍。识别形态再选模式 = 关键。
+
+**反例**（不必 plan，直接动手）：
+- 单文件单点修改（"把 foo.ts 第 23 行改成 X"）
+- 改注释 / 改文案 / 改格式
+- 用户已经明确给了实现方案
+
+**plan_exit 输出格式**：
+- 背景：要解决什么问题
+- 文件清单：要改/新建哪些文件，各自改什么
+- 分步骤：编号列表，每步一句话
+- 风险点：可能踩的坑
 
 **并行工具规则（减少 API 往返）**：
 1. 改文件前**必须**先 read_file 完整读一次
@@ -2242,10 +2309,11 @@ OBJECTIVE
 - 任何文件操作都通过工具，**绝不在回复文本里输出完整代码**`;
 
 	function getStaticPromptByMode(mode: string): string {
-		if (mode === 'explore') return STATIC_PROMPT_EXPLORE;
-		if (mode === 'plan')    return STATIC_PROMPT_PLAN;
-		if (mode === 'ask' || mode === 'chat') return STATIC_PROMPT_CHAT;
-		return STATIC_PROMPT_CODE;  // 'code' 和其他默认
+		// 所有模式末尾都附加语言尾部提醒（避免长上下文 + 大量英文工具结果稀释开头锚定）
+		if (mode === 'explore') return STATIC_PROMPT_EXPLORE + LANG_TAIL_REMINDER;
+		if (mode === 'plan')    return STATIC_PROMPT_PLAN    + LANG_TAIL_REMINDER;
+		if (mode === 'ask' || mode === 'chat') return STATIC_PROMPT_CHAT + LANG_TAIL_REMINDER;
+		return STATIC_PROMPT_CODE + LANG_TAIL_REMINDER;  // 'code' 和其他默认
 	}
 
 	/**
@@ -2426,6 +2494,9 @@ OBJECTIVE
 			let iterReasoningText = '';
 			let aiError: string | null = null;
 			const toolInputCumLen = new Map<string, number>();
+			// 节流批次：每个 toolId 攒到 50ms 或 4KB 才 fire 一次 tool_input_delta；
+			// 在 isPartial:false 时由下面的 final-flush 兜底把残留 buf 推完。
+			const toolInputPending = new Map<string, { buf: string; lastFlushTs: number; name: string }>();
 			const seenToolIds = new Set<string>();
 			// reasoning 分段持久化：在 tool_use 边界把 iterText/iterReasoningText 累积的段切片入库
 			let lastSavedTextOffset      = 0;
@@ -2498,23 +2569,48 @@ OBJECTIVE
 									streaming:  true,
 								} as any);
 							}
-							// AiProxyHandler 发的 chunk.input 是 **累积值**，在此算真正的 delta
+							// AiProxyHandler 发的 chunk.input 是 **累积值**，在此算真正的 delta。
+							// 节流：50ms 或 4KB 攒一次推送（避免每 chunk 都 fire 把 SSE 通道塞满）。
+							// 多 edit / multiedit 大参数下可减少 90%+ 的 SSE 帧数，前端 UI 不再卡顿。
 							const cumInput = chunk.input ?? '';
 							const prevLen  = toolInputCumLen.get(chunk.id) ?? 0;
 							if (cumInput.length > prevLen) {
-								const delta = cumInput.slice(prevLen);
 								toolInputCumLen.set(chunk.id, cumInput.length);
+								const pend = toolInputPending.get(chunk.id) ?? { buf: '', lastFlushTs: 0, name: chunk.name };
+								pend.buf += cumInput.slice(prevLen);
+								pend.name = chunk.name;
+								const now = Date.now();
+								const shouldFlush = pend.buf.length >= 4096 || (now - pend.lastFlushTs) >= 50;
+								if (shouldFlush) {
+									await server.sessionManager.emitEvent(sessionId, {
+										type:       'tool_input_delta',
+										sessionId,
+										toolUseId:  chunk.id,
+										toolName:   pend.name,
+										inputDelta: pend.buf,
+										totalLen:   cumInput.length,
+									} as any);
+									pend.buf = '';
+									pend.lastFlushTs = now;
+								}
+								toolInputPending.set(chunk.id, pend);
+							}
+						} else {
+							console.log(`[Agent] 收到完整工具调用: ${chunk.name} (id=${chunk.id})`);
+							// Final flush：把节流期间残留的 buf 全部推给前端，确保 UI 看到完整参数
+							const pend = toolInputPending.get(chunk.id);
+							if (pend && pend.buf.length > 0) {
 								await server.sessionManager.emitEvent(sessionId, {
 									type:       'tool_input_delta',
 									sessionId,
 									toolUseId:  chunk.id,
-									toolName:   chunk.name,
-									inputDelta: delta,
-									totalLen:   cumInput.length,
+									toolName:   pend.name,
+									inputDelta: pend.buf,
+									totalLen:   toolInputCumLen.get(chunk.id) ?? pend.buf.length,
 								} as any);
+								pend.buf = '';
 							}
-						} else {
-							console.log(`[Agent] 收到完整工具调用: ${chunk.name} (id=${chunk.id})`);
+							toolInputPending.delete(chunk.id);
 							try {
 								const params = JSON.parse(chunk.input);
 								toolCalls.push({ id: chunk.id, name: chunk.name, params });
@@ -2656,7 +2752,11 @@ OBJECTIVE
 						});
 					}
 					if (anthropicText) {
-						history.push({ role: 'assistant', content: anthropicText });
+						const fallbackMsg: any = { role: 'assistant', content: anthropicText };
+						if (iterReasoningText && iterReasoningText.length > 0) {
+							fallbackMsg.reasoning = iterReasoningText;
+						}
+						history.push(fallbackMsg);
 					}
 					return anthropicText;
 				}
@@ -2703,7 +2803,13 @@ OBJECTIVE
 							type: 'convert_reasoning_to_assistant', sessionId,
 						} as any);
 					}
-					history.push({ role: 'assistant', content: iterText });
+					// DeepSeek thinking：把本轮 reasoning_content 挂到 assistant 消息上，
+					// 下一轮（或老会话恢复后）回传给上游，否则 400
+					const finalAssistant: any = { role: 'assistant', content: iterText };
+					if (iterReasoningText && iterReasoningText.length > 0) {
+						finalAssistant.reasoning = iterReasoningText;
+					}
+					history.push(finalAssistant);
 				}
 				break;
 			}
@@ -2724,7 +2830,14 @@ OBJECTIVE
 					input: tc.params,
 				});
 			}
-			history.push({ role: 'assistant', content: assistantContent });
+			// DeepSeek thinking：本轮 assistant 触发 tool_calls 时，必须把 reasoning_content
+			// 一起回传给上游；不带的话 DeepSeek 下一轮请求会返回
+			//   "The reasoning_content in the thinking mode must be passed back to the API." 400
+			const assistantMsg: any = { role: 'assistant', content: assistantContent };
+			if (iterReasoningText && iterReasoningText.length > 0) {
+				assistantMsg.reasoning = iterReasoningText;
+			}
+			history.push(assistantMsg);
 
 			// ── 执行工具，收集结果（#12 并行执行 + #3 doom-loop） ─────────
 			const toolResultBlocks: ContentBlock[] = [];
@@ -2826,8 +2939,21 @@ OBJECTIVE
 					return { id: tc.id, name: tc.name, success: false, result: denied };
 				}
 
-				const result  = await executeToolCall(ctx, tc.name, tc.params, emitFileEvent, tc.id);
+				let result    = await executeToolCall(ctx, tc.name, tc.params, emitFileEvent, tc.id);
 				const success = !result.startsWith('Error');
+
+				// PostToolUse hook（对标 Claude Code）：工具成功后跑 .maxian/config.json
+				// 里配置的 shell 命令（如 edit 后跑 tsc --noEmit），把输出塞回 result
+				// 让 AI 下一轮看见编译/lint 错并自行修复。
+				if (success && projectCfg.hooks?.PostToolUse?.[tc.name]) {
+					const hookCmd = projectCfg.hooks.PostToolUse[tc.name];
+					try {
+						const hookRes = await runHookCommand(hookCmd, { cwd: ctx.workspacePath });
+						result += formatHookResult(tc.name, hookCmd, hookRes);
+					} catch (err) {
+						result += `\n\n❌ PostToolUse hook 启动异常：${(err as Error).message}`;
+					}
+				}
 
 				// Plugin hook: tool.execute.after
 				await triggerPluginHook(loadedPlugins, 'tool.execute.after', {
@@ -2931,6 +3057,16 @@ OBJECTIVE
 
 			// ── 将工具结果追加到历史，继续下一轮 ──
 			history.push({ role: 'user', content: toolResultBlocks });
+
+			// 语言重锚：每轮工具结果（多半是英文代码 / stderr / 路径）后追加一条 user 提醒，
+			// 避免长上下文里大量英文 token 把模型带偏改用英文回复。
+			// 用 user 角色追加保证 aiProxyHandler 转 OpenAI 格式时这条作为独立 user 消息保留。
+			if (toolResultBlocks.length > 0) {
+				history.push({
+					role: 'user',
+					content: '[系统提醒] 工具结果中的代码 / 路径 / 命令保留英文原文不翻译，但你下一段自然语言回复（包括思考链 reasoning_content）必须使用简体中文，禁止英文句子。',
+				});
+			}
 		}
 
 		// ── 推送日志（对标码弦 IDE /ai/call-log） ────────────────────────────────

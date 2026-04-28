@@ -140,6 +140,7 @@ function initSchema(db: Database.Database): void {
 			role       TEXT    NOT NULL,
 			content    TEXT    NOT NULL,
 			position   INTEGER NOT NULL,
+			reasoning  TEXT,    -- DeepSeek thinking / OpenAI o1 思维链原文（多轮回传必需）
 			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 		);
 
@@ -185,6 +186,72 @@ function initSchema(db: Database.Database): void {
 	if (!fsCols.includes('action')) {
 		db.exec(`ALTER TABLE file_snapshots ADD COLUMN action TEXT NOT NULL DEFAULT 'modified'`);
 		console.log('[Database] 迁移完成：file_snapshots 表新增 action 列');
+	}
+
+	// ── history_entries 表迁移：补 reasoning 列 ─────────────────────────
+	// DeepSeek thinking / OpenAI o1 系列：多轮 assistant 消息必须回传 reasoning_content；
+	// 旧库该列不存在，在此补齐（NULL 视为无 reasoning，不影响非 thinking 模型）。
+	const heCols = (db.pragma('table_info(history_entries)') as Array<{ name: string }>).map(r => r.name);
+	const justAddedReasoning = !heCols.includes('reasoning');
+	if (justAddedReasoning) {
+		db.exec(`ALTER TABLE history_entries ADD COLUMN reasoning TEXT`);
+		console.log('[Database] 迁移完成：history_entries 表新增 reasoning 列');
+	}
+
+	// 老 session 救援：从 messages 表里把 (reasoning row → 紧跟的 assistant row) 配对
+	// 还原到 history_entries.reasoning，让旧会话也能继续多轮。
+	// 思路：messages 是 UI 层显示历史，按 created_at 严格有序，老版本 sidecar 流式时
+	// 总是先 fire reasoning 再 fire assistant_message，所以这种"reasoning → assistant"
+	// 的相邻对一一对应于 history_entries 里的 assistant 条目。
+	if (justAddedReasoning) {
+		try {
+			const sessionRows = db.prepare(`SELECT id FROM sessions`).all() as Array<{ id: string }>;
+			let backfilledSessions = 0;
+			let backfilledEntries  = 0;
+			for (const s of sessionRows) {
+				const msgs = db.prepare(
+					`SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at ASC`
+				).all(s.id) as Array<{ role: string; content: string }>;
+				const reasoningPairs: string[] = [];
+				let pending: string | null = null;
+				for (const m of msgs) {
+					if (m.role === 'reasoning') {
+						pending = m.content;
+					} else if (m.role === 'assistant') {
+						reasoningPairs.push(pending ?? '');
+						pending = null;
+					} else {
+						pending = null; // 中间夹了 user/tool/error，前面的 reasoning 不再认
+					}
+				}
+				if (reasoningPairs.length === 0) continue;
+
+				const entries = db.prepare(
+					`SELECT id, role FROM history_entries WHERE session_id = ? ORDER BY position ASC`
+				).all(s.id) as Array<{ id: number; role: string }>;
+				const update = db.prepare(`UPDATE history_entries SET reasoning = ? WHERE id = ?`);
+				let assistantIdx = 0;
+				let touched = 0;
+				const txn = db.transaction(() => {
+					for (const e of entries) {
+						if (e.role !== 'assistant') continue;
+						const r = reasoningPairs[assistantIdx];
+						assistantIdx++;
+						if (r) { update.run(r, e.id); touched++; }
+					}
+				});
+				txn();
+				if (touched > 0) {
+					backfilledSessions++;
+					backfilledEntries += touched;
+				}
+			}
+			if (backfilledEntries > 0) {
+				console.log(`[Database] 迁移完成：${backfilledSessions} 个会话回填了 ${backfilledEntries} 条 reasoning_content`);
+			}
+		} catch (e) {
+			console.warn('[Database] reasoning 迁移回填失败（继续启动，不影响正常使用）:', e);
+		}
 	}
 
 	// ── K5 历史 token 估算回填（一次性，幂等） ─────────────────────────

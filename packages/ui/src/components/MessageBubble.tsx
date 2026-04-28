@@ -17,6 +17,32 @@ import { renderLightMarkdown } from './lightMarkdown.js';
 import css from './MessageBubble.css?inline';
 import { injectStyleOnce } from './_injectStyle.js';
 
+/**
+ * 每条 reasoning 气泡的展开状态按 msg.id 全局记忆。
+ * MessageBubble 组件被父级 <For> 重建（任何流式更新都可能触发）时，组件内
+ * 的 createSignal 都会重置；把状态外置到这里就能保持"用户手动展开/折叠"
+ * 的选择不被外部刷新冲掉。
+ *
+ * LRU 上限 500 条避免长会话/多次启动累积无限增长（webview OOM 防御）。
+ */
+const REASONING_MAP_CAP = 500;
+const reasoningOpenById = new Map<string, boolean>();
+const reasoningSeenDoneById = new Set<string>();
+function setReasoningOpenCapped(id: string, v: boolean): void {
+	if (reasoningOpenById.size >= REASONING_MAP_CAP && !reasoningOpenById.has(id)) {
+		const firstKey = reasoningOpenById.keys().next().value as string | undefined;
+		if (firstKey) reasoningOpenById.delete(firstKey);
+	}
+	reasoningOpenById.set(id, v);
+}
+function markReasoningSeenDoneCapped(id: string): void {
+	if (reasoningSeenDoneById.size >= REASONING_MAP_CAP) {
+		const firstKey = reasoningSeenDoneById.values().next().value as string | undefined;
+		if (firstKey) reasoningSeenDoneById.delete(firstKey);
+	}
+	reasoningSeenDoneById.add(id);
+}
+
 export interface MessageActions {
 	/** 重新生成此消息（从此节点开始重跑） */
 	onRegenerate?: (message: ChatMessage) => void;
@@ -79,14 +105,32 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 		<Show when={m()}>
 			{(msg) => {
 				const role = () => msg().role;
-				// 思考气泡折叠态：流式中始终展开；完成 → 自动折叠一次；之后用户可手动展开/折叠
-				const [reasoningOpen, setReasoningOpen] = createSignal(true);
-				const [autoCollapsed, setAutoCollapsed] = createSignal(false);
+				// 思考气泡折叠态：用模块级 Map 按 msg.id 持久化状态，组件重建状态依然在。
+				// 默认：流式中视为展开（true），完成 → 自动折叠 → 之后完全由用户控制。
+				const initialOpen = (): boolean => {
+					const stored = reasoningOpenById.get(msg().id);
+					if (stored !== undefined) return stored;
+					return msg().isPartial === true;   // 默认值
+				};
+				const [reasoningOpen, _setReasoningOpenInner] = createSignal(initialOpen());
+				const setReasoningOpen = (next: boolean | ((prev: boolean) => boolean)): void => {
+					_setReasoningOpenInner(prev => {
+						const v = typeof next === 'function' ? next(prev) : next;
+						setReasoningOpenCapped(msg().id, v);
+						return v;
+					});
+				};
+				// 进入完成态的"瞬间"折叠一次（每条 reasoning 一次性）；用户后续手动操作不再被覆盖。
 				createEffect(() => {
-					// isPartial → false 的瞬间执行一次自动折叠
-					if (!m().isPartial && m().role === 'reasoning' && !autoCollapsed()) {
-						setReasoningOpen(false);
-						setAutoCollapsed(true);
+					if (m().role !== 'reasoning') return;
+					const isDoneNow = m().isPartial !== true;
+					const id = m().id;
+					if (isDoneNow && !reasoningSeenDoneById.has(id)) {
+						markReasoningSeenDoneCapped(id);
+						// 用户在流式期间未手动操作过 → 自动折叠
+						if (!reasoningOpenById.has(id)) {
+							setReasoningOpen(false);
+						}
 					}
 				});
 				const ts = (): string => {
@@ -190,21 +234,25 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 
 						<Show when={role() === 'reasoning'}>
 							{(() => {
-								const isDone   = !msg().isPartial;
+								// 关键：isDone / expanded 必须是函数（响应式）而不是 const 快照。
+								// 否则流式中初次渲染时 isPartial=true 把 isDone 冻结成 false，
+								// 流结束后用户点 header 时 onClick 里的 isDone && ... 永远是 false，
+								// 导致"展不开"——这是用户实际遇到的 bug。
+								const isDone   = (): boolean => !msg().isPartial;
 								const expanded = (): boolean => msg().isPartial || props.expandReasoning === true || reasoningOpen();
 								return (
-									<div class="mu-reasoning" classList={{ 'mu-reasoning-done': isDone, 'mu-reasoning-collapsed': isDone && !expanded() }}>
+									<div class="mu-reasoning" classList={{ 'mu-reasoning-done': isDone(), 'mu-reasoning-collapsed': isDone() && !expanded() }}>
 										<div
 											class="mu-reasoning-head"
-											onClick={() => isDone && setReasoningOpen(o => !o)}
-											style={{ cursor: isDone ? 'pointer' : 'default' }}
+											onClick={() => isDone() && setReasoningOpen(o => !o)}
+											style={{ cursor: isDone() ? 'pointer' : 'default' }}
 										>
 											<span class="mu-reasoning-icon">💭</span>
 											<span class="mu-reasoning-title">
 												{msg().isPartial ? '思考中' : '思考'}
 												{msg().charCount ? ` · ${msg().charCount} 字` : ''}
 											</span>
-											<Show when={isDone}>
+											<Show when={isDone()}>
 												<button class="mu-reasoning-toggle" type="button" aria-label={expanded() ? '折叠' : '展开'}>
 													<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
 														stroke-width="2" stroke-linecap="round" stroke-linejoin="round"

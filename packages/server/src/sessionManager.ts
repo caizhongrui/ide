@@ -47,6 +47,8 @@ export interface HistoryEntry {
 export interface MessageParam {
 	role: string;
 	content: string | unknown[];
+	/** DeepSeek thinking / OpenAI o1 思维链原文（多轮回传必需）；与 @maxian/core MessageParam.reasoning 对齐 */
+	reasoning?: string;
 }
 
 /** 数据库行类型 */
@@ -566,7 +568,7 @@ export class SessionManager {
 		const txn = db.transaction(() => {
 			db.prepare('DELETE FROM history_entries WHERE session_id = ?').run(sessionId);
 			const insert = db.prepare(
-				'INSERT INTO history_entries (session_id, role, content, position) VALUES (?, ?, ?, ?)'
+				'INSERT INTO history_entries (session_id, role, content, position, reasoning) VALUES (?, ?, ?, ?, ?)'
 			);
 			for (let i = 0; i < history.length; i++) {
 				const entry = history[i];
@@ -574,7 +576,9 @@ export class SessionManager {
 				const contentStr = typeof entry.content === 'string'
 					? entry.content
 					: JSON.stringify(entry.content);
-				insert.run(sessionId, entry.role, contentStr, i);
+				// DeepSeek thinking 思维链：随消息一并落库（后续多轮要原样回传）
+				const reasoning = (entry as any).reasoning ?? null;
+				insert.run(sessionId, entry.role, contentStr, i, reasoning);
 			}
 		});
 		txn();
@@ -586,8 +590,8 @@ export class SessionManager {
 	async loadHistory(sessionId: string): Promise<MessageParam[]> {
 		const db = getDb();
 		const rows = db.prepare(
-			'SELECT role, content FROM history_entries WHERE session_id = ? ORDER BY position ASC'
-		).all(sessionId) as Array<{ role: string; content: string }>;
+			'SELECT role, content, reasoning FROM history_entries WHERE session_id = ? ORDER BY position ASC'
+		).all(sessionId) as Array<{ role: string; content: string; reasoning: string | null }>;
 		return rows.map(r => {
 			let content: string | unknown[];
 			try {
@@ -596,7 +600,11 @@ export class SessionManager {
 			} catch {
 				content = r.content;
 			}
-			return { role: r.role, content };
+			const msg: MessageParam = { role: r.role, content };
+			if (r.reasoning) {
+				msg.reasoning = r.reasoning;
+			}
+			return msg;
 		});
 	}
 

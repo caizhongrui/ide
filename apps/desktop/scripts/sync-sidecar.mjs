@@ -53,6 +53,12 @@ if (needBuild) {
 	console.log(`[sync-sidecar] 目标 binary 不存在，开始构建...`);
 	// 先确保 TS 产物是新的。用 pnpm 跨平台触发（Windows 下是 pnpm.cmd）
 	const pm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+	// 关键：必须先 build @maxian/core（server 通过 import '@maxian/core' 间接吃 core 的 dist/，
+	// 不主动 rebuild 会导致 core 修改不进 sidecar binary）
+	const CORE_ROOT = path.resolve(SERVER_ROOT, '..', 'core');
+	if (existsSync(path.join(CORE_ROOT, 'package.json'))) {
+		run(pm, ['run', 'build'], CORE_ROOT);
+	}
 	run(pm, ['run', 'build'], SERVER_ROOT);
 	// 再跑 build-bin
 	run('node', [path.join(SERVER_ROOT, 'scripts', 'build-bin.mjs'), arg === 'current' ? key : arg], SERVER_ROOT);

@@ -47,9 +47,61 @@ const READ_FILE_CONFIG = {
 	/** 每行最大字符数（超出截断，参考 OpenCode read.ts MAX_LINE_LENGTH = 2000） */
 	MAX_LINE_LENGTH: 2000,
 
-	/** 默认分块读取的最大行数 */
-	DEFAULT_CHUNK_LINES: 2000,
+	/** 默认分块读取的最大行数（之前 2000 → 500：对标 Claude Code，长文件 token 立刻砍 75%）*/
+	DEFAULT_CHUNK_LINES: 500,
 };
+
+/**
+ * 提取文件结构大纲（简易版本，正则识别 class/function/export 等顶层符号）。
+ * 用于在文件被截断时把"地图"塞给 AI，让其知道关键代码段在哪一行，避免盲读。
+ *
+ * 不依赖 LSP（保证所有形态可用），覆盖率虽不如 LSP 但已能解决 80% case。
+ */
+function extractFileOutline(lines: string[], maxItems: number = 40): string {
+	const SYMBOL_PATTERNS = [
+		// 类 / 接口 / 枚举（TS/JS/Java/C#/Kotlin/Swift）
+		/^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:class|interface|enum)\s+(\w+)/,
+		// TS/JS function / async function / generator
+		/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*(\w+)/,
+		// TS/JS arrow function 顶层 const/let/var
+		/^\s*(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+(\w+)\s*[:=]\s*(?:async\s+)?(?:\([^)]*\)|<[^>]+>)?\s*=>/,
+		// 类成员方法（缩进 2-4 + 修饰符 + 名字 + 括号）
+		/^\s{2,4}(?:public|private|protected|static|async|override|abstract)?\s*(\w+)\s*\([^)]*\)\s*[:{]/,
+		// Python def / class
+		/^\s*(?:async\s+)?def\s+(\w+)|^\s*class\s+(\w+)/,
+		// Go func / type
+		/^\s*func\s+(?:\([^)]+\)\s+)?(\w+)|^\s*type\s+(\w+)/,
+		// Rust fn / impl / struct / trait
+		/^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)|^\s*(?:pub\s+)?(?:struct|trait|impl|enum)\s+(\w+)/,
+		// 顶层 export
+		/^\s*export\s+(?:async\s+)?(?:function|class|interface|enum|const|let|var|type)\s+(\w+)/,
+	];
+	const KEYWORDS_BLOCKLIST = new Set([
+		'if','else','for','while','switch','case','return','throw','catch','try','finally',
+		'break','continue','do','typeof','instanceof','void','await','yield',
+	]);
+
+	interface OutlineItem { line: number; text: string }
+	const items: OutlineItem[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const ln = lines[i];
+		// 跳过过短/纯注释行
+		if (ln.length < 4 || /^\s*(?:\/\/|\/\*|\*|#|--)/.test(ln)) continue;
+		for (const pat of SYMBOL_PATTERNS) {
+			const m = ln.match(pat);
+			if (!m) continue;
+			const name = m[1] ?? m[2];
+			if (!name || KEYWORDS_BLOCKLIST.has(name)) break;
+			// 显示文本：去前导/尾部空白 + 截到 100 字
+			const display = ln.trim().slice(0, 100);
+			items.push({ line: i + 1, text: display });
+			break;
+		}
+		if (items.length >= maxItems) break;
+	}
+	if (items.length === 0) return '';
+	return items.map(it => `  L${String(it.line).padStart(4)}: ${it.text}`).join('\n');
+}
 
 // ========== 文件缓存 ==========
 interface FileCacheEntry {
@@ -791,13 +843,22 @@ function formatFileContent(
 		header.push(`⚠️ Large file: ${formatBytes(fileSize)}`);
 	}
 
+	// 截断时附文件结构大纲，让 AI 直接看到关键符号位于哪一行 → 精准 offset 二次读
+	let outlineSection = '';
+	if (isPartialView && totalLines > resultLines.length) {
+		const outline = extractFileOutline(lines, 40);
+		if (outline) {
+			outlineSection = `\n\n──── 文件结构大纲（共 ${totalLines} 行）────\n${outline}\n──── 想看具体段落：read_file path=... start_line=N end_line=M ────`;
+		}
+	}
+
 	return [
 		...header,
 		'',
 		'Content:',
 		'```',
 		numberedLines.join('\n'),
-		'```',
+		'```' + outlineSection,
 	].filter(Boolean).join('\n');
 }
 

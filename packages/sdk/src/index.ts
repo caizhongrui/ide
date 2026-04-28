@@ -265,70 +265,74 @@ export class MaxianClient {
 		const isLoopback = /127\.0\.0\.1|localhost|\[::1\]/.test(this.baseUrl);
 
 		let aborted = false;
-		let currentXhr: XMLHttpRequest | null = null;
+		let currentAbort: AbortController | null = null;
 		let retryTimer: ReturnType<typeof setTimeout> | null = null;
 		let delay = 250;
 
-		const connect = () => {
+		// ⚠️ 重要：换掉 XMLHttpRequest 实现 → fetch + ReadableStream
+		//
+		// 为什么换：XMLHttpRequest.responseText 会**累积整个 SSE 流的完整文本**
+		// 直到连接关闭。一个长任务（30 分钟以上）SSE 总流量轻松几百 MB，
+		// 这些数据全部 pin 在 xhr.responseText 上无法 GC，是 webview OOM 的真正凶手。
+		//
+		// fetch + body.getReader() 是 chunked stream 模式，每个 chunk 读完即释放，
+		// 不累积历史。同样的连接长跑，内存占用稳定在几 KB 级别。
+		const connect = async () => {
 			if (aborted) return;
+			const ac = new AbortController();
+			currentAbort = ac;
 
-			const xhr = new XMLHttpRequest();
-			currentXhr = xhr;
-			xhr.open('GET', url, true);
-			xhr.setRequestHeader('Accept', 'text/event-stream');
-			xhr.setRequestHeader('Cache-Control', 'no-cache');
-			// 非 loopback 时通过 Authorization header 传认证；loopback 走 ?auth= 查询参数
-			if (this.auth && !isLoopback) {
-				xhr.setRequestHeader('Authorization', this.auth);
-			}
+			const headers: Record<string, string> = {
+				'Accept':       'text/event-stream',
+				'Cache-Control':'no-cache',
+			};
+			if (this.auth && !isLoopback) headers['Authorization'] = this.auth;
 
 			let buf = '';
-			let lastLength = 0;
+			try {
+				const res = await this.fetchFn(url, { headers, signal: ac.signal });
+				if (!res.ok) throw new Error(`SSE HTTP ${res.status}`);
+				const body = res.body;
+				if (!body) throw new Error('SSE no body stream');
+				const reader = body.getReader();
+				const decoder = new TextDecoder('utf-8');
 
-			const processChunk = () => {
-				const text = xhr.responseText;
-				if (text.length <= lastLength) return;
-				buf += text.slice(lastLength);
-				lastLength = text.length;
+				while (true) {
+					if (aborted) { try { await reader.cancel(); } catch { /* ignore */ } break; }
+					const { done, value } = await reader.read();
+					if (done) break;
+					buf += decoder.decode(value, { stream: true });
 
-				// 按双换行分割事件块
-				const blocks = buf.split('\n\n');
-				buf = blocks.pop() ?? '';
+					// 按双换行分割事件块
+					const blocks = buf.split('\n\n');
+					buf = blocks.pop() ?? '';
 
-				for (const block of blocks) {
-					if (!block.trim()) continue;
-					for (const line of block.split('\n')) {
-						if (line.startsWith('data:')) {
-							const data = line.slice(5).trim();
-							if (data && data !== '[DONE]') {
-								try { onEvent(JSON.parse(data) as MaxianEvent); } catch (e) { onError?.(e); }
+					for (const block of blocks) {
+						if (!block.trim()) continue;
+						for (const line of block.split('\n')) {
+							if (line.startsWith('data:')) {
+								const data = line.slice(5).trim();
+								if (data && data !== '[DONE]') {
+									try { onEvent(JSON.parse(data) as MaxianEvent); } catch (e) { onError?.(e); }
+								}
 							}
 						}
 					}
 				}
-			};
 
-			xhr.onprogress = processChunk;
-
-			xhr.onload = () => {
-				processChunk(); // 处理最后一块
 				if (!aborted) {
 					// 服务端关闭连接 → 立即重连（重置 delay）
 					delay = 250;
 					retryTimer = setTimeout(connect, delay);
 				}
-			};
-
-			xhr.onerror = () => {
-				if (aborted) return;
-				onError?.(new Error(`SSE connection failed: ${url}`));
+			} catch (err) {
+				if (aborted || (err as any)?.name === 'AbortError') return;
+				onError?.(err);
 				retryTimer = setTimeout(() => {
 					delay = Math.min(delay * 2, 16000);
 					connect();
 				}, delay);
-			};
-
-			xhr.send();
+			}
 		};
 
 		connect();
@@ -336,8 +340,8 @@ export class MaxianClient {
 		return () => {
 			aborted = true;
 			if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-			currentXhr?.abort();
-			currentXhr = null;
+			currentAbort?.abort();
+			currentAbort = null;
 		};
 	}
 

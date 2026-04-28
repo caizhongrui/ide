@@ -160,7 +160,12 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
             "--password", &pass,
         ])
         .env("MAXIAN_PARENT_PID", &parent_pid)
-        .env("MAXIAN_KILL_ON_PARENT_DEATH", "1");
+        .env("MAXIAN_KILL_ON_PARENT_DEATH", "1")
+        // sidecar 内存上限：默认 2GB（agent + SQLite + bundles 够用）。
+        // BUN_GC_HEAP_GROWTH_RATIO 限制 GC 堆增长率，避免无节制扩张。
+        // NODE_MAX_OLD_SPACE_SIZE 是 Node 风格变量，Bun 部分场景兼容。
+        .env("BUN_GC_HEAP_GROWTH_RATIO", "1.5")
+        .env("NODE_OPTIONS", "--max-old-space-size=2048");
 
     let (mut rx, child) = sidecar
         .spawn()
@@ -211,6 +216,68 @@ fn server_info() -> serde_json::Value {
     })
 }
 
+/// 进程资源监控（左下角状态栏用）：返回当前桌面端进程 + sidecar 子进程的内存/CPU。
+/// sysinfo 是跨平台的（macOS/Windows/Linux），mem_bytes 单位字节，cpu_percent 是单核相对值（多核机器可能 > 100）。
+#[tauri::command]
+fn process_stats(server_pid: tauri::State<'_, ServerPid>) -> serde_json::Value {
+    use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+    );
+    // sysinfo 要求两次 refresh 之间隔一段才能算 cpu_usage（差分）
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let self_pid = std::process::id();
+    let sidecar_pid: Option<u32> = server_pid.0.lock().ok().and_then(|g| *g);
+
+    let (mut self_mem, mut self_cpu) = (0u64, 0.0f32);
+    let (mut sc_mem,   mut sc_cpu)   = (0u64, 0.0f32);
+    let (mut total_mem, mut total_cpu) = (0u64, 0.0f32);
+
+    if let Some(p) = sys.process(Pid::from_u32(self_pid)) {
+        self_mem = p.memory();
+        self_cpu = p.cpu_usage();
+        total_mem += self_mem;
+        total_cpu += self_cpu;
+    }
+    if let Some(pid) = sidecar_pid {
+        if let Some(p) = sys.process(Pid::from_u32(pid)) {
+            sc_mem = p.memory();
+            sc_cpu = p.cpu_usage();
+            total_mem += sc_mem;
+            total_cpu += sc_cpu;
+        }
+    }
+
+    // 系统总内存 / 可用内存（用于计算占比）
+    let sys_total = sys.total_memory();
+    let sys_used  = sys.used_memory();
+
+    serde_json::json!({
+        "self": {
+            "pid": self_pid,
+            "memBytes": self_mem,
+            "cpuPercent": self_cpu,
+        },
+        "sidecar": {
+            "pid": sidecar_pid,
+            "memBytes": sc_mem,
+            "cpuPercent": sc_cpu,
+        },
+        "total": {
+            "memBytes": total_mem,
+            "cpuPercent": total_cpu,
+        },
+        "system": {
+            "totalMemBytes": sys_total,
+            "usedMemBytes":  sys_used,
+        }
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -223,7 +290,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(ServerHandle(Mutex::new(None)))
         .manage(ServerPid(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![server_info])
+        .invoke_handler(tauri::generate_handler![server_info, process_stats])
         .setup(|app| {
             let handle = app.handle().clone();
             match spawn_server(&handle) {

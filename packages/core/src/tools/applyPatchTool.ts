@@ -208,6 +208,7 @@ export async function applyPatchTool(
 	}
 
 	// 全部 dry run 通过 → 执行写入
+	const { FileTime } = await import('../file/FileTime.js');
 	for (const p of plans) {
 		try {
 			if (p.isDelete) {
@@ -218,6 +219,8 @@ export async function applyPatchTool(
 				pf.writeFileSync(p.abs, p.after ?? '', 'utf8');
 				if (p.isCreate) result.filesCreated.push(p.abs);
 				else result.filesChanged.push(p.abs);
+				// FileTime：写入后刷新基线，避免下一轮 edit/multiedit 误判"外部修改"
+				if (ctx.sessionId) FileTime.read(ctx.sessionId, p.abs);
 			}
 			result.changes!.push({ path: p.abs, before: p.before, after: p.after });
 			ctx.fileContextTracker.trackFileWrite(p.abs);

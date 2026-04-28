@@ -129,6 +129,17 @@ export namespace FileTime {
 
 		const changed = curr.mtime !== prev.mtime || curr.size !== prev.size;
 		if (changed) {
+			// 宽容窗：mtime 推进很短（< 5s）→ 大概率是 AI 自己 fs.writeFileSync 后
+			// IDE/format-on-save/file-watcher 二次写盘的回响（不是用户外部编辑）。
+			// 静默刷新基线放行，避免"AI 改完自己就读不懂自己的文件"死循环。
+			//
+			// 真实外部编辑通常间隔 > 5s（用户切到编辑器、改、保存）；本规则不放行。
+			const advancedMs = (curr.mtime ?? 0) - (prev.mtime ?? 0);
+			if (advancedMs >= 0 && advancedMs < 5000) {
+				getOrCreateSessionMap(sessionId).set(norm, curr);
+				return;
+			}
+
 			const currIso = new Date(curr.mtime).toISOString();
 			const prevIso = prev.read.toISOString();
 			throw new Error(

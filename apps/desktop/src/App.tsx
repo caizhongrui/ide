@@ -209,6 +209,71 @@ function applyFont(family: string, size: number) {
   document.documentElement.style.setProperty("--font-size-base", `${size}px`)
 }
 
+// ─── ProcStats: 左下角进程资源监控（webview + sidecar 内存/CPU 实时） ───────
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n}B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)}K`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(0)}M`
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)}G`
+}
+function ProcStats() {
+  const [stats, setStats] = createSignal<{
+    self:    { pid: number; memBytes: number; cpuPercent: number }
+    sidecar: { pid: number | null; memBytes: number; cpuPercent: number }
+    total:   { memBytes: number; cpuPercent: number }
+    system:  { totalMemBytes: number; usedMemBytes: number }
+  } | null>(null)
+  const [hover, setHover] = createSignal(false)
+  let timer: ReturnType<typeof setInterval> | null = null
+
+  onMount(async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core' as any)
+      const poll = async () => {
+        try {
+          const r = await invoke('process_stats')
+          setStats(r as any)
+        } catch (e) {
+          console.warn('[ProcStats] poll failed:', e)
+        }
+      }
+      void poll()
+      timer = setInterval(poll, 2000)
+    } catch (e) {
+      console.warn('[ProcStats] tauri core unavailable:', e)
+    }
+    onCleanup(() => { if (timer) clearInterval(timer) })
+  })
+
+  return (
+    <Show when={stats()}>
+      {(s) => (
+        <div
+          class="proc-stats"
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+          title={
+            `桌面进程 PID=${s().self.pid}  内存=${formatBytes(s().self.memBytes)}  CPU=${s().self.cpuPercent.toFixed(1)}%\n`
+            + `Sidecar  PID=${s().sidecar.pid ?? '-'}  内存=${formatBytes(s().sidecar.memBytes)}  CPU=${s().sidecar.cpuPercent.toFixed(1)}%\n`
+            + `系统已用=${formatBytes(s().system.usedMemBytes)} / ${formatBytes(s().system.totalMemBytes)}`
+          }
+        >
+          <span class="proc-stats-icon">⏱</span>
+          <Show when={!hover()} fallback={
+            <span class="proc-stats-text">
+              UI {formatBytes(s().self.memBytes)} · SC {formatBytes(s().sidecar.memBytes)} · CPU {s().total.cpuPercent.toFixed(0)}%
+            </span>
+          }>
+            <span class="proc-stats-text">
+              内存 {formatBytes(s().total.memBytes)} · CPU {s().total.cpuPercent.toFixed(0)}%
+            </span>
+          </Show>
+        </div>
+      )}
+    </Show>
+  )
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
   // App status
@@ -857,29 +922,81 @@ export default function App() {
   const [sessionSearch, setSessionSearch] = createSignal('')
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null)
   const [messages, setMessages] = createSignal<ChatMessage[]>([])
+  // 内存硬防御：超过 800 条 → 丢最老的 200 条保留最新 600。
+  // 大任务（100+ 工具调用、超长会话）会让 messages 数组撑爆 webview 内存。
+  // 历史在 sidecar SQLite 还在，需要回看可滚到顶触发 fetchOlderMessages（如已有）。
+  createEffect(() => {
+    const len = messages().length
+    if (len > 800) {
+      setMessages(prev => prev.slice(-600))
+    }
+  })
   // ─── @maxian/ui 共享 store 镜像 ─────────────────────────────────────────────
   // desktop 现有 messages signal 是真相源；这里做"单向镜像"到共享 store，
   // 让未来共享 MessageList / 三端共用代码可以无缝消费。镜像只读不写回。
+  //
+  // 🔥 引用稳定化（关键防闪策略）：
+  //   每个 ChatMessage 缓存对应 SharedChatMessage；只有源消息真正"变化"时
+  //   （字段差异）才生成新引用，否则复用上一轮的同一对象。
+  //
+  //   不做这个缓存：messages() 信号每次 SSE chunk 都变 → effect 跑 → 全量 map
+  //   生成全新对象 → setAll 整体替换 → MessageList <For> 按引用判等全部 miss
+  //   → 所有 MessageBubble / ToolCallCard 都被 unmount + remount → :hover/transition
+  //   反复重启 → 整个列表"闪"。Map 持久化的展开状态保住了数值，但组件 DOM 还是
+  //   在不停销毁重建，所以视觉上仍然闪。
   const sharedMessagesStore = createMessagesStore()
+  const sharedMirrorCache = new Map<string, { src: ChatMessage; out: SharedChatMessage }>()
   createEffect(() => {
     const local = messages()
-    // 把 desktop ChatMessage shape 适配成 @maxian/ui SharedChatMessage shape
-    const shared: SharedChatMessage[] = local.map((m): SharedChatMessage => ({
-      id:          String(m.id),
-      role:        m.role === 'system' || m.role === 'tool' || m.role === 'reasoning' || m.role === 'error' || m.role === 'assistant' || m.role === 'user'
-        ? m.role
-        : 'system',
-      content:     m.content ?? '',
-      createdAt:   m.createdAt ?? Date.now(),
-      isPartial:   m.isPartial,
-      toolName:    m.toolName,
-      toolId:      m.toolUseId,
-      toolParams:  m.toolParams,
-      toolResult:  m.toolResult,
-      toolSuccess: m.toolSuccess,
-      liveOutput:  m.liveOutput,
-      charCount:   m.charCount,
-    }))
+    const newCache = new Map<string, { src: ChatMessage; out: SharedChatMessage }>()
+    const shared: SharedChatMessage[] = []
+    for (const m of local) {
+      const cached = sharedMirrorCache.get(String(m.id))
+      // 源消息引用未变 → 直接复用同一个 SharedChatMessage 对象
+      if (cached && cached.src === m) {
+        shared.push(cached.out)
+        newCache.set(String(m.id), cached)
+        continue
+      }
+      // 字段全等也算"未变"（patch 重写了源对象但内容一致——很少见，但便宜的二次保险）
+      if (cached
+        && cached.src.role === m.role
+        && cached.src.content === m.content
+        && cached.src.isPartial === m.isPartial
+        && cached.src.toolResult === m.toolResult
+        && cached.src.toolSuccess === m.toolSuccess
+        && cached.src.liveOutput === m.liveOutput
+        && cached.src.toolParams === m.toolParams
+        && cached.src.charCount === m.charCount
+      ) {
+        // 仅更新 src 指针（保 out 引用不变）
+        cached.src = m
+        shared.push(cached.out)
+        newCache.set(String(m.id), cached)
+        continue
+      }
+      // 真的变化 → 生成新 SharedChatMessage
+      const out: SharedChatMessage = {
+        id:          String(m.id),
+        role:        m.role === 'system' || m.role === 'tool' || m.role === 'reasoning' || m.role === 'error' || m.role === 'assistant' || m.role === 'user'
+          ? m.role
+          : 'system',
+        content:     m.content ?? '',
+        createdAt:   m.createdAt ?? Date.now(),
+        isPartial:   m.isPartial,
+        toolName:    m.toolName,
+        toolId:      m.toolUseId,
+        toolParams:  m.toolParams,
+        toolResult:  m.toolResult,
+        toolSuccess: m.toolSuccess,
+        liveOutput:  m.liveOutput,
+        charCount:   m.charCount,
+      }
+      shared.push(out)
+      newCache.set(String(m.id), { src: m, out })
+    }
+    sharedMirrorCache.clear()
+    for (const [k, v] of newCache) sharedMirrorCache.set(k, v)
     sharedMessagesStore.setAll(shared)
   })
   // contextFiles: 从消息里提取 @ 文件引用（P1-10）
@@ -1758,34 +1875,14 @@ export default function App() {
     }
     // 流式 tool input 增量（实时显示工具参数生成进度）
     if (type === "tool_input_delta") {
-      const toolUseId  = (e as any).toolUseId  as string
       const inputDelta = (e as any).inputDelta as string
-      const toolName   = (e as any).toolName   as string
-      if (inputDelta) _bumpRecv(inputDelta.length)  // 让接收计数器继续动
-      // 把增量追加到对应的 tool 消息的 content（它是 streaming 预览文本）
-      setMessages((prev) => {
-        // 找到最近的 streaming tool 消息
-        const idx = [...prev].reverse().findIndex(
-          m => m.role === "tool" && m.toolUseId === toolUseId && m.isPartial
-        )
-        if (idx === -1) {
-          // 没找到占位消息：创建一个（极端情况下 SSE 事件乱序）
-          return [...prev, {
-            id: String(++msgId), role: "tool" as const,
-            content: inputDelta,
-            toolName, toolUseId, isPartial: true,
-            toolParams: { __streaming: true },
-            createdAt: Date.now(),
-          }]
-        }
-        const realIdx = prev.length - 1 - idx
-        const t = prev[realIdx]
-        return [
-          ...prev.slice(0, realIdx),
-          { ...t, content: (t.content ?? '') + inputDelta },
-          ...prev.slice(realIdx + 1),
-        ]
-      })
+      // 只更新接收计数器让 UI "已接收 X 字" 动起来。
+      // ⚠️ 重要：之前每个 chunk 都 setMessages 把 inputDelta 累积到 tool message 的
+      // content 字段——但 ToolCallCard 在 streaming 期间根本不显示 content，纯无用写。
+      // 副作用：multiedit 转 2000 行 SP 时单次工具参数 100KB，每 50ms 复制整个 messages
+      // 数组 + Solid <For> 全表 memo 重算 + hljs 反复跑 → webview OOM 真凶。
+      // 完整 toolParams 在 tool_call_start streaming=false 时一次性写入即可，无需流式累积。
+      if (inputDelta) _bumpRecv(inputDelta.length)
       return
     }
     // 工具流式输出（bash 的 stdout/stderr 实时增量）
@@ -1794,18 +1891,24 @@ export default function App() {
       const chunk     = (e as any).chunk     as string
       const kind      = ((e as any).kind     as 'stdout' | 'stderr') ?? 'stdout'
       if (!toolUseId || !chunk) return
-      // 追加到对应工具消息的 liveOutput 字段（供工具卡片实时显示）
+      // 追加到对应工具消息的 liveOutput 字段（供工具卡片实时显示）。
+      // 上限 64KB：长期跑的 bash（npm install / build）输出能到几 MB，
+      // 多任务累积容易让 webview OOM。超限保留尾部 64KB 即可（UI 也只看 tail）。
+      const LIVE_OUTPUT_CAP = 64 * 1024
       setMessages((prev) => {
         const idx = [...prev].reverse().findIndex(m => m.role === 'tool' && m.toolUseId === toolUseId)
         if (idx === -1) return prev
         const realIdx = prev.length - 1 - idx
         const t = prev[realIdx] as any
         const prevLive = t.liveOutput ?? ''
-        // 每一块以换行结尾，stderr 前加标记（供 UI 着色）
         const marker = kind === 'stderr' ? '⚠ ' : ''
+        let next = prevLive + marker + chunk
+        if (next.length > LIVE_OUTPUT_CAP) {
+          next = '... [输出超 64KB，已截断头部]\n' + next.slice(-LIVE_OUTPUT_CAP)
+        }
         return [
           ...prev.slice(0, realIdx),
-          { ...t, liveOutput: prevLive + marker + chunk },
+          { ...t, liveOutput: next },
           ...prev.slice(realIdx + 1),
         ]
       })
@@ -1837,29 +1940,45 @@ export default function App() {
       const content = (e as any).content as string
       if (!content) return
       _bumpRecv(content.length)
+      // 单条 reasoning 上限 30KB：DeepSeek thinking 一轮可累 50KB+ 思维链，
+      // 600 条 messages × 50KB = 30MB 仅 reasoning 文本；给单条加 cap 把 worst case 砍半。
+      const REASONING_PER_MSG_CAP = 30 * 1024
       setMessages((prev) => {
-        // 如果末尾已经有一条 isPartial 的 reasoning 消息，直接追加
         if (prev.length > 0 && prev[prev.length - 1].role === "reasoning" && prev[prev.length - 1].isPartial) {
           const last = prev[prev.length - 1]
-          return [...prev.slice(0, -1), { ...last, content: last.content + content }]
+          let nextContent = last.content + content
+          if (nextContent.length > REASONING_PER_MSG_CAP) {
+            // 保留头部 + 尾部，省略中间（思考有用的信息常在结论附近）
+            const head = nextContent.slice(0, REASONING_PER_MSG_CAP / 2)
+            const tail = nextContent.slice(-REASONING_PER_MSG_CAP / 2)
+            nextContent = head + `\n\n... [思维链中段 ${nextContent.length - REASONING_PER_MSG_CAP} 字省略，仅 UI 显示]\n\n` + tail
+          }
+          return [...prev.slice(0, -1), { ...last, content: nextContent }]
         }
-        // 否则新建一条
         return [...prev, { id: String(++msgId), role: "reasoning", content, isPartial: true, createdAt: Date.now() }]
       })
     } else if (type === "assistant_message") {
       const content = (e as any).content as string
       const isPartial = (e as any).isPartial as boolean
       if (content) _bumpRecv(content.length)
+      // 单条 assistant 上限 80KB：超长回复（如代码生成）单条文本能到几十 KB，
+      // 给 cap 防长会话×长输出双重累积。代码段已经写到工具结果，自然语言部分够用。
+      const ASSISTANT_PER_MSG_CAP = 80 * 1024
       setMessages((prev) => {
         let base = prev
-        // 助手开始回复时，先结束当前流式 reasoning 块（思考阶段已结束）
         const lastMsg = base.length > 0 ? base[base.length - 1] : null
         if (lastMsg?.role === 'reasoning' && lastMsg.isPartial) {
           base = [...base.slice(0, -1), { ...lastMsg, isPartial: false, charCount: lastMsg.content.length }]
         }
         if (isPartial && base.length > 0 && base[base.length - 1].role === "assistant") {
           const last = base[base.length - 1]
-          return [...base.slice(0, -1), { ...last, content: last.content + content, isPartial }]
+          let nextContent = last.content + content
+          if (nextContent.length > ASSISTANT_PER_MSG_CAP) {
+            const head = nextContent.slice(0, ASSISTANT_PER_MSG_CAP / 2)
+            const tail = nextContent.slice(-ASSISTANT_PER_MSG_CAP / 2)
+            nextContent = head + `\n\n... [回复中段 ${nextContent.length - ASSISTANT_PER_MSG_CAP} 字省略]\n\n` + tail
+          }
+          return [...base.slice(0, -1), { ...last, content: nextContent, isPartial }]
         }
         return [...base, { id: String(++msgId), role: "assistant", content, isPartial, createdAt: Date.now() }]
       })
@@ -1916,6 +2035,9 @@ export default function App() {
       if (s === "processing") {
         _bumpRecv(1)   // 后端开始处理，让蓝点亮起
         setTodosLeftover(false)   // 新一轮处理开始，清掉上一轮的"未完成"提示
+        // 新任务一律清空上一轮 todos（不论状态）：AI 调 todo_write 时会重写完整列表，
+        // 清空避免新任务 sending 期间把旧清单搬回来显示。
+        setTodos([])
       }
       if (s === "completed" || s === "aborted" || s === "error") {
         setSending(false)
@@ -1929,8 +2051,37 @@ export default function App() {
       _bumpRecv(1)
       const toolName   = (e as any).toolName   as string
       const toolUseId  = (e as any).toolUseId  as string
-      const toolParams = (e as any).toolParams as Record<string, unknown> | undefined
+      let   toolParams = (e as any).toolParams as Record<string, unknown> | undefined
       const streaming  = (e as any).streaming  as boolean | undefined
+      // toolParams 大字段截断（multiedit 转 2000 行文件时 edits[].oldString/newString 各 100KB+
+      // 直接进 messages signal 会把 webview 内存撑爆）。
+      // UI 只用 path / command 等"主参数"展示，长字符串字段用占位符替换。
+      if (toolParams) {
+        const TRIM_FIELD_BYTES = 4096
+        const trimmed: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(toolParams)) {
+          if (typeof v === 'string' && v.length > TRIM_FIELD_BYTES) {
+            trimmed[k] = v.slice(0, TRIM_FIELD_BYTES) + `\n... [${v.length - TRIM_FIELD_BYTES} 字节已截断]`
+          } else if (Array.isArray(v)) {
+            // multiedit 的 edits 数组逐项截断
+            trimmed[k] = v.map((item: any) => {
+              if (item && typeof item === 'object') {
+                const out: Record<string, unknown> = {}
+                for (const [ik, iv] of Object.entries(item)) {
+                  out[ik] = (typeof iv === 'string' && iv.length > TRIM_FIELD_BYTES)
+                    ? iv.slice(0, TRIM_FIELD_BYTES) + `\n... [${iv.length - TRIM_FIELD_BYTES} 字节已截断]`
+                    : iv
+                }
+                return out
+              }
+              return item
+            })
+          } else {
+            trimmed[k] = v
+          }
+        }
+        toolParams = trimmed
+      }
       setMessages((prev) => {
         // 如果是 streaming=false（工具参数完整到达），查找已有占位消息更新其 toolParams
         if (streaming === false) {
@@ -1965,16 +2116,24 @@ export default function App() {
     } else if (type === "tool_call_result") {
       const toolUseId  = (e as any).toolUseId as string
       const success    = (e as any).success   as boolean
-      const toolResult = (e as any).result    as string | undefined
+      let   toolResult = (e as any).result    as string | undefined
       // 工具结果也算接收到的数据
       if (toolResult) _bumpRecv(toolResult.length)
+      // 超大 toolResult（log 转储 / 大文件 grep）截 200KB，避免单条消息吃几 MB 内存
+      const TOOL_RESULT_CAP = 200 * 1024
+      if (toolResult && toolResult.length > TOOL_RESULT_CAP) {
+        const head = toolResult.slice(0, TOOL_RESULT_CAP / 2)
+        const tail = toolResult.slice(-TOOL_RESULT_CAP / 2)
+        toolResult = head + `\n\n... [中段省略 ${toolResult.length - TOOL_RESULT_CAP} 字]\n\n` + tail
+      }
       setMessages((prev) => {
         const idx = [...prev].reverse().findIndex(m => m.role === "tool" && m.toolUseId === toolUseId)
         if (idx === -1) return prev
         const realIdx = prev.length - 1 - idx
         return [
           ...prev.slice(0, realIdx),
-          { ...prev[realIdx], isPartial: false, toolSuccess: success, toolResult },
+          // ✨ 关键：清空 liveOutput（已被 toolResult 替代），释放 streaming 期间累积的内存
+          { ...prev[realIdx], isPartial: false, toolSuccess: success, toolResult, liveOutput: undefined },
           ...prev.slice(realIdx + 1),
         ]
       })
@@ -4468,6 +4627,31 @@ export default function App() {
     changes: string[]
   }
   const CHANGELOG: ChangelogEntry[] = [
+    {
+      version: '0.2.15',
+      date: '2026-04-28',
+      changes: [
+        '🛡 修复长时间使用 / 跑大任务（如 2000 行函数转换、涉及 100 张表的存储过程改造）后界面闪退、提示"内存不足"的问题',
+        '⏱ 左下角新增内存 + CPU 实时显示，鼠标悬停可看 UI / 后台服务各自占用',
+        '🩹 修复用 DeepSeek（思考型模型）多轮对话偶发报错的问题，老会话也能继续聊不掉链子',
+        '🚀 关闭重开 / 切换会话后 AI 的思考过程完整保留，不再丢失',
+        '🌐 老会话切换不同模型（如从通义切到 DeepSeek）不再出错',
+        '🎯 AI 自动识别复杂任务（10+ 个独立单元 / 大文件涉及很多依赖 / 1500+ 行单文件重构）并拆解执行，不再硬塞导致超时或失败',
+        '✅ AI 说"做完了"之前必须自己跑过验证（编译 / 测试 / todos 全打勾），杜绝"嘴上完成实际没做"',
+        '🪝 新增工具钩子：在项目 .maxian/config.json 配置 "edit 后自动跑 tsc"，AI 改完代码立刻看到类型错并自己修',
+        '📝 读大文件优化：默认只读前 500 行 + 附文件结构大纲（每个 class / function 在哪一行），AI 按需精准二次读取，节省大量 token',
+        '🌏 长对话中 AI 不再突然切英文回复（中文锚定加固 + 每轮工具结果后重新提醒）',
+        '🛠 后台服务设置 2GB 内存上限，防长跑泄漏拖慢整个系统',
+        '✏ 任务清单全部跑完后自动收起（之前打勾仍一直显示）；发新任务时旧清单自动清掉',
+        '💭 修复展开思考气泡后，AI 一调用新工具就被自动折回去的问题',
+        '🛠 工具卡片"全部参数 / 已执行 N 个工具"等展开状态记得住，新消息进来不再被复位',
+        '🖱 修复鼠标悬停在消息或工具行上时，因 AI 流式输出导致界面反复闪烁',
+        '🔧 修复 AI 改完文件马上要再改时，被反复要求"先 read_file"的死循环',
+        '🛠 修复连续 patch 同一文件被误报"文件已被外部修改"',
+        '🪨 修复 AI 改大文件 / 大段代码替换时界面卡顿',
+        '⚙️ 大量内部稳定性、缓存命中与构建流程优化',
+      ],
+    },
     {
       version: '0.2.14',
       date: '2026-04-27',
@@ -7517,6 +7701,8 @@ export default {
               </button>
             </Show>
           </div>
+          {/* 进程资源监控（左下角）：2s 轮询，显示 webview + sidecar 内存/CPU */}
+          <ProcStats />
         </div>
         {/* 分支选择弹窗 — fixed 定位避免被 overflow 裁剪 */}
         <Show when={showBranchPicker() && currentBranch() !== null}>
@@ -8195,8 +8381,14 @@ export default {
                     <RevertDock />
                   </Show>
 
-                  {/* Todo 跟踪面板（P0-1） */}
-                  <Show when={todos().length > 0}>
+                  {/* Todo 跟踪面板（P0-1）
+                      显示条件：有 todos 且（还有未完成 OR AI 提前结束未收尾）。
+                      所有 todo 都 completed/cancelled → 立即隐藏，不再等 sending 结束
+                      （AI 收尾打字期间继续显示已全勾的清单是噪声）。 */}
+                  <Show when={todos().length > 0 && (
+                    todosLeftover() ||
+                    todos().some(t => t.status === 'in_progress' || t.status === 'pending')
+                  )}>
                     <TodoDock />
                   </Show>
 
