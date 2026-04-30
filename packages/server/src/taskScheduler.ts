@@ -325,17 +325,30 @@ export class TaskScheduler {
 		this.opts.emitBatchEvent?.(task.batchId, { type: 'task_status_changed', taskId: task.id, status: 'running' });
 
 		try {
-			// 2. 创建 session（外部桥接）
-			const { sessionId } = await this.opts.createSession({
-				title:       task.title,
-				workspaceId: task.workspaceId,
-				uiMode:      'code',
-				mode:        task.mode,
-			});
+			// 2. 解析 session：同 batch + workspace 共享一个 session（节省 token，复用上下文）
+			//    第一个 task 创建 session；后续 task 复用同一个 sessionId，发新 user 消息进去。
+			const batch = this.loadBatch(task.batchId)!;
+			const existing = db.prepare(`SELECT session_id FROM batch_tasks
+				WHERE batch_id = ? AND workspace_id = ? AND session_id IS NOT NULL
+				LIMIT 1`).get(task.batchId, task.workspaceId) as { session_id: string } | undefined;
+
+			let sessionId: string;
+			if (existing?.session_id) {
+				sessionId = existing.session_id;
+				console.log(`[TaskScheduler] 复用 session ${sessionId} (batch=${task.batchId} ws=${task.workspaceId})`);
+			} else {
+				const created = await this.opts.createSession({
+					title:       batch.name,    // session 标题用 batch 名（一个 batch+workspace 一个 session）
+					workspaceId: task.workspaceId,
+					uiMode:      'code',
+					mode:        task.mode,
+				});
+				sessionId = created.sessionId;
+				console.log(`[TaskScheduler] 新建 session ${sessionId} (batch=${task.batchId} ws=${task.workspaceId})`);
+			}
 			db.prepare(`UPDATE batch_tasks SET session_id = ? WHERE id = ?`).run(sessionId, task.id);
 
-			// 3. 启用 auto-approve（带黑名单）
-			const batch = this.loadBatch(task.batchId)!;
+			// 3. 启用 auto-approve（带黑名单）—— 即便 session 已启用过，重复设置无害
 			if (batch.autoApprove) {
 				const { HARD_DENY_PATTERNS } = await import('./autoApprove.js').catch(() => ({ HARD_DENY_PATTERNS: [] as RegExp[] }));
 				this.opts.sessionManager.setAutoApprove(sessionId, {
@@ -362,13 +375,24 @@ export class TaskScheduler {
 			this.running.set(task.id, rt);
 
 			// 6. 跑 agent loop（阻塞等结束）
-			const result = await this.opts.sessionManager.runUntilDone(sessionId, task.prompt, task.mode);
+			//    Prompt 包装：在共享 session 里加任务分隔符，让 AI 清楚知道当前是新任务
+			//    的开始，且能看到这是 batch 里的第几个任务（复用前面任务的 context）。
+			const wsTasks = db.prepare(`SELECT id, title FROM batch_tasks
+				WHERE batch_id = ? AND workspace_id = ?
+				ORDER BY position ASC`).all(task.batchId, task.workspaceId) as Array<{ id: string; title: string }>;
+			const taskIdx = wsTasks.findIndex(t => t.id === task.id) + 1;
+			const taskTotal = wsTasks.length;
+			const wrappedPrompt = taskTotal > 1
+				? `── 任务 ${taskIdx}/${taskTotal}：${task.title} ──\n\n${task.prompt}`
+				: task.prompt;
+			const result = await this.opts.sessionManager.runUntilDone(sessionId, wrappedPrompt, task.mode);
 
 			// 7. 清理 runtime
 			clearInterval(heartbeatTimer);
 			this.running.delete(task.id);
 			this.workspaceBusy.delete(task.workspaceId);
-			this.opts.sessionManager.clearAutoApprove(sessionId);
+			// ⚠️ 不要 clearAutoApprove —— 同 session 后续 task 仍需要 auto-approve
+			//    session 真正结束（batch completed/aborted）时再清
 
 			// 8. 写结果
 			if (rt.cancelled) {

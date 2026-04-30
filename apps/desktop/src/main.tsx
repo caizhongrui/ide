@@ -2,6 +2,7 @@
 import { render } from "solid-js/web"
 import App from "./App"
 import "./styles.css"
+import "./batch/batch.css"
 import "@xterm/xterm/css/xterm.css"
 
 const root = document.getElementById("root")

@@ -51,6 +51,89 @@ export interface MaxianEvent {
 	[key: string]: unknown;
 }
 
+/* ════════════════════════════════════════════════════════════════════════
+ *  批量任务（v0.2.16+）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+export type BatchStatus =
+	| 'draft' | 'running' | 'paused' | 'awaiting_user' | 'completed' | 'aborted';
+
+export type TaskStatus =
+	| 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled' | 'stuck';
+
+export type OnFailureStrategy = 'pause' | 'skip' | 'retry' | 'abort_batch';
+
+export interface TaskBatch {
+	id:             string;
+	name:           string;
+	description?:   string;
+	createdAt:      number;
+	updatedAt:      number;
+	status:         BatchStatus;
+	autoApprove:    boolean;
+	maxConcurrency: number;
+	onFailure:      OnFailureStrategy;
+	tokenBudget?:   number;
+	totalTasks:     number;
+	completedCount: number;
+	failedCount:    number;
+	skippedCount:   number;
+	tokensUsed:     number;
+}
+
+export interface BatchTask {
+	id:             string;
+	batchId:        string;
+	sessionId?:     string;
+	workspaceId:    string;
+	title:          string;
+	prompt:         string;
+	mode:           string;
+	template?:      string;
+	position:       number;
+	dependsOn?:     string[];
+	status:         TaskStatus;
+	createdAt:      number;
+	startedAt?:     number;
+	finishedAt?:    number;
+	lastHeartbeat?: number;
+	onFailure?:     OnFailureStrategy;
+	failureReason?: string;
+	failureAction?: 'retry' | 'skip' | 'abort_batch';
+	retryCount:     number;
+	maxRetry:       number;
+	tokensUsed:     number;
+	resultSummary?: string;
+	filesChanged?:  string[];
+}
+
+export interface CreateBatchInput {
+	name:            string;
+	description?:    string;
+	autoApprove?:    boolean;
+	maxConcurrency?: number;
+	onFailure?:      OnFailureStrategy;
+	tokenBudget?:    number;
+	autoStart?:      boolean;
+	tasks: Array<{
+		workspaceId:  string;
+		title:        string;
+		prompt:       string;
+		mode?:        string;
+		template?:    string;
+		dependsOn?:   string[];
+		onFailure?:   OnFailureStrategy;
+		maxRetry?:    number;
+	}>;
+}
+
+export type BatchEvent =
+	| { type: 'task_status_changed'; taskId: string; status: TaskStatus; failureReason?: string }
+	| { type: 'task_progress';       taskId: string; tokensUsed: number }
+	| { type: 'batch_progress';      completedCount: number; failedCount: number; skippedCount: number; tokensUsed: number }
+	| { type: 'batch_status_changed'; status: BatchStatus }
+	| { type: 'task_heartbeat';      taskId: string; lastHeartbeat: number };
+
 export interface HealthResult {
 	ok: boolean;
 	version: string;
@@ -513,5 +596,155 @@ export class MaxianClient {
 
 	async executeTool(opts: { name: string; params: Record<string, unknown>; toolUseId?: string }): Promise<unknown> {
 		return this.request('POST', '/tools/execute', opts);
+	}
+
+	/* ──────────── 批量任务（v0.2.16+）──────────── */
+
+	async createBatch(input: CreateBatchInput): Promise<{ batch: TaskBatch }> {
+		return this.request('POST', '/batches', input);
+	}
+
+	async listBatches(filter?: { status?: BatchStatus }): Promise<{ batches: TaskBatch[] }> {
+		const qs = filter?.status ? `?status=${encodeURIComponent(filter.status)}` : '';
+		return this.request('GET', `/batches${qs}`);
+	}
+
+	async getBatchDetail(id: string): Promise<{ batch: TaskBatch; tasks: BatchTask[] }> {
+		return this.request('GET', `/batches/${id}`);
+	}
+
+	async updateBatch(
+		id: string,
+		patch: Partial<{
+			status:          BatchStatus;
+			name:            string;
+			description:     string;
+			autoApprove:     boolean;
+			maxConcurrency:  number;
+			onFailure:       OnFailureStrategy;
+			tokenBudget:     number | null;
+		}>,
+	): Promise<{ batch: TaskBatch }> {
+		return this.request('PATCH', `/batches/${id}`, patch);
+	}
+
+	async reorderBatchTasks(batchId: string, taskIds: string[]): Promise<{ ok: boolean; tasks: BatchTask[] }> {
+		return this.request('PATCH', `/batches/${batchId}/reorder`, { taskIds });
+	}
+
+	async deleteBatch(id: string): Promise<{ ok: boolean }> {
+		return this.request('DELETE', `/batches/${id}`);
+	}
+
+	async listBatchTasks(batchId: string, filter?: { status?: TaskStatus }): Promise<{ tasks: BatchTask[] }> {
+		const qs = filter?.status ? `?status=${encodeURIComponent(filter.status)}` : '';
+		return this.request('GET', `/batches/${batchId}/tasks${qs}`);
+	}
+
+	async updateBatchTask(
+		batchId: string, taskId: string,
+		patch: Partial<{
+			onFailure: OnFailureStrategy | null;
+			prompt:    string;
+			title:     string;
+			mode:      string;
+		}>,
+	): Promise<{ task: BatchTask }> {
+		return this.request('PATCH', `/batches/${batchId}/tasks/${taskId}`, patch);
+	}
+
+	async retryBatchTask(batchId: string, taskId: string): Promise<{ task: BatchTask }> {
+		return this.request('POST', `/batches/${batchId}/tasks/${taskId}/retry`);
+	}
+
+	async skipBatchTask(batchId: string, taskId: string): Promise<{ task: BatchTask }> {
+		return this.request('POST', `/batches/${batchId}/tasks/${taskId}/skip`);
+	}
+
+	/**
+	 * 订阅批次实时进度事件（SSE）。
+	 * 复用 subscribeEvents 的 fetch+ReadableStream 实现，无 XHR 内存累积问题。
+	 *
+	 * @returns unsubscribe 函数
+	 */
+	subscribeBatchEvents(
+		batchId: string,
+		onEvent: (event: BatchEvent) => void,
+		onError?: (e: unknown) => void,
+	): () => void {
+		const qs = this.authQuery ? `?auth=${encodeURIComponent(this.authQuery)}` : '';
+		const url = `${this.baseUrl}/batches/${batchId}/events${qs}`;
+		const isLoopback = /127\.0\.0\.1|localhost|\[::1\]/.test(this.baseUrl);
+
+		let aborted = false;
+		let currentAbort: AbortController | null = null;
+		let retryTimer: ReturnType<typeof setTimeout> | null = null;
+		let delay = 250;
+
+		const connect = async (): Promise<void> => {
+			if (aborted) return;
+			const ac = new AbortController();
+			currentAbort = ac;
+
+			const headers: Record<string, string> = {
+				'Accept':       'text/event-stream',
+				'Cache-Control':'no-cache',
+			};
+			if (this.auth && !isLoopback) headers['Authorization'] = this.auth;
+
+			let buf = '';
+			try {
+				const res = await this.fetchFn(url, { headers, signal: ac.signal });
+				if (!res.ok) throw new Error(`SSE HTTP ${res.status}`);
+				const body = res.body;
+				if (!body) throw new Error('SSE no body stream');
+				const reader = body.getReader();
+				const decoder = new TextDecoder('utf-8');
+
+				while (true) {
+					if (aborted) { try { await reader.cancel(); } catch { /* ignore */ } break; }
+					const { done, value } = await reader.read();
+					if (done) break;
+					buf += decoder.decode(value, { stream: true });
+					const blocks = buf.split('\n\n');
+					buf = blocks.pop() ?? '';
+					for (const block of blocks) {
+						if (!block.trim()) continue;
+						for (const line of block.split('\n')) {
+							if (line.startsWith('data:')) {
+								const data = line.slice(5).trim();
+								if (data && data !== '[DONE]') {
+									try {
+										const ev = JSON.parse(data) as BatchEvent;
+										// 跳过心跳里的 sentinel
+										if ((ev as any).taskId !== '__hb__') onEvent(ev);
+									} catch (e) { onError?.(e); }
+								}
+							}
+						}
+					}
+				}
+				if (!aborted) {
+					delay = 250;
+					retryTimer = setTimeout(connect, delay);
+				}
+			} catch (err) {
+				if (aborted || (err as any)?.name === 'AbortError') return;
+				onError?.(err);
+				retryTimer = setTimeout(() => {
+					delay = Math.min(delay * 2, 16000);
+					connect();
+				}, delay);
+			}
+		};
+
+		void connect();
+
+		return () => {
+			aborted = true;
+			if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+			currentAbort?.abort();
+			currentAbort = null;
+		};
 	}
 }

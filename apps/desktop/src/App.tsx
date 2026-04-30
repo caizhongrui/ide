@@ -12,6 +12,7 @@ import {
   type SavedCredentials, type UserInfo,
 } from "./api"
 import { initI18n, t, setLocale, getLocale } from "./i18n"
+import { BatchPanel } from "./batch/BatchPanel"
 import {
   ApprovalDialog as SharedApprovalDialog,
   MessageList as SharedMessageList,
@@ -916,6 +917,15 @@ export default function App() {
 
   // Main state
   const [workspaces, setWorkspaces] = createSignal<Workspace[]>([])
+  // v0.2.16+：任务批次面板显隐（在主区覆盖渲染）
+  const [showBatchPanel, setShowBatchPanel] = createSignal(false)
+  // 给 BatchPanel 用的 client（lazy 拿一次缓存）
+  const [batchClient, setBatchClient] = createSignal<Awaited<ReturnType<typeof getClient>> | null>(null)
+  createEffect(() => {
+    if (showBatchPanel() && !batchClient()) {
+      void getClient().then(c => setBatchClient(c))
+    }
+  })
   const [activeWorkspace, setActiveWorkspace] = createSignal<Workspace | null>(null)
   const [sessions, setSessions] = createSignal<SessionSummary[]>([])
   // 会话搜索（sidebar 顶部，按标题模糊过滤）
@@ -5492,6 +5502,20 @@ export default {
                 </svg>
               </button>
             </Show>
+            {/* 任务批次入口（v0.2.16+）*/}
+            <button
+              class="icon-btn"
+              classList={{ active: showBatchPanel() }}
+              onClick={() => setShowBatchPanel(v => !v)}
+              title="任务批次（批量给项目派任务）"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7" height="7"/>
+                <rect x="14" y="3" width="7" height="7"/>
+                <rect x="3" y="14" width="7" height="7"/>
+                <rect x="14" y="14" width="7" height="7"/>
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -7997,8 +8021,15 @@ export default {
             </div>
           </Show>
 
+          {/* Batch panel：v0.2.16+ 覆盖在 main 区域，独占视图 */}
+          <Show when={!showSettings() && showBatchPanel() && batchClient()}>
+            <main class="main">
+              <BatchPanel client={batchClient()!} workspaces={workspaces()} />
+            </main>
+          </Show>
+
           {/* Chat view */}
-          <Show when={!showSettings()}>
+          <Show when={!showSettings() && !showBatchPanel()}>
             <main class="main">
               {/* Chat header — mode badge + new session */}
               <div class="chat-header">
