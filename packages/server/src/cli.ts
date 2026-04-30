@@ -2880,6 +2880,24 @@ OBJECTIVE
 				} as any);
 
 				if (DESTRUCTIVE_TOOLS.has(tc.name)) {
+					// Auto-approve（批量任务模式）短路：sessionManager.getAutoApproveConfig 配置过的会话
+					// 直接走 decideApproval —— 'auto' 直接通过，'deny' 走拒绝路径，'ask' 走原 approval 流程
+					const autoCfg = server.sessionManager.getAutoApproveConfig(sessionId);
+					if (autoCfg?.enabled) {
+						const { decideApproval } = await import('./autoApprove.js');
+						const decision = decideApproval(autoCfg, tc.name, tc.params as Record<string, unknown>);
+						if (decision.decision === 'auto') {
+							console.log(`[Agent] auto-approve ${tc.name} (batch mode)`);
+							pending.push({ tc, denied: false, denyReason: '' });
+							continue;
+						}
+						if (decision.decision === 'deny') {
+							console.warn(`[Agent] auto-approve 黑名单拒绝 ${tc.name}: ${decision.reason}`);
+							pending.push({ tc, denied: true, denyReason: decision.reason ?? '黑名单拦截' });
+							continue;
+						}
+						// 'ask' fall through 走原审批流程
+					}
 					console.log(`[Agent] 破坏性工具：等待用户审批 ${tc.name} (id=${tc.id}, mode=${mode})`);
 					await server.sessionManager.emitEvent(sessionId, {
 						type:       'tool_approval_request',

@@ -155,6 +155,64 @@ function initSchema(db: Database.Database): void {
 			created_at INTEGER NOT NULL
 		);
 
+		-- ── 任务批次（v0.2.16+：批量任务调度）────────────────────────
+		-- 一个 batch = 用户一次提交的一组活儿；status: draft / running / paused / completed / aborted
+		CREATE TABLE IF NOT EXISTS task_batches (
+			id              TEXT    PRIMARY KEY,
+			name            TEXT    NOT NULL,
+			description     TEXT,
+			created_at      INTEGER NOT NULL,
+			updated_at      INTEGER NOT NULL,
+			status          TEXT    NOT NULL DEFAULT 'draft',
+			-- 调度配置
+			auto_approve    INTEGER NOT NULL DEFAULT 1,
+			max_concurrency INTEGER NOT NULL DEFAULT 3,
+			on_failure      TEXT    NOT NULL DEFAULT 'pause',  -- pause/skip/retry/abort_batch
+			token_budget    INTEGER,                            -- NULL = 无限
+			-- 统计（实时维护，便于列表查询不需 JOIN）
+			total_tasks     INTEGER NOT NULL DEFAULT 0,
+			completed_count INTEGER NOT NULL DEFAULT 0,
+			failed_count    INTEGER NOT NULL DEFAULT 0,
+			skipped_count   INTEGER NOT NULL DEFAULT 0,
+			tokens_used     INTEGER NOT NULL DEFAULT 0
+		);
+
+		-- ── 批次内单任务（v0.2.16+）─────────────────────────────────
+		-- 每个 task 跑起来后会创建一个 session，task.session_id 关联到 sessions 表
+		-- status: queued / running / completed / failed / skipped / cancelled / stuck
+		CREATE TABLE IF NOT EXISTS batch_tasks (
+			id              TEXT    PRIMARY KEY,
+			batch_id        TEXT    NOT NULL,
+			session_id      TEXT,                          -- 跑起来后填
+			workspace_id    TEXT    NOT NULL,
+			-- 任务定义
+			title           TEXT    NOT NULL,              -- 同时是 session.title
+			prompt          TEXT    NOT NULL,
+			mode            TEXT    NOT NULL DEFAULT 'code',
+			template        TEXT,                          -- bugfix/refactor/doc 等模板 id
+			position        INTEGER NOT NULL DEFAULT 0,    -- 拖拽排序
+			depends_on      TEXT,                          -- JSON [task_id, ...]
+			-- 运行状态
+			status          TEXT    NOT NULL DEFAULT 'queued',
+			created_at      INTEGER NOT NULL,
+			started_at      INTEGER,
+			finished_at     INTEGER,
+			last_heartbeat  INTEGER,                       -- 卡死检测
+			-- 失败处理
+			on_failure      TEXT,                          -- NULL = 用 batch 默认
+			failure_reason  TEXT,
+			failure_action  TEXT,                          -- 用户决策：retry/skip/abort_batch
+			retry_count     INTEGER NOT NULL DEFAULT 0,
+			max_retry       INTEGER NOT NULL DEFAULT 3,
+			-- 结果
+			tokens_used     INTEGER NOT NULL DEFAULT 0,
+			result_summary  TEXT,
+			files_changed   TEXT,                          -- JSON [path, ...]
+			FOREIGN KEY (batch_id)     REFERENCES task_batches(id) ON DELETE CASCADE,
+			FOREIGN KEY (session_id)   REFERENCES sessions(id),
+			FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+		);
+
 		-- ── 索引 ──────────────────────────────────────────────────
 		CREATE INDEX IF NOT EXISTS idx_messages_session
 			ON messages(session_id, created_at);
@@ -164,6 +222,13 @@ function initSchema(db: Database.Database): void {
 			ON sessions(updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_snapshots_session_path
 			ON file_snapshots(session_id, path, created_at DESC);
+		-- 批量任务索引（v0.2.16+）
+		CREATE INDEX IF NOT EXISTS idx_task_batches_status
+			ON task_batches(status, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_batch_tasks_batch_position
+			ON batch_tasks(batch_id, position);
+		CREATE INDEX IF NOT EXISTS idx_batch_tasks_status_position
+			ON batch_tasks(status, position);
 	`);
 
 	// ── 数据库迁移：补充新增列（对已存在的旧数据库） ─────────────────────────

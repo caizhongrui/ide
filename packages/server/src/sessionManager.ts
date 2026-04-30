@@ -643,6 +643,90 @@ export class SessionManager {
 		return messageId;
 	}
 
+	// ─── 阻塞式运行（批量任务用）─────────────────────────────────────────────
+	/**
+	 * 发送一条消息并阻塞直到任务结束（completed / aborted / error），返回结果摘要。
+	 * 给批量任务调度器用——TaskScheduler 一次只启一个任务并 await 它结束。
+	 *
+	 * 监听本会话 SSE：
+	 *   - task_status: completed → 成功，从 completion 事件取 resultSummary
+	 *   - task_status: aborted   → 取消（用户中断或 batch 取消）
+	 *   - error                  → 失败，抛错
+	 *   - 也兼容老版本只发 completion 不发 task_status 的行为
+	 *
+	 * @param sessionId 已 createSession 创建好的会话 id
+	 * @param prompt    用户消息内容
+	 * @param mode      'code' / 'explore' / 'plan' / 'ask'
+	 * @returns { summary: AI 最后的 attempt_completion 文本; tokensUsed }
+	 */
+	async runUntilDone(
+		sessionId: string,
+		prompt: string,
+		mode: string = 'code',
+	): Promise<{ summary: string; tokensUsed: number; success: boolean; error?: string }> {
+		return new Promise((resolve, reject) => {
+			let summary = '';
+			let inputTokens  = 0;
+			let outputTokens = 0;
+			let resolved = false;
+
+			const finalize = (val: { summary: string; tokensUsed: number; success: boolean; error?: string }): void => {
+				if (resolved) return;
+				resolved = true;
+				try { unsub(); } catch { /* ignore */ }
+				resolve(val);
+			};
+
+			const unsub = this.subscribe(sessionId, async (event) => {
+				const ev = event as any;
+				if (ev.type === 'completion' || ev.type === 'attempt_completion') {
+					if (typeof ev.resultSummary === 'string') summary = ev.resultSummary;
+					else if (typeof ev.content === 'string')  summary = ev.content;
+				} else if (ev.type === 'token_usage') {
+					if (typeof ev.inputTokens  === 'number') inputTokens  = ev.inputTokens;
+					if (typeof ev.outputTokens === 'number') outputTokens = ev.outputTokens;
+				} else if (ev.type === 'task_status') {
+					if (ev.status === 'completed') {
+						finalize({ summary, tokensUsed: inputTokens + outputTokens, success: true });
+					} else if (ev.status === 'aborted') {
+						finalize({ summary, tokensUsed: inputTokens + outputTokens, success: false, error: '任务已取消' });
+					} else if (ev.status === 'error') {
+						finalize({ summary, tokensUsed: inputTokens + outputTokens, success: false, error: ev.message || '任务失败' });
+					}
+				} else if (ev.type === 'error') {
+					finalize({ summary, tokensUsed: inputTokens + outputTokens, success: false, error: ev.message || ev.content || '任务失败' });
+				}
+			});
+
+			// 启动消息（会触发 onSendMessage handlers → cli.ts agent loop）
+			void this.sendMessage(sessionId, { content: prompt, mode } as SendMessageOptions).catch((err) => {
+				finalize({ summary: '', tokensUsed: 0, success: false, error: String((err as Error).message) });
+			});
+		});
+	}
+
+	// ─── Auto-approve（批量任务用）─────────────────────────────────────────
+	/** 单 session 的 auto-approve 配置（在 cli.ts approval 路径上消费）*/
+	private readonly autoApproveConfigs = new Map<string, { enabled: boolean; deny: RegExp[] }>();
+
+	/** 给指定 session 启用 auto-approve（带黑名单硬拦） */
+	setAutoApprove(sessionId: string, cfg: { enabled: boolean; deny?: RegExp[] }): void {
+		this.autoApproveConfigs.set(sessionId, {
+			enabled: cfg.enabled,
+			deny:    cfg.deny ?? [],
+		});
+	}
+
+	/** 取出某 session 的 auto-approve 配置（cli.ts 在 emit tool_approval_request 前查询）*/
+	getAutoApproveConfig(sessionId: string): { enabled: boolean; deny: RegExp[] } | undefined {
+		return this.autoApproveConfigs.get(sessionId);
+	}
+
+	/** 清除（用于会话结束时） */
+	clearAutoApprove(sessionId: string): void {
+		this.autoApproveConfigs.delete(sessionId);
+	}
+
 	// ─── 取消 / 批准 ──────────────────────────────────────────────────────
 
 	async cancelTask(id: string): Promise<void> {

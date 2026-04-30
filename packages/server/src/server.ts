@@ -23,8 +23,10 @@ import { WorkspaceRoutes } from './routes/workspace.js';
 import { ConfigRoutes } from './routes/config.js';
 import { ToolRoutes } from './routes/tool.js';
 import { AuthRoutes, type AiRuntimeConfig, type SetAiConfigFn } from './routes/auth.js';
+import { BatchRoutes, emitBatchEventToSubscribers } from './routes/batches.js';
 import { SessionManager } from './sessionManager.js';
 import { WorkspaceManager } from './workspaceManager.js';
+import { TaskScheduler } from './taskScheduler.js';
 
 export interface CreateServerOptions {
 	/** 配置服务（由调用方提供，如读 ~/.maxian/config.json） */
@@ -43,6 +45,8 @@ export interface CreatedServer {
 	app: Hono;
 	sessionManager: SessionManager;
 	workspaceManager: WorkspaceManager;
+	/** 批量任务调度器（v0.2.16+，外部可手动触发 retryTask 等）*/
+	taskScheduler: TaskScheduler;
 	/** 动态设置运行时 AI 代理配置 */
 	setAiConfig: SetAiConfigFn;
 	/** 获取当前运行时 AI 代理配置 */
@@ -93,6 +97,29 @@ export function createServer(
 	app.use('*', ProtocolMiddleware());
 	app.use('*', AuthMiddleware(opts.authUsername, opts.authPassword));
 
+	// 批量任务调度器（v0.2.16+）：底层桥接 sessionManager + 现有 createSession 逻辑
+	const taskScheduler = new TaskScheduler({
+		sessionManager: sm,
+		createSession: async (opts) => {
+			// 调现有 sessionManager.createSession（路由层一直在用）
+			const ws = wm.get(opts.workspaceId);
+			if (!ws) throw new Error(`Workspace ${opts.workspaceId} not found`);
+			const session = await sm.createSession({
+				title:         opts.title,
+				workspacePath: ws.path,
+				uiMode:        opts.uiMode ?? 'code',
+				mode:          (opts.mode ?? 'code') as any,
+			});
+			return { sessionId: session.id };
+		},
+		emitBatchEvent: (batchId, event) => {
+			emitBatchEventToSubscribers(batchId, event);
+		},
+	});
+
+	// 启动时扫一遍 stuck 任务（前一次运行卡死的）
+	void taskScheduler.checkStuckTasksOnStartup();
+
 	// Routes
 	app.route('/', HealthRoutes(serverStartTime));
 	app.route('/', SessionRoutes(sm));
@@ -100,6 +127,10 @@ export function createServer(
 	app.route('/', ToolRoutes(opts.toolExecutor));
 	app.route('/', ConfigRoutes(opts.config));
 	app.route('/', AuthRoutes(setAiConfig, getAiConfig));
+	app.route('/', BatchRoutes(taskScheduler));
 
-	return { app, sessionManager: sm, workspaceManager: wm, setAiConfig, getAiConfig, onAiConfigChanged };
+	return {
+		app, sessionManager: sm, workspaceManager: wm, taskScheduler,
+		setAiConfig, getAiConfig, onAiConfigChanged,
+	};
 }

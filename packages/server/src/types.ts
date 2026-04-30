@@ -62,3 +62,105 @@ export interface WorkspaceInfo {
 	name: string;
 	openedAt: number;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  批量任务 v0.2.16+
+ *
+ *  一个 batch = 用户一次提交的一组活儿。
+ *  每个 task 跑起来后会创建一个 session（task.sessionId 关联）。
+ *  task.status 跟 session.status 各管各的，task 维度更细（queued/skipped 等）。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/** 批次状态机 */
+export type BatchStatus =
+	| 'draft'         // 草稿（创建后未启动）
+	| 'running'       // 跑中
+	| 'paused'        // 用户主动暂停
+	| 'awaiting_user' // 因任务失败暂停等用户决策（仅 on_failure='pause' 时）
+	| 'completed'     // 全部任务结束
+	| 'aborted';      // 用户取消整批
+
+/** 单任务状态机 */
+export type TaskStatus =
+	| 'queued'      // 已排队
+	| 'running'     // 跑中
+	| 'completed'   // 成功
+	| 'failed'      // 失败（待用户决策 / 已记录）
+	| 'skipped'     // 用户主动跳过 OR on_failure='skip'
+	| 'cancelled'   // 用户主动取消 / 整批 abort 牵连
+	| 'stuck';      // 心跳超时（>10min 无活动）
+
+/** 失败处理策略 */
+export type OnFailureStrategy =
+	| 'pause'        // 任务级：标记 failed 等用户决策；批次级默认值
+	| 'skip'         // 自动跳过，继续下一个
+	| 'retry'        // 自动重试（最多 max_retry 次后转 pause）
+	| 'abort_batch'; // 整批取消
+
+/** 批次完整记录（DB 行映射，camelCase）*/
+export interface TaskBatch {
+	id:             string;
+	name:           string;
+	description?:   string;
+	createdAt:      number;
+	updatedAt:      number;
+	status:         BatchStatus;
+	autoApprove:    boolean;
+	maxConcurrency: number;
+	onFailure:      OnFailureStrategy;
+	tokenBudget?:   number;            // null = 无限
+	totalTasks:     number;
+	completedCount: number;
+	failedCount:    number;
+	skippedCount:   number;
+	tokensUsed:     number;
+}
+
+/** 单任务完整记录（DB 行映射，camelCase）*/
+export interface BatchTask {
+	id:             string;
+	batchId:        string;
+	sessionId?:     string;            // 跑起来后填
+	workspaceId:    string;
+	title:          string;
+	prompt:         string;
+	mode:           string;            // 'code' | 'explore' | 'plan' | 'ask'
+	template?:      string;
+	position:       number;
+	dependsOn?:     string[];          // task id 数组（DB 存 JSON）
+	status:         TaskStatus;
+	createdAt:      number;
+	startedAt?:     number;
+	finishedAt?:    number;
+	lastHeartbeat?: number;
+	onFailure?:     OnFailureStrategy; // null = 用 batch 默认
+	failureReason?: string;
+	failureAction?: 'retry' | 'skip' | 'abort_batch';   // 用户最近一次决策
+	retryCount:     number;
+	maxRetry:       number;
+	tokensUsed:     number;
+	resultSummary?: string;
+	filesChanged?:  string[];
+}
+
+/** 创建批次的输入（API 接受） */
+export interface CreateBatchInput {
+	name:            string;
+	description?:    string;
+	autoApprove?:    boolean;          // 默认 true
+	maxConcurrency?: number;           // 默认 3
+	onFailure?:      OnFailureStrategy;// 默认 'pause'
+	tokenBudget?:    number;
+	tasks: Array<{
+		workspaceId:  string;
+		title:        string;
+		prompt:       string;
+		mode?:        string;          // 默认 'code'
+		template?:    string;
+		dependsOn?:   string[];
+		onFailure?:   OnFailureStrategy;
+		maxRetry?:    number;
+	}>;
+	/** 创建后立即启动？默认 false（保存为草稿）*/
+	autoStart?:      boolean;
+}
