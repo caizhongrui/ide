@@ -14,7 +14,7 @@ interface Props {
 
 const STATUS_LABELS: Record<BatchStatus, string> = {
 	draft:         '草稿',
-	running:       '跑中',
+	running:       '执行中',
 	paused:        '暂停',
 	awaiting_user: '等决策',
 	completed:     '完成',

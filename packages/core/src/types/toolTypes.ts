@@ -131,6 +131,25 @@ export const toolNames = [
 	'generate_tests',
 	'use_mcp_tool',
 	'access_mcp_resource',
+	// B2: MCP Tool Search 元工具（懒加载完整生命周期）
+	'mcp_tool_search',
+	'mcp_tool_load',
+	'mcp_tool_unload',
+	// B3: Auto-Memory 显式工具
+	'save_memory',
+	'recall_memory',
+	// B4: Codebase Index
+	'codebase_index_status',
+	'codebase_index_refresh',
+	// B5: Browser Preview
+	'browser_open',
+	'browser_screenshot',
+	'browser_console_logs',
+	'browser_network_requests',
+	'browser_click',
+	'browser_fill',
+	'browser_eval',
+	'browser_wait_for',
 ] as const;
 
 export type ToolName = (typeof toolNames)[number];
@@ -300,6 +319,21 @@ export const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
 	generate_tests: '生成测试代码',
 	use_mcp_tool: '调用MCP工具',
 	access_mcp_resource: '访问MCP资源',
+	mcp_tool_search: '搜索MCP工具',
+	mcp_tool_load: '加载MCP工具',
+	mcp_tool_unload: '卸载MCP工具',
+	save_memory: '保存记忆',
+	recall_memory: '召回记忆',
+	codebase_index_status: '索引状态',
+	codebase_index_refresh: '刷新索引',
+	browser_open: '打开浏览器',
+	browser_screenshot: '浏览器截图',
+	browser_console_logs: '浏览器日志',
+	browser_network_requests: '浏览器网络',
+	browser_click: '浏览器点击',
+	browser_fill: '浏览器填值',
+	browser_eval: '浏览器执行JS',
+	browser_wait_for: '浏览器等待元素',
 } as const;
 
 /** 工具分组 */

@@ -2,7 +2,7 @@
  *  BatchDetailPanel — 右侧批次详情：头部统计 + 任务表格
  *--------------------------------------------------------------------------------------------*/
 
-import { Show, createMemo } from 'solid-js'
+import { Show, createMemo, createSignal } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { MaxianClient, TaskBatch, BatchTask, Workspace } from '@maxian/sdk'
 import { BatchTaskTable } from './BatchTaskTable'
@@ -15,6 +15,8 @@ interface Props {
 	loading:    boolean
 	onRefresh:  () => void
 	onTasksUpdated: (tasks: BatchTask[]) => void
+	onEditBatch:    () => void
+	onJumpToSession?: (sessionId: string, workspaceId: string) => void
 }
 
 function fmtDuration(ms: number): string {
@@ -46,26 +48,37 @@ export const BatchDetailPanel: Component<Props> = (props) => {
 	const isActionable = (): boolean =>
 		props.batch.status === 'running' || props.batch.status === 'paused' || props.batch.status === 'awaiting_user'
 
-	const handlePause = async (): Promise<void> => {
-		await props.client.updateBatch(props.batch.id, { status: 'paused' })
-		props.onRefresh()
+	const [actionError, setActionError] = createSignal<string>('')
+	const [actionLoading, setActionLoading] = createSignal<string>('')
+
+	const runAction = async (label: string, fn: () => Promise<void>): Promise<void> => {
+		setActionError('')
+		setActionLoading(label)
+		try {
+			await fn()
+			props.onRefresh()
+		} catch (err) {
+			const msg = (err as Error)?.message ?? String(err)
+			console.error(`[BatchDetailPanel] ${label} 失败:`, err)
+			setActionError(`${label} 失败：${msg}`)
+		} finally {
+			setActionLoading('')
+		}
 	}
-	const handleResume = async (): Promise<void> => {
-		await props.client.updateBatch(props.batch.id, { status: 'running' })
-		props.onRefresh()
-	}
+
+	const handlePause = (): Promise<void> =>
+		runAction('暂停', () => props.client.updateBatch(props.batch.id, { status: 'paused' }).then(() => undefined))
+	const handleResume = (): Promise<void> =>
+		runAction('开始/继续', () => props.client.updateBatch(props.batch.id, { status: 'running' }).then(() => undefined))
 	const handleAbort = async (): Promise<void> => {
-		const ok = window.confirm(`确定取消整批 "${props.batch.name}"？跑中的任务会被打断，已完成的不影响。`)
+		const ok = window.confirm(`确定取消整批 "${props.batch.name}"？执行中的任务会被打断，已完成的不影响。`)
 		if (!ok) return
-		await props.client.updateBatch(props.batch.id, { status: 'aborted' })
-		props.onRefresh()
+		void runAction('取消整批', () => props.client.updateBatch(props.batch.id, { status: 'aborted' }).then(() => undefined))
 	}
 	const handleDelete = async (): Promise<void> => {
 		const ok = window.confirm(`确定删除批次 "${props.batch.name}"？关联 sessions 不会删，但批次记录会丢。`)
 		if (!ok) return
-		await props.client.deleteBatch(props.batch.id)
-		// 让父组件刷新（通过 onRefresh + 切到无选中态）
-		props.onRefresh()
+		void runAction('删除', () => props.client.deleteBatch(props.batch.id).then(() => undefined))
 	}
 
 	return (
@@ -98,22 +111,32 @@ export const BatchDetailPanel: Component<Props> = (props) => {
 				</div>
 				<div class="batch-detail-actions">
 					<Show when={props.batch.status === 'draft'}>
-						<button class="btn-primary" onClick={handleResume}>▶ 开始</button>
+						<button class="btn-primary" disabled={!!actionLoading()} onClick={handleResume}>
+							{actionLoading() === '开始/继续' ? '启动中...' : '▶ 开始'}
+						</button>
+						<button class="btn-secondary" onClick={() => props.onEditBatch()}>✎ 编辑</button>
 					</Show>
 					<Show when={props.batch.status === 'running'}>
-						<button class="btn-secondary" onClick={handlePause}>⏸ 暂停</button>
+						<button class="btn-secondary" disabled={!!actionLoading()} onClick={handlePause}>
+							{actionLoading() === '暂停' ? '...' : '⏸ 暂停'}
+						</button>
 					</Show>
 					<Show when={props.batch.status === 'paused' || props.batch.status === 'awaiting_user'}>
-						<button class="btn-primary" onClick={handleResume}>▶ 继续</button>
+						<button class="btn-primary" disabled={!!actionLoading()} onClick={handleResume}>
+							{actionLoading() === '开始/继续' ? '...' : '▶ 继续'}
+						</button>
 					</Show>
 					<Show when={isActionable()}>
-						<button class="btn-danger" onClick={handleAbort}>⊗ 取消整批</button>
+						<button class="btn-danger" disabled={!!actionLoading()} onClick={handleAbort}>⊗ 取消整批</button>
 					</Show>
 					<button class="btn-ghost" onClick={() => props.onRefresh()}>🔄 刷新</button>
 					<Show when={props.batch.status === 'completed' || props.batch.status === 'aborted' || props.batch.status === 'draft'}>
-						<button class="btn-ghost" onClick={handleDelete}>🗑 删除</button>
+						<button class="btn-ghost" disabled={!!actionLoading()} onClick={handleDelete}>🗑 删除</button>
 					</Show>
 				</div>
+				<Show when={actionError()}>
+					<div class="batch-action-error">⚠ {actionError()}</div>
+				</Show>
 			</header>
 
 			{/* 任务表格 */}
@@ -123,6 +146,7 @@ export const BatchDetailPanel: Component<Props> = (props) => {
 				tasks={props.tasks}
 				workspaces={props.workspaces}
 				onTasksUpdated={props.onTasksUpdated}
+				onJumpToSession={props.onJumpToSession}
 			/>
 		</div>
 	)

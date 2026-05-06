@@ -17,10 +17,11 @@
  */
 
 import * as path from 'path';
-import * as fs from 'fs';   // 仅 fs.Dirent 类型 + listAllFiles helper（无 ctx 调用方）
+// K8e: 已异步化，全部 fs 调用走 platformFs(ctx) 的 async API。
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
+import type { FileEntry } from '../interfaces/IFileSystem.js';
 import { platformFs, type ToolFs } from './platformFs.js';
 import { normalizePerlInlineFlags } from '../utils/regexFlagsCompat.js';
 
@@ -186,8 +187,8 @@ export async function searchFilesTool(
 			? searchPath
 			: path.resolve(ctx.workspacePath, searchPath);
 
-		// 检查路径是否存在
-		if (!pf.existsSync(absolutePath)) {
+		// 检查路径是否存在（K8e: async）
+		if (!(await pf.exists(absolutePath))) {
 			return `Error: Path not found: ${searchPath}`;
 		}
 
@@ -226,8 +227,8 @@ export async function searchFilesTool(
 
 		const startTime = Date.now();
 
-		// 搜索目录
-		const searchDir = (dir: string) => {
+		// 搜索目录（K8e: async）
+		const searchDir = async (dir: string): Promise<void> => {
 			// 检查限制
 			if (results.length >= SEARCH_CONFIG.MAX_RESULTS ||
 				totalBytes >= SEARCH_CONFIG.MAX_RESULT_BYTES ||
@@ -235,9 +236,9 @@ export async function searchFilesTool(
 				return;
 			}
 
-			let entries: fs.Dirent[];
+			let entries: FileEntry[];
 			try {
-				entries = pf.readdirSync(dir, { withFileTypes: true }) as fs.Dirent[];
+				entries = await pf.listFiles(dir);
 			} catch {
 				return; // 跳过无法读取的目录
 			}
@@ -256,13 +257,14 @@ export async function searchFilesTool(
 					continue;
 				}
 
-				if (entry.isDirectory()) {
+				if (entry.isDirectory) {
 					// 跳过忽略的目录
 					if (SEARCH_CONFIG.IGNORE_DIRS.has(entry.name)) {
 						continue;
 					}
-					searchDir(fullPath);
-				} else if (entry.isFile()) {
+					await searchDir(fullPath);
+				} else if (!entry.isSymbolicLink) {
+					// 普通文件（FileEntry 没区分 isFile，非目录非符号链接即视为文件）
 					// 跳过二进制文件
 					const ext = path.extname(entry.name).toLowerCase();
 					if (SEARCH_CONFIG.BINARY_EXTENSIONS.has(ext)) {
@@ -277,7 +279,7 @@ export async function searchFilesTool(
 
 					// 检查文件大小
 					try {
-						const stat = pf.statSync(fullPath);
+						const stat = await pf.stat(fullPath);
 						if (stat.size > SEARCH_CONFIG.MAX_FILE_SIZE) {
 							filesSkipped++;
 							continue;
@@ -287,7 +289,7 @@ export async function searchFilesTool(
 					}
 
 					// 搜索文件
-					const fileResults = searchFile(pf, fullPath, searchRegex, ctx.workspacePath);
+					const fileResults = await searchFile(pf, fullPath, searchRegex, ctx.workspacePath);
 					filesSearched++;
 
 					for (const match of fileResults) {
@@ -308,13 +310,13 @@ export async function searchFilesTool(
 			}
 		};
 
-		// 开始搜索
-		const stat = pf.statSync(absolutePath);
+		// 开始搜索（K8e: async）
+		const stat = await pf.stat(absolutePath);
 		if (stat.isDirectory) {
-			searchDir(absolutePath);
+			await searchDir(absolutePath);
 		} else {
 			// 单文件搜索
-			const fileResults = searchFile(pf, absolutePath, searchRegex, ctx.workspacePath);
+			const fileResults = await searchFile(pf, absolutePath, searchRegex, ctx.workspacePath);
 			results.push(...fileResults.slice(0, SEARCH_CONFIG.MAX_RESULTS));
 			totalMatches = fileResults.length;
 		}
@@ -338,13 +340,13 @@ export async function searchFilesTool(
 }
 
 /**
- * 搜索单个文件
+ * 搜索单个文件（K8e: async）
  */
-function searchFile(pf: ToolFs, filePath: string, regex: RegExp, workspacePath: string): SearchMatch[] {
+async function searchFile(pf: ToolFs, filePath: string, regex: RegExp, workspacePath: string): Promise<SearchMatch[]> {
 	const results: SearchMatch[] = [];
 
 	try {
-		const content = pf.readFileSync(filePath, 'utf-8');
+		const content = await pf.readFile(filePath, 'utf-8');
 		const lines = content.split('\n');
 		const relativePath = path.relative(workspacePath, filePath);
 

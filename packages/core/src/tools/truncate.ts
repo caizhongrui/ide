@@ -10,10 +10,24 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
+/**
+ * K8f：本文件是 Node-only 工具（写 ~/.maxian/truncations）。
+ * 浏览器/IDE renderer 加载时只 import 模块壳，不触发 fs/os 实际调用。
+ * `getDir()` lazy 求值 homedir，确保模块加载时不直接调 os.homedir()。
+ */
+
 export namespace Truncate {
 	export const MAX_LINES = 2000;
 	export const MAX_BYTES = 50 * 1024;
-	export const DIR = path.join(os.homedir(), '.maxian', 'truncations');
+
+	let _cachedDir: string | undefined;
+	function getDir(): string {
+		if (_cachedDir) return _cachedDir;
+		_cachedDir = path.join(os.homedir(), '.maxian', 'truncations');
+		return _cachedDir;
+	}
+	/** @deprecated 用 `getDir()` 函数替代；保留为兼容引用。lazy 求值后 first call 才 evaluate homedir。*/
+	export const DIR = '';   // 占位；getDir() 是新的真相源
 
 	/** 保留策略：head = 保留开头；tail = 保留结尾 */
 	export type Direction = 'head' | 'tail';
@@ -31,11 +45,11 @@ export namespace Truncate {
 	/** 按天清理老截断文件（7 天保留期） */
 	export function cleanup(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
 		try {
-			if (!fs.existsSync(DIR)) return;
+			if (!fs.existsSync(getDir())) return;
 			const now = Date.now();
-			for (const entry of fs.readdirSync(DIR)) {
+			for (const entry of fs.readdirSync(getDir())) {
 				if (!entry.startsWith('tool_')) continue;
-				const p = path.join(DIR, entry);
+				const p = path.join(getDir(), entry);
 				try {
 					const stat = fs.statSync(p);
 					if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(p);
@@ -52,7 +66,7 @@ export namespace Truncate {
 
 	/** 确保目录存在 */
 	function ensureDir(): void {
-		if (!fs.existsSync(DIR)) fs.mkdirSync(DIR, { recursive: true });
+		if (!fs.existsSync(getDir())) fs.mkdirSync(getDir(), { recursive: true });
 	}
 
 	/**
@@ -116,7 +130,7 @@ export namespace Truncate {
 			};
 		}
 
-		const file = path.join(DIR, generateId());
+		const file = path.join(getDir(), generateId());
 		try {
 			fs.writeFileSync(file, text, 'utf8');
 		} catch {

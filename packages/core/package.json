@@ -19,6 +19,14 @@
       "types": "./dist/adapters/NodePlatform.d.ts",
       "import": "./dist/adapters/NodePlatform.js"
     },
+    "./adapters/NodeTerminal": {
+      "types": "./dist/adapters/NodeTerminal.d.ts",
+      "import": "./dist/adapters/NodeTerminal.js"
+    },
+    "./adapters/NodeSearchService": {
+      "types": "./dist/adapters/NodeSearchService.d.ts",
+      "import": "./dist/adapters/NodeSearchService.js"
+    },
     "./types": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/types/index.js"
@@ -80,8 +88,20 @@
       "import": "./dist/context-tracking/FileContextTracker.js"
     },
     "./mcp": {
-      "types": "./dist/mcp/McpHub.d.ts",
-      "import": "./dist/mcp/McpHub.js"
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory/index.d.ts",
+      "import": "./dist/memory/index.js"
+    },
+    "./codebase-index": {
+      "types": "./dist/index/index.d.ts",
+      "import": "./dist/index/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
     },
     "./ignore": {
       "types": "./dist/ignore/MaxianIgnoreController.d.ts",

@@ -23,20 +23,65 @@ import { bootstrap } from './bootstrap.js';
 import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
 // @lydell/node-pty 仅在集成终端 WebSocket 被使用时才加载。
-// ⚠️ 重要：用 Function 构造器和 require 变量隐藏 import 字符串，
-// 否则 Bun/esbuild 静态分析器会进入 node-pty 的 dynamic require 导致 --compile 失败。
-// 代价：node-pty 不会被打包进单文件二进制，仅在 dev（有 node_modules）或额外随包投递时可用。
-// 运行时若找不到则功能性降级：终端 WebSocket 连上即报友好错误，其他功能不受影响。
+// ⚠️ 关键约束：
+//   1. Bun --compile 后的 sidecar 二进制是纯 ESM，没有全局 `require`，所以 Function 构造器拿不到。
+//      解决方案：用 node:module 的 createRequire(import.meta.url) 显式构造 require 函数。
+//   2. 字符串拼接 'mod' 包名避开 Bun/esbuild 静态分析器，保证它不会尝试把 node-pty
+//      bundling 进单文件二进制（node-pty 含原生模块，bundler 处理会失败）。
+//   3. 二进制本身不含 node-pty；运行时从相邻 node_modules 解析（Tauri sidecar 模式可用，
+//      纯 CLI 模式需要用户额外 npm i）。找不到时返回友好错误，其他功能不受影响。
 type PtyModule = typeof import('@lydell/node-pty');
 let __ptyModuleCache: PtyModule | null = null;
 async function loadPty(): Promise<PtyModule> {
 	if (__ptyModuleCache) return __ptyModuleCache;
-	// 通过 Function 构造器调用 require，完全绕过 bundler 静态分析
-	const dynamicRequire = new Function('mod', 'return require(mod)');
-	const pkgName = ['@lydell', 'node-pty'].join('/');   // 拆字符串防止 scanner 识别
-	const mod = dynamicRequire(pkgName) as PtyModule;
-	__ptyModuleCache = mod;
-	return __ptyModuleCache;
+	const pkgName = ['@lydell', 'node-pty'].join('/');   // 拆字符串防止 bundler 识别
+
+	// Tauri sidecar 模式下 Bun --compile 的 binary 启动时，process.execPath 不指向自身（指向
+	// 父进程 maxian-desktop），所以必须用多锚点尝试 maxian-deps 目录。
+	// 优先级：MAXIAN_PTY_DEPS（桌面 Rust 显式传入；可能是 maxian-deps 目录本身或其父目录）
+	//        → argv[0] dir → execPath dir → cwd → import.meta.url
+	const candidateAnchors: string[] = [];
+	const addAnchorFor = (dir: string): void => {
+		// 直接把 dir 当 maxian-deps 目录（dir 末尾是 maxian-deps）
+		candidateAnchors.push(`file://${path.join(dir, 'package.json')}`);
+		// 或 dir 是 maxian-deps 的父目录
+		candidateAnchors.push(`file://${path.join(dir, 'maxian-deps', 'package.json')}`);
+	};
+	const env = process.env['MAXIAN_PTY_DEPS'];
+	if (env) addAnchorFor(env);
+	try { addAnchorFor(path.dirname(process.argv[0])); } catch { /* ignore */ }
+	try { addAnchorFor(path.dirname(process.execPath)); } catch { /* ignore */ }
+	try { addAnchorFor(process.cwd()); } catch { /* ignore */ }
+	// 终极兜底：cli 自己的位置（dev tsc 模式下能命中 server/node_modules）
+	candidateAnchors.push(import.meta.url);
+
+	const { createRequire } = await import('node:module');
+	const errors: string[] = [];
+	for (const anchor of candidateAnchors) {
+		try {
+			const req = createRequire(anchor);
+			const mod = req(pkgName) as PtyModule;
+			__ptyModuleCache = mod;
+			console.log(`[Terminal] @lydell/node-pty 加载成功 (anchor=${anchor})`);
+			return __ptyModuleCache;
+		} catch (e) {
+			errors.push(`  ${anchor}: ${(e as Error).message.split('\n')[0]}`);
+		}
+	}
+
+	// 最后尝试全局 require
+	const globalRequire = (globalThis as any).require;
+	if (typeof globalRequire === 'function') {
+		try {
+			const mod = globalRequire(pkgName) as PtyModule;
+			__ptyModuleCache = mod;
+			return __ptyModuleCache;
+		} catch (e) {
+			errors.push(`  globalThis.require: ${(e as Error).message.split('\n')[0]}`);
+		}
+	}
+
+	throw new Error(`无法加载 @lydell/node-pty。尝试过：\n${errors.join('\n')}`);
 }
 import { getDb } from './database.js';
 import { AiProxyHandler } from '@maxian/core/api/aiproxy';
@@ -197,12 +242,33 @@ function loadAiConfig(): AiConfig | null {
 /**
  * Node.js 版工具执行上下文，供 Agent 循环使用。
  * 每个 Agent 会话共用一个实例（内存文件追踪）。
+ *
+ * B2: 同时承载 McpHub 引用 + 当前会话的 MCP 工具激活集合，
+ * 让 mcp_tool_search/load/unload 元工具能直接用 ctx.mcpHub / ctx.activeMcpTools。
  */
 class NodeToolContext implements IToolContext {
 	readonly workspacePath: string;
 	readonly fileContextTracker: MemoryFileContextTracker;
 	didEditFile = false;
 	readonly sessionId?: string;
+	/** B2: 全局 MCP Hub 引用（由 sessionManager 提供） */
+	mcpHub?: import('@maxian/core/mcp').McpHub;
+	/** B2: 当前会话已激活的 MCP 工具集（toolId 形式：mcp_<server>_<tool>） */
+	activeMcpTools?: Set<string>;
+	/** B2: sticky 集合，标记不被自动卸载的工具 */
+	stickyMcpTools?: Set<string>;
+	/** B2: load/unload 后让 SessionManager 重建 system prompt 的 hook */
+	onMcpToolsChanged?: (active: Set<string>) => void;
+	/** B2: MCP 工具最近一次被实际调用的轮次（自动卸载用） */
+	mcpToolLastUsedTurn?: Map<string, number>;
+	/** B2: 当前轮次计数（每个 LLM round 递增） */
+	currentTurn?: number;
+	/** B3: 记忆 Store（save_memory/recall_memory 元工具读取） */
+	memoryStore?: import('@maxian/core/memory').IMemoryStore;
+	/** B3: 当前 workspaceId（解析 scope=workspace/session 时用） */
+	currentWorkspaceId?: string;
+	/** B4: 代码库索引（codebase_search / codebase_index_status / codebase_index_refresh 用） */
+	codebaseIndex?: import('@maxian/core/codebase-index').ICodebaseIndex;
 
 	constructor(workspacePath: string, sessionId?: string) {
 		this.workspacePath    = workspacePath;
@@ -479,15 +545,182 @@ const AGENT_TOOL_DEFINITIONS: ToolDefinition[] = [
 	},
 	{
 		name: 'task',
-		description: '派发一个独立上下文的子 Agent 完成特定子任务。subagent_type: explore=只读搜索阅读、build=完整权限独立执行、review=代码审查。用于大量探索不污染主会话上下文。',
+		description: `派发一个独立上下文的子代理完成特定子任务（B1 完整版）。
+内置 4 种 subagent_type：
+- general-purpose：复合任务（探索+小幅修改+测试），完整工具集
+- code-reviewer：只读，对指定文件/diff 做代码审查
+- code-explorer：只读+搜索强化，回答"这块代码怎么工作"
+- test-writer：完整工具，专门写单元测试
+
+老别名仍兼容：explore→code-explorer, build→general-purpose, review→code-reviewer, test→test-writer。
+也支持 .maxian/agents/<name>.md 自定义 agent。
+
+isolation: 'worktree' 时自动 git worktree 隔离（非 git 仓库或脏树会降级 inherit）。
+background: true 时立即返回 task_id，主代理继续工作；适合并行多个独立子任务。`,
 		parameters: {
 			type: 'object',
 			properties: {
-				prompt:        { type: 'string', description: '给子 Agent 的任务描述' },
-				subagent_type: { type: 'string', enum: ['explore', 'build', 'review'], description: '子 Agent 类型' },
-				description:   { type: 'string', description: '简短标签（给用户展示）' },
+				prompt:        { type: 'string', description: '给子代理的任务描述（聚焦、可执行）' },
+				subagent_type: { type: 'string', description: '子代理类型 / 自定义 agent 名 / 老别名' },
+				description:   { type: 'string', description: '简短标签（给用户/编排面板展示）' },
+				isolation:     { type: 'string', enum: ['inherit', 'worktree'], description: 'inherit=共享父工作区（默认）；worktree=独立 git worktree' },
+				background:    { type: 'boolean', description: 'true=立即返回 task_id 不等结果；false=等子代理完成（默认 false）' },
 			},
 			required: ['prompt', 'subagent_type'],
+		},
+	},
+	// B2: MCP Tool Search 元工具（懒加载 + 完整生命周期）
+	// 默认始终暴露给 LLM，让它在用户挂了 MCP server 时能动态查询/激活工具
+	{
+		name: 'mcp_tool_search',
+		description: '搜索已连接的 MCP 服务器中可用的工具。返回 top-N 个相关工具的描述。挂载多个 MCP server 时，工具不会全部塞进 system prompt，而是通过本工具按需查找。',
+		parameters: {
+			type: 'object',
+			properties: {
+				query:         { type: 'string', description: '自然语言查询（例如 "fetch a webpage" 或 "操作 Figma 文件"）' },
+				max_results:   { type: 'number', description: '返回上限（默认 5，最大 30）' },
+				server_filter: { type: 'array',  items: { type: 'string' }, description: '只搜某些 server 名称' },
+			},
+			required: ['query'],
+		},
+	},
+	{
+		name: 'mcp_tool_load',
+		description: '把一个或多个 MCP 工具加入当前会话的激活集，让它们出现在 system prompt 里可被直接 XML 调用。只在已通过 mcp_tool_search 找到候选后调用。',
+		parameters: {
+			type: 'object',
+			properties: {
+				tool_names: { type: 'array', items: { type: 'string' }, description: '工具完整 id 数组（mcp_<server>_<tool> 形式）' },
+				sticky:     { type: 'boolean', description: '锁定不被自动卸载，默认 false' },
+			},
+			required: ['tool_names'],
+		},
+	},
+	{
+		name: 'mcp_tool_unload',
+		description: '主动从激活集中移除指定 MCP 工具，释放 context tokens。一般无需手动调（自动生命周期会卸载未使用的工具）。',
+		parameters: {
+			type: 'object',
+			properties: {
+				tool_names: { type: 'array', items: { type: 'string' }, description: '工具 id 数组；["*"] 表示卸载全部' },
+			},
+			required: ['tool_names'],
+		},
+	},
+	// B3: Auto-Memory 显式工具
+	{
+		name: 'save_memory',
+		description: '把一条偏好/约定/事实保存到跨会话记忆库。每轮对话开始时系统会自动召回相关记忆注入 prompt，无需手动调用。仅在用户明确表达偏好/项目独特约定/重要事实时调用。',
+		parameters: {
+			type: 'object',
+			properties: {
+				scope:    { type: 'string', enum: ['global', 'workspace', 'session'], description: 'global=所有项目都召回；workspace=仅当前项目；session=仅本次会话' },
+				category: { type: 'string', enum: ['preference', 'convention', 'fact', 'style', 'tech-stack', 'other'], description: '分类' },
+				content:  { type: 'string', description: '记忆内容（≤80 字简洁描述）' },
+			},
+			required: ['scope', 'category', 'content'],
+		},
+	},
+	{
+		name: 'recall_memory',
+		description: '按自然语言查询召回相关记忆。一般无需手动调（每轮自动召回 top-K）；显式深挖时使用。',
+		parameters: {
+			type: 'object',
+			properties: {
+				query:       { type: 'string', description: '自然语言查询' },
+				max_results: { type: 'number', description: '上限（默认 5）' },
+				category:    { type: 'string', description: '可选：限定分类' },
+			},
+			required: ['query'],
+		},
+	},
+	// B4: Codebase Index 工具
+	{
+		name: 'codebase_search',
+		description: '从当前工作区的代码库索引中按自然语言搜索 API/类/函数。返回匹配的符号位置 + 签名 + 文档摘要。比 grep 更适合"找做某事的函数"类的语义查询。',
+		parameters: {
+			type: 'object',
+			properties: {
+				query:       { type: 'string', description: '自然语言查询，例如 "处理用户登录的函数" 或 "数据库连接相关的类"' },
+				max_results: { type: 'number', description: '返回上限（默认 10）' },
+			},
+			required: ['query'],
+		},
+	},
+	{
+		name: 'codebase_index_status',
+		description: '查询当前工作区的代码库索引状态：刷新时间 / 文件数 / API 数 / 架构总结。',
+		parameters: { type: 'object', properties: {} },
+	},
+	{
+		name: 'codebase_index_refresh',
+		description: '强制重建当前工作区的代码库索引（增量或全量）。一般无需手动调，进项目时自动建。',
+		parameters: {
+			type: 'object',
+			properties: {
+				incremental: { type: 'boolean', description: 'true=增量；false=全量。默认 true' },
+			},
+		},
+	},
+	// B5: 浏览器预览工具
+	{
+		name: 'browser_open',
+		description: '在桌面端内嵌浏览器中打开 URL。仅允许 127.0.0.1/localhost/.local；其它需用户手动授权。',
+		parameters: {
+			type: 'object',
+			properties: { url: { type: 'string', description: '要打开的 URL' } },
+			required: ['url'],
+		},
+	},
+	{
+		name: 'browser_screenshot',
+		description: '截取当前内嵌浏览器的可见区域。返回 base64 PNG，多模态 LLM 可解读视觉效果。',
+		parameters: { type: 'object', properties: {} },
+	},
+	{
+		name: 'browser_console_logs',
+		description: '读取内嵌浏览器最近 N 条控制台日志。',
+		parameters: { type: 'object', properties: { max_entries: { type: 'number' } } },
+	},
+	{
+		name: 'browser_network_requests',
+		description: '读取内嵌浏览器最近 N 个 HTTP 请求。',
+		parameters: { type: 'object', properties: { max_entries: { type: 'number' } } },
+	},
+	{
+		name: 'browser_click',
+		description: '点击内嵌浏览器中的元素（CSS selector）。',
+		parameters: {
+			type: 'object',
+			properties: { selector: { type: 'string' } },
+			required: ['selector'],
+		},
+	},
+	{
+		name: 'browser_fill',
+		description: '往内嵌浏览器的 input/textarea 元素填值。',
+		parameters: {
+			type: 'object',
+			properties: { selector: { type: 'string' }, value: { type: 'string' } },
+			required: ['selector', 'value'],
+		},
+	},
+	{
+		name: 'browser_eval',
+		description: '在内嵌浏览器页面执行 JavaScript 表达式。',
+		parameters: {
+			type: 'object',
+			properties: { script: { type: 'string' } },
+			required: ['script'],
+		},
+	},
+	{
+		name: 'browser_wait_for',
+		description: '等待 CSS selector 在内嵌浏览器页面出现（异步 SPA 加载场景）。',
+		parameters: {
+			type: 'object',
+			properties: { selector: { type: 'string' }, timeout_ms: { type: 'number' } },
+			required: ['selector'],
 		},
 	},
 ];
@@ -629,7 +862,7 @@ async function executeToolCall(
 				if (ctx.sessionId && !wIsNew) {
 					try {
 						const { FileTime } = await import('@maxian/core/file/FileTime');
-						FileTime.assert(ctx.sessionId, wAbsPath);
+						await FileTime.assert(ctx.sessionId, wAbsPath);
 					} catch (e) {
 						return `Error: ${(e as Error).message}`;
 					}
@@ -680,7 +913,7 @@ async function executeToolCall(
 				if (ctx.sessionId && content !== null) {
 					try {
 						const { FileTime } = await import('@maxian/core/file/FileTime');
-						FileTime.assert(ctx.sessionId, absolutePath);
+						await FileTime.assert(ctx.sessionId, absolutePath);
 					} catch (e) {
 						return `Error: ${(e as Error).message}`;
 					}
@@ -707,7 +940,7 @@ async function executeToolCall(
 					if (ctx.sessionId) {
 						try {
 							const { FileTime } = await import('@maxian/core/file/FileTime');
-							FileTime.read(ctx.sessionId, absolutePath);
+							await FileTime.read(ctx.sessionId, absolutePath);
 						} catch { /* ignore */ }
 					}
 					if (emitEvent) {
@@ -763,7 +996,7 @@ async function executeToolCall(
 				if (ctx.sessionId) {
 					try {
 						const { FileTime } = await import('@maxian/core/file/FileTime');
-						FileTime.assert(ctx.sessionId, mAbsPath);
+						await FileTime.assert(ctx.sessionId, mAbsPath);
 					} catch (e) {
 						return `Error: ${(e as Error).message}`;
 					}
@@ -781,7 +1014,7 @@ async function executeToolCall(
 					if (ctx.sessionId) {
 						try {
 							const { FileTime } = await import('@maxian/core/file/FileTime');
-							FileTime.read(ctx.sessionId, mAbsPath);
+							await FileTime.read(ctx.sessionId, mAbsPath);
 						} catch { /* ignore */ }
 					}
 					if (emitEvent) {
@@ -1021,7 +1254,7 @@ async function executeToolCall(
 			case 'glob': {
 				const gp = params as unknown as IGlobToolParams;
 				const r = await globTool(ctx, gp);
-				const text = formatGlobResult(r, gp);
+				const text = await formatGlobResult(r, gp);
 				const truncated = Truncate.output(text, {}, true);
 				return truncated.content;
 			}
@@ -1259,18 +1492,21 @@ async function executeToolCall(
 				}
 			}
 			case 'task': {
-				const tp = params as unknown as ITaskToolParams;
+				const tp = params as unknown as ITaskToolParams & { isolation?: 'inherit' | 'worktree'; background?: boolean | string };
 				// 调用主 agent loop 的子任务派发（在 cli.ts 初始化时注入）
 				if (!(globalThis as any).__maxianSpawnSubAgent) {
 					return `Error: 子 Agent 派发未初始化`;
 				}
 				try {
+					const bg = tp.background === true || tp.background === 'true';
 					const r: ITaskToolResult = await (globalThis as any).__maxianSpawnSubAgent({
 						parentSessionId: ctx.sessionId,
 						workspacePath:   ctx.workspacePath,
 						prompt:          tp.prompt,
 						subagentType:    tp.subagent_type,
 						description:     tp.description,
+						isolation:       tp.isolation,
+						background:      bg,
 					});
 					const text = formatTaskResult(r, tp);
 					const truncated = Truncate.output(text, {}, false);  // task 内部已经是聚合的文本
@@ -1280,6 +1516,186 @@ async function executeToolCall(
 				}
 			}
 			default: {
+				// B5: 浏览器预览工具（桌面端 Tauri 通过 globalThis.__maxianBrowserController 注入实现）
+				const browserToolNames = new Set([
+					'browser_open', 'browser_screenshot', 'browser_console_logs',
+					'browser_network_requests', 'browser_click', 'browser_fill',
+					'browser_eval', 'browser_wait_for',
+				]);
+				if (browserToolNames.has(name)) {
+					const ctrl = (globalThis as any).__maxianBrowserController as
+						| import('@maxian/core/browser').IBrowserController
+						| undefined;
+					if (!ctrl) {
+						return `错误：浏览器控制器未挂载。请确认在桌面端 Tauri 运行 sidecar，且已开启"浏览器预览"窗口。Web/CLI/IDE 模式不支持本组工具。`;
+					}
+					try {
+						const browserMod = await import('@maxian/core/browser');
+						let def: import('@maxian/core/tools').ToolDefinition | undefined;
+						switch (name) {
+							case 'browser_open':              def = browserMod.BROWSER_OPEN_TOOL; break;
+							case 'browser_screenshot':        def = browserMod.BROWSER_SCREENSHOT_TOOL; break;
+							case 'browser_console_logs':      def = browserMod.BROWSER_CONSOLE_LOGS_TOOL; break;
+							case 'browser_network_requests':  def = browserMod.BROWSER_NETWORK_REQUESTS_TOOL; break;
+							case 'browser_click':             def = browserMod.BROWSER_CLICK_TOOL; break;
+							case 'browser_fill':              def = browserMod.BROWSER_FILL_TOOL; break;
+							case 'browser_eval':              def = browserMod.BROWSER_EVAL_TOOL; break;
+							case 'browser_wait_for':          def = browserMod.BROWSER_WAIT_FOR_TOOL; break;
+						}
+						if (!def?.execute) return `Error: 工具 ${name} 未实现 execute`;
+						const browserCtx = {
+							workspaceRoot:     ctx.workspacePath,
+							sessionId:         ctx.sessionId ?? '',
+							browserController: ctrl,
+						};
+						const res = await def.execute(params, browserCtx as any);
+						const text = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+						// browser_screenshot 返回的是包含 base64 的 JSON，让 truncate 不截断（避免破坏 base64）
+						if (name === 'browser_screenshot') {
+							return text;
+						}
+						return Truncate.output(text, {}, true).content;
+					} catch (e) {
+						return `Error executing ${name}: ${(e as Error).message}`;
+					}
+				}
+
+				// B4: Codebase Index 工具
+				if (name === 'codebase_search' || name === 'codebase_index_status' || name === 'codebase_index_refresh') {
+					try {
+						if (!ctx.codebaseIndex || !ctx.currentWorkspaceId) {
+							return '错误：当前会话没有挂载 Codebase Index 服务';
+						}
+						const idx = ctx.codebaseIndex;
+						if (name === 'codebase_search') {
+							const q = String(params.query ?? '').trim();
+							if (!q) return '错误：query 不能为空';
+							const max = Math.min(Math.max(1, Number(params.max_results) || 10), 50);
+							const hits = await idx.search(ctx.currentWorkspaceId, q, max);
+							if (hits.length === 0) return `未召回相关 API。索引中可能没有匹配的代码符号；可尝试用 grep / search_files 文本搜索作补充。`;
+							const lines: string[] = [`找到 ${hits.length} 个符号：\n`];
+							for (let i = 0; i < hits.length; i++) {
+								const h = hits[i];
+								lines.push(`${i + 1}. **${h.entry.symbolName}** (${h.entry.symbolKind}, 相关度 ${(h.score * 100).toFixed(1)}%)`);
+								lines.push(`   - ${h.entry.filePath}:${h.entry.startLine}`);
+								if (h.entry.signature) lines.push(`   - signature: \`${h.entry.signature.slice(0, 200)}\``);
+								if (h.entry.docstring) lines.push(`   - doc: ${h.entry.docstring.slice(0, 200)}`);
+								lines.push('');
+							}
+							return lines.join('\n');
+						}
+						if (name === 'codebase_index_status') {
+							const { CODEBASE_INDEX_STATUS_TOOL } = await import('@maxian/core/codebase-index');
+							if (!CODEBASE_INDEX_STATUS_TOOL.execute) return 'Error: 工具未实现 execute';
+							const cbCtx = {
+								workspaceRoot:      ctx.workspacePath,
+								sessionId:          ctx.sessionId ?? '',
+								codebaseIndex:      idx,
+								currentWorkspaceId: ctx.currentWorkspaceId,
+							};
+							const res = await CODEBASE_INDEX_STATUS_TOOL.execute({}, cbCtx as any);
+							return Truncate.output(typeof res === 'string' ? res : JSON.stringify(res), {}, true).content;
+						}
+						if (name === 'codebase_index_refresh') {
+							const { CODEBASE_INDEX_REFRESH_TOOL } = await import('@maxian/core/codebase-index');
+							if (!CODEBASE_INDEX_REFRESH_TOOL.execute) return 'Error: 工具未实现 execute';
+							const cbCtx = {
+								workspaceRoot:      ctx.workspacePath,
+								sessionId:          ctx.sessionId ?? '',
+								codebaseIndex:      idx,
+								currentWorkspaceId: ctx.currentWorkspaceId,
+							};
+							const res = await CODEBASE_INDEX_REFRESH_TOOL.execute(params, cbCtx as any);
+							return Truncate.output(typeof res === 'string' ? res : JSON.stringify(res), {}, true).content;
+						}
+					} catch (e) {
+						return `Error executing ${name}: ${(e as Error).message}`;
+					}
+				}
+
+				// B3: 记忆元工具（save_memory / recall_memory）
+				if (name === 'save_memory' || name === 'recall_memory') {
+					try {
+						const memMod = await import('@maxian/core/memory');
+						const def = name === 'save_memory' ? memMod.SAVE_MEMORY_TOOL : memMod.RECALL_MEMORY_TOOL;
+						if (!def.execute) return `Error: ${name} 工具未实现 execute`;
+						const memCtx = {
+							workspaceRoot:      ctx.workspacePath,
+							sessionId:          ctx.sessionId ?? '',
+							memoryStore:        ctx.memoryStore,
+							currentWorkspaceId: ctx.currentWorkspaceId,
+						};
+						const res = await def.execute(params, memCtx as any);
+						const text = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+						return Truncate.output(text, {}, true).content;
+					} catch (e) {
+						return `Error executing ${name}: ${(e as Error).message}`;
+					}
+				}
+
+				// B2: MCP 元工具（mcp_tool_search / mcp_tool_load / mcp_tool_unload）
+				if (name === 'mcp_tool_search' || name === 'mcp_tool_load' || name === 'mcp_tool_unload') {
+					try {
+						const { MCP_TOOL_SEARCH, MCP_TOOL_LOAD, MCP_TOOL_UNLOAD } = await import('@maxian/core/tools');
+						const def = name === 'mcp_tool_search' ? MCP_TOOL_SEARCH
+							: name === 'mcp_tool_load'   ? MCP_TOOL_LOAD
+							: MCP_TOOL_UNLOAD;
+						if (!def.execute) return `Error: ${name} 工具未实现 execute`;
+						// 构造 McpAwareToolContext —— ctx 已带 mcpHub / activeMcpTools / sticky / onMcpToolsChanged
+						const mcpCtx = {
+							workspaceRoot:   ctx.workspacePath,
+							sessionId:       ctx.sessionId ?? '',
+							mcpHub:          ctx.mcpHub,
+							activeMcpTools:  ctx.activeMcpTools,
+							stickyMcpTools:  ctx.stickyMcpTools,
+							onMcpToolsChanged: ctx.onMcpToolsChanged,
+						};
+						const res = await def.execute(params, mcpCtx as any);
+						const text = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+						return Truncate.output(text, {}, true).content;
+					} catch (e) {
+						return `Error executing ${name}: ${(e as Error).message}`;
+					}
+				}
+
+				// B2: 真正调度 MCP server 上的工具（name 形如 mcp_<server>_<tool>）
+				if (name.startsWith('mcp_') && ctx.mcpHub) {
+					// 从 toolIndex 反查 (server, raw tool name)；avoid 简单字符串切分（server 名可能含下划线）
+					const entry = ctx.mcpHub.toolIndex.getByToolId(name);
+					if (!entry) {
+						return `Error: MCP 工具 "${name}" 不在索引中。可能 server 已断开或工具已被移除。请用 mcp_tool_search 重新查找。`;
+					}
+					if (!ctx.activeMcpTools?.has(name)) {
+						return `Error: MCP 工具 "${name}" 未激活。先用 mcp_tool_load 把它加入激活集，下一轮再调用。`;
+					}
+					try {
+						// 记录 last used turn
+						if (ctx.mcpToolLastUsedTurn !== undefined && ctx.currentTurn !== undefined) {
+							ctx.mcpToolLastUsedTurn.set(name, ctx.currentTurn);
+						}
+						const callRes = await ctx.mcpHub.callTool(entry.serverName, entry.rawToolName, params);
+						if (callRes.isError) {
+							const errText = (callRes.content ?? []).map(c => c.text ?? '').join('\n');
+							return `MCP 工具调用失败：${errText || '(无错误信息)'}`;
+						}
+						// 把多个 content item 拼成纯文本（过滤 image 等非文本类型）
+						const textChunks = (callRes.content ?? [])
+							.map(c => {
+								if (c.type === 'text') return c.text ?? '';
+								if (c.type === 'image') return `[image: ${c.mimeType ?? 'unknown'}, ${(c.data ?? '').length} bytes base64]`;
+								if (c.type === 'resource') return `[resource: ${c.resource?.uri ?? c.uri ?? ''}]`;
+								if (c.type === 'resource_link') return `[resource_link: ${c.uri ?? ''}]`;
+								return '';
+							})
+							.filter(t => t.length > 0)
+							.join('\n');
+						const truncated = Truncate.output(textChunks || '(空响应)', {}, true);
+						return truncated.content;
+					} catch (e) {
+						return `Error executing MCP tool ${name}: ${(e as Error).message}`;
+					}
+				}
+
 				// 尝试插件工具
 				const pluginMap: Map<string, PluginToolDef> | undefined = (globalThis as any).__maxianPluginTools;
 				const plugin = pluginMap?.get(name);
@@ -1303,7 +1719,7 @@ async function executeToolCall(
 
 // ─── 平台实现 ──────────────────────────────────────────────────────────────────
 
-function createDefaultPlatform() {
+async function createDefaultPlatform() {
 	const config: IConfiguration = {
 		getValue<T>(key: string, defaultValue?: T): T | undefined {
 			const env = process.env['MAXIAN_' + key.toUpperCase().replace(/\./g, '_')];
@@ -1330,11 +1746,16 @@ function createDefaultPlatform() {
 		getAvailableTools: () => AGENT_TOOL_DEFINITIONS.map(t => t.name as any),
 	};
 
+	// K8d: 注入真实的 NodeTerminal 实现，替换原来的 stub。
+	// bashTool / executeCommandTool 现在通过 ctx.platform.terminal 调用，不再直接 import child_process。
+	const { NodeTerminal } = await import('@maxian/core/adapters/NodeTerminal');
+	const terminal: ITerminal = new NodeTerminal();
+
 	return {
 		config,
 		workspace,
 		fs:      {} as IFileSystem,
-		terminal: {} as ITerminal,
+		terminal,
 		storage:  {} as IStorage,
 		auth:     {} as IAuthProvider,
 		toolExecutor,
@@ -1345,7 +1766,7 @@ function createDefaultPlatform() {
 
 async function main() {
 	const opts      = parseCliArgs();
-	const platform  = createDefaultPlatform();
+	const platform  = await createDefaultPlatform();
 	const aiConfig  = loadAiConfig();
 
 	// 初始化数据库驱动（按运行时选 bun:sqlite 或 better-sqlite3）
@@ -2337,6 +2758,18 @@ OBJECTIVE
 		// 清掉上次遗留的取消标记（这次是新任务启动，不该继承上次的 cancel 状态）
 		server.sessionManager.resetCancelled(sessionId);
 		const ctx            = new NodeToolContext(workspacePath, sessionId);
+		// B2: 注入 MCP Hub + 每会话独立的激活集 / sticky / lastUsed map
+		ctx.mcpHub               = server.sessionManager.mcpHub;
+		ctx.activeMcpTools       = new Set<string>();
+		ctx.stickyMcpTools       = new Set<string>();
+		ctx.mcpToolLastUsedTurn  = new Map<string, number>();
+		ctx.currentTurn          = 0;
+		// B3: 注入跨会话记忆 Store + 当前 workspaceId
+		// 用 workspacePath 作为 workspaceId 标识符（memory store 内部按字符串匹配过滤）。
+		ctx.memoryStore          = server.sessionManager.memoryStore;
+		ctx.currentWorkspaceId   = workspacePath;
+		// B4: 注入代码库索引
+		ctx.codebaseIndex        = server.sessionManager.codebaseIndex;
 		// Doom-loop 检测器（每次 runAgentLoop 独立实例）
 		const repetitionDetector = new ToolRepetitionDetector(3, workspacePath);
 		let   allText        = '';   // 所有迭代累积文本（用于兜底 return）
@@ -2374,8 +2807,102 @@ OBJECTIVE
 			projectInstructions + skillsList + additionalSystemPrompt,
 		);
 
+		// B2: 把当前 MCP server 列表 + activeMcpTools 渲染成 prompt section，加到动态尾部
+		// （静态段保持哈希稳定可缓存，动态段每轮可变）
+		const buildMcpSuffix = (): string => {
+			const hub = ctx.mcpHub;
+			if (!hub) return '';
+			const servers = hub.getAllServers().filter(s => s.isConnected);
+			if (servers.length === 0) return ''; // 没挂任何 MCP server → 不输出本节
+			const activeIds = ctx.activeMcpTools ? [...ctx.activeMcpTools] : [];
+			const activeEntries = activeIds
+				.map(id => hub.toolIndex.getByToolId(id))
+				.filter((e): e is NonNullable<typeof e> => !!e);
+			const lines: string[] = [
+				'',
+				'====',
+				'',
+				'MCP TOOLS',
+				'',
+				'系统已挂载若干 MCP 服务器，但工具描述不直接写进 system prompt（避免 context 膨胀）。',
+				'要使用任意 MCP 工具，按以下流程：',
+				'',
+				'1. 调 `mcp_tool_search` 查询相关工具（自然语言 query）',
+				'2. 收到候选后挑 1-3 个调 `mcp_tool_load` 加入激活集',
+				'3. 下一轮 LLM 调用时这些工具会被作为可用工具暴露，可直接 XML 调用',
+				'4. 用完可以 `mcp_tool_unload` 释放（一般不必，最近 8 轮未用会自动卸载）',
+				'',
+				'已连接的 MCP 服务器：',
+			];
+			for (const s of servers) {
+				const desc = s.config.description ? `（${s.config.description}）` : '';
+				lines.push(`- **${s.config.name}** ${desc}: ${s.tools.length} 个工具`);
+			}
+			if (activeEntries.length > 0) {
+				lines.push('');
+				lines.push('### 当前已激活工具');
+				lines.push('');
+				lines.push('以下工具已被 mcp_tool_load 激活，可直接 XML 调用（详细参数 schema 见上方 tool definitions）：');
+				lines.push('');
+				for (const e of activeEntries) {
+					lines.push(`- **${e.toolId}** (server: ${e.serverName}): ${e.description.slice(0, 200)}`);
+				}
+			}
+			return lines.join('\n');
+		};
+
 		// 最终 system prompt：静态在前（哈希稳定、可缓存），动态在后（每会话不同）
-		const finalSystemPrompt = staticPrompt + dynamicSuffix;
+		// 注意：MCP suffix 也是动态的（用户可能动态 load/unload），所以拼在 dynamicSuffix 后面
+		// 但注意它在 finalSystemPrompt 的位置 → 每轮都重算（在 for 循环内动态生成）
+		const finalSystemPromptBase = staticPrompt + dynamicSuffix;
+
+		// B3: 自动召回记忆生成 prompt 段
+		// 每轮调用前用最近一条 user 消息作为 query 召回 top-K 记忆，注入到 system prompt
+		const buildMemorySuffix = async (): Promise<string> => {
+			const store = ctx.memoryStore;
+			if (!store) return '';
+			// 用最近一条 user 消息作为 query；没有就用 userContent
+			const lastUser = [...history].reverse().find(m => m.role === 'user');
+			const queryText = (() => {
+				if (!lastUser) return userContent;
+				const c = lastUser.content;
+				if (typeof c === 'string') return c;
+				if (Array.isArray(c)) {
+					const texts = c
+						.map((b: any) => (b?.type === 'text' ? String(b.text ?? '') : ''))
+						.filter(Boolean);
+					return texts.join('\n') || userContent;
+				}
+				return userContent;
+			})();
+			if (!queryText.trim()) return '';
+			try {
+				const hits = await store.search({
+					query:       queryText.slice(0, 400), // 控长
+					maxResults:  5,
+					minScore:    0.10,
+					workspaceId: ctx.currentWorkspaceId,
+					sessionId:   ctx.sessionId,
+				});
+				if (hits.length === 0) return '';
+				const lines: string[] = [
+					'',
+					'====',
+					'',
+					'MEMORY (跨会话记忆，自动召回)',
+					'',
+					'以下是从历史对话中提取的相关偏好/约定/事实，请遵守：',
+					'',
+				];
+				for (const h of hits) {
+					lines.push(`- [${h.record.scope}/${h.record.category}] ${h.record.content}`);
+				}
+				return lines.join('\n');
+			} catch (e) {
+				console.warn('[Agent] B3-Memory: 召回失败', e);
+				return '';
+			}
+		};
 
 		// 暴露静态段给上层（用于 AiProxyHandler 做 block-level cache_control 标记）
 		(globalThis as any).__maxianLastStaticPromptLen = staticPrompt.length;
@@ -2391,13 +2918,31 @@ OBJECTIVE
 		const EXPLORE_TOOLS = AGENT_TOOL_DEFINITIONS.filter(t =>
 			['read_file', 'search_files', 'list_files', 'grep', 'glob', 'ls'].includes(t.name)
 		);
-		const activeTools = isChatMode
+		const baseActiveTools = isChatMode
 			? undefined
 			: isExploreMode
 				? EXPLORE_TOOLS
 				: isPlanMode
 					? READ_ONLY_TOOLS
 					: AGENT_TOOL_DEFINITIONS;
+		// B2: 把当前会话已激活的 MCP 工具动态拼到 activeTools。
+		// 每轮重新计算（因为 mcp_tool_load/unload 会改 activeMcpTools 集合）。
+		const buildActiveTools = (): ToolDefinition[] | undefined => {
+			if (!baseActiveTools) return undefined;
+			if (!ctx.activeMcpTools || ctx.activeMcpTools.size === 0) return baseActiveTools;
+			const mcpDefs: ToolDefinition[] = [];
+			for (const toolId of ctx.activeMcpTools) {
+				const entry = ctx.mcpHub?.toolIndex.getByToolId(toolId);
+				if (!entry) continue;
+				mcpDefs.push({
+					name: toolId,
+					description: entry.description || `MCP 工具: ${entry.rawToolName}（来自 ${entry.serverName}）`,
+					parameters: (entry.inputSchema ?? { type: 'object', properties: {} }) as any,
+				});
+			}
+			if (mcpDefs.length === 0) return baseActiveTools;
+			return [...baseActiveTools, ...mcpDefs];
+		};
 
 		for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
 			// ── 取消检查：每轮开始前检查用户是否点了"结束" ──
@@ -2419,7 +2964,8 @@ OBJECTIVE
 			// MAXIAN_CONTEXT_WINDOW=1000000 环境变量
 			{
 				const { estimateHistoryTokens, COMPACT_L1_THRESHOLD, COMPACT_L2_THRESHOLD } = await import('./contextCompaction.js');
-				const currentTokens = estimateHistoryTokens(history, finalSystemPrompt.length);
+				// B2: 用 base prompt 长度做估算（mcp suffix 是动态的，估算不必精确到 token 级）
+				const currentTokens = estimateHistoryTokens(history, finalSystemPromptBase.length);
 				const willCompact = currentTokens >= COMPACT_L1_THRESHOLD;
 				if (willCompact) {
 					// 先通知前端压缩开始
@@ -2429,9 +2975,20 @@ OBJECTIVE
 						tokensCurrent: currentTokens,
 						willLevel2:    currentTokens >= COMPACT_L2_THRESHOLD,
 					} as any);
+					// B2-LIFECYCLE: 上下文压缩触发时，强制卸载所有 sticky=false 的 MCP 工具
+					if (ctx.activeMcpTools && ctx.activeMcpTools.size > 0) {
+						const drop: string[] = [];
+						for (const id of ctx.activeMcpTools) {
+							if (!ctx.stickyMcpTools?.has(id)) drop.push(id);
+						}
+						for (const id of drop) ctx.activeMcpTools.delete(id);
+						if (drop.length > 0) {
+							console.log(`[Agent] B2-Lifecycle: 压缩触发，强制卸载 ${drop.length} 个非 sticky MCP 工具：${drop.join(', ')}`);
+						}
+					}
 				}
 				try {
-					const report = await compactIfNeeded(history, finalSystemPrompt.length, handler);
+					const report = await compactIfNeeded(history, finalSystemPromptBase.length, handler);
 					if (report.level > 0) {
 						console.log(
 							`[Compaction] Level ${report.level}: ${report.tokensBefore} → ${report.tokensAfter} tokens ` +
@@ -2484,7 +3041,32 @@ OBJECTIVE
 			}
 
 			// ── 调用 AI ──
-			console.log(`[Agent] iter=${iter} mode=${mode} 调用 AI，携带 ${activeTools?.length ?? 0} 个工具，历史 ${history.length} 条`);
+			// B2: 每轮重新计算 activeTools（动态拼上 activeMcpTools），并把当前轮次写入 ctx
+			ctx.currentTurn = iter + 1;
+			const activeTools = buildActiveTools();
+			// B2/B3: 每轮重算 final system prompt（拼上 mcp section + memory section）
+			const memorySuffix = await buildMemorySuffix();
+			const finalSystemPrompt = finalSystemPromptBase + buildMcpSuffix() + memorySuffix;
+			console.log(`[Agent] iter=${iter} mode=${mode} 调用 AI，携带 ${activeTools?.length ?? 0} 个工具${ctx.activeMcpTools && ctx.activeMcpTools.size > 0 ? ` (含 ${ctx.activeMcpTools.size} 个 MCP)` : ''}，历史 ${history.length} 条`);
+
+			// B2-LIFECYCLE: 自动卸载 N 轮未用的非 sticky MCP 工具
+			// 在每轮**调用 LLM 之前**先 GC，让本轮 LLM 看到的 prompt 已经反映 GC 后的状态
+			const AUTO_UNLOAD_AFTER_TURNS = 8;
+			if (ctx.activeMcpTools && ctx.activeMcpTools.size > 0) {
+				const turn = ctx.currentTurn ?? 0;
+				const toUnload: string[] = [];
+				for (const id of ctx.activeMcpTools) {
+					if (ctx.stickyMcpTools?.has(id)) continue;
+					const last = ctx.mcpToolLastUsedTurn?.get(id) ?? turn; // 没记录视为本轮（避免一加载就被卸）
+					if (turn - last >= AUTO_UNLOAD_AFTER_TURNS) {
+						toUnload.push(id);
+					}
+				}
+				if (toUnload.length > 0) {
+					for (const id of toUnload) ctx.activeMcpTools.delete(id);
+					console.log(`[Agent] B2-Lifecycle: 自动卸载 ${toUnload.length} 个 MCP 工具（${AUTO_UNLOAD_AFTER_TURNS} 轮未用）：${toUnload.join(', ')}`);
+				}
+			}
 			const toolCalls: Array<{ id: string; name: string; params: Record<string, unknown> }> = [];
 			// iterText: 常规 assistant 文本（chunk.type === 'text'），在 agent 模式下被当作思考过程流出，
 			//          但在最终轮无工具调用时转为 assistant。所以它会进 API history 和 DB 的 assistant。
@@ -3116,56 +3698,181 @@ OBJECTIVE
 		return finalText || allText;
 	}
 
-	// ─── 子 Agent 派发（task 工具）──────────────────────────────────────────
+	// ─── 子 Agent 派发（task 工具）── B1 完整版 ──────────────────────────────
+	// 支持：
+	//   - 4 个 builtin subagent_type（general-purpose / code-reviewer / code-explorer / test-writer）
+	//   - 自定义 agent（.maxian/agents/<name>.md）
+	//   - 老 subagent_type 别名（explore/build/review → builtin 映射）
+	//   - isolation: 'inherit' | 'worktree'（worktree 自动创建独立分支 + workspace）
+	//   - background: true 立即返回 task_id，主代理可继续；false 同步等结果
+	//   - 取消传播：父代理取消时所有子任务级联取消
+	//   - 并发上限：≤ 8 background；同步任务无限制
 	(globalThis as any).__maxianSpawnSubAgent = async (opts: {
 		parentSessionId?: string;
 		workspacePath:    string;
 		prompt:           string;
-		/** explore/build/review 为内置；也支持 .maxian/agents/<name>.md 里定义的自定义 agent 名 */
 		subagentType:     string;
 		description?:     string;
+		isolation?:       'inherit' | 'worktree';
+		background?:      boolean;
 	}): Promise<ITaskToolResult> => {
+		const subagentMgr = server.sessionManager.subagentManager;
 		try {
-			const subId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-			const subHistory: MessageParam[] = [];
-			// 检查是否匹配某个自定义 agent
-			const customAgents = loadCustomAgents(opts.workspacePath);
-			const custom = customAgents.find(a => a.name === opts.subagentType);
+			const subagentMod   = await import('@maxian/core/agents');
+			const worktreeMod   = await import('./subagentWorktree.js');
+			const customAgents  = loadCustomAgents(opts.workspacePath);
+			const customNames   = customAgents.map(a => a.name);
+			const resolvedName  = subagentMod.resolveSubagentName(opts.subagentType, customNames);
+			if (!resolvedName) {
+				return {
+					output: '',
+					success: false,
+					error: `未知 subagent_type "${opts.subagentType}"。内置：${subagentMod.listBuiltinSubagentNames().join(', ')}；自定义：${customNames.join(', ') || '（无）'}`,
+				};
+			}
+
+			// 决定 mode + prompt header
 			let subMode = 'ask';
-			let userContent = opts.prompt;
-			if (custom) {
-				// 自定义 agent：systemPrompt 以 user 消息前置（运行时 agent 继承）
-				userContent = `${custom.systemPrompt}\n\n---\n\n# 任务\n\n${opts.prompt}`;
-				subMode = 'code';
+			let promptHeader = '';
+			let isolation: 'inherit' | 'worktree' = opts.isolation ?? 'inherit';
+			let background = opts.background === true;
+
+			const builtin = subagentMod.getBuiltinSubagent(resolvedName);
+			if (builtin) {
+				subMode = builtin.mode;
+				promptHeader = builtin.promptHeader;
+				if (opts.isolation === undefined) isolation = builtin.defaultIsolation;
+				if (opts.background === undefined) background = builtin.defaultBackground;
 			} else {
-				// 内置 subagent 类型映射到 mode，启用对应专用 prompt
-				switch (opts.subagentType) {
-					case 'build':
-					case 'code':
-						subMode = 'code';  break;
-					case 'explore':
-					case 'search':
-					case 'research':
-						subMode = 'explore'; break;  // 使用精简 explore prompt + 只读工具
-					case 'plan':
-						subMode = 'plan';   break;
-					default:
-						subMode = 'ask';    break;
+				// 自定义 agent
+				const custom = customAgents.find(a => a.name === resolvedName);
+				if (custom) {
+					subMode = 'code';
+					promptHeader = custom.systemPrompt;
 				}
 			}
-			const output = await runAgentLoop(
-				subId,
-				userContent,
-				subHistory,
-				opts.workspacePath,
-				subMode,
-				'code',
-			);
-			return { output, success: true };
+
+			// 生成子代理 sessionId（独立 context 的关键）
+			const subSessionId = `subagent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+			// 解析 worktree 隔离
+			const subTaskIdHint = subSessionId; // 用 sessionId 作为 worktree 子目录名
+			const wkRes = await worktreeMod.resolveSubagentWorkspace(opts.workspacePath, isolation, subTaskIdHint);
+			if (wkRes.downgradeReason) {
+				console.log(`[Subagent] ${wkRes.downgradeReason}`);
+			}
+
+			// 注册到 SubagentManager
+			const createRes = subagentMgr.create({
+				parentSessionId:        opts.parentSessionId ?? '__main__',
+				subagentSessionId:      subSessionId,
+				subagentType:           resolvedName,
+				description:            opts.description,
+				prompt:                 opts.prompt,
+				isolation:              wkRes.isWorktree ? 'worktree' : 'inherit',
+				background,
+				effectiveWorkspacePath: wkRes.effectiveWorkspacePath,
+				worktreePath:           wkRes.worktreePath,
+				worktreeBranch:         wkRes.branchName,
+			});
+			if (!createRes.ok) {
+				// 并发上限被拒绝 → 提前清理 worktree（如果创建了）
+				if (wkRes.isWorktree && wkRes.worktreePath) {
+					await worktreeMod.cleanupSubagentWorktree(opts.workspacePath, wkRes.worktreePath);
+				}
+				return { output: '', success: false, error: createRes.reason };
+			}
+			const record = createRes.record;
+			const taskId = record.taskId;
+
+			// 拼接最终 user prompt
+			const userContent = promptHeader
+				? `${promptHeader}\n\n---\n\n# 任务\n\n${opts.prompt}`
+				: opts.prompt;
+
+			// ── 同步任务：直接 await 跑完 ─────────────────────
+			if (!background) {
+				subagentMgr.markRunning(taskId);
+				try {
+					const subHistory: MessageParam[] = [];
+					const output = await runAgentLoop(
+						subSessionId,
+						userContent,
+						subHistory,
+						wkRes.effectiveWorkspacePath,
+						subMode,
+						'code',
+					);
+					// 取消检查（父代理或自己被取消）
+					if (record.cancelled) {
+						subagentMgr.markCancelled(taskId);
+						if (wkRes.isWorktree && wkRes.worktreePath) {
+							await worktreeMod.cleanupSubagentWorktree(opts.workspacePath, wkRes.worktreePath);
+						}
+						return { output: '[已取消]', success: false, error: '子任务被取消' };
+					}
+					subagentMgr.markCompleted(taskId, output);
+					if (wkRes.isWorktree && wkRes.worktreePath) {
+						await worktreeMod.cleanupSubagentWorktree(opts.workspacePath, wkRes.worktreePath);
+					}
+					return { output, success: true };
+				} catch (e) {
+					const errMsg = (e as Error).message;
+					subagentMgr.markFailed(taskId, errMsg);
+					if (wkRes.isWorktree && wkRes.worktreePath) {
+						await worktreeMod.cleanupSubagentWorktree(opts.workspacePath, wkRes.worktreePath);
+					}
+					return { output: '', success: false, error: errMsg };
+				}
+			}
+
+			// ── Background 任务：fire-and-forget，立即返回 taskId ─────
+			subagentMgr.markRunning(taskId);
+			void (async () => {
+				try {
+					const subHistory: MessageParam[] = [];
+					const output = await runAgentLoop(
+						subSessionId,
+						userContent,
+						subHistory,
+						wkRes.effectiveWorkspacePath,
+						subMode,
+						'code',
+					);
+					if (record.cancelled) {
+						subagentMgr.markCancelled(taskId);
+					} else {
+						subagentMgr.markCompleted(taskId, output);
+					}
+				} catch (e) {
+					subagentMgr.markFailed(taskId, (e as Error).message);
+				} finally {
+					if (wkRes.isWorktree && wkRes.worktreePath) {
+						await worktreeMod.cleanupSubagentWorktree(opts.workspacePath, wkRes.worktreePath);
+					}
+				}
+			})();
+
+			// 主代理拿到的 output：taskId + 状态查询提示
+			const summary =
+`已派出 background 子代理：
+- task_id: ${taskId}
+- subagent_type: ${resolvedName}
+- isolation: ${wkRes.isWorktree ? `worktree (${wkRes.branchName})` : 'inherit'}
+- 主代理可继续工作；后续可通过查询 task_id 拿到子代理结果。`;
+			return { output: summary, success: true };
 		} catch (e) {
 			return { output: '', success: false, error: (e as Error).message };
 		}
 	};
+
+	// 父任务取消时级联取消子代理
+	server.sessionManager.onCancel(async (sessionId: string) => {
+		const cancelled = server.sessionManager.subagentManager.cancelAllByParent(sessionId);
+		if (cancelled.length > 0) {
+			console.log(`[Subagent] 父任务 ${sessionId} 取消 → 级联取消 ${cancelled.length} 个子代理：${cancelled.join(', ')}`);
+		}
+	});
 
 	// ─── 注册消息处理器 ────────────────────────────────────────────────────────
 

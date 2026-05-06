@@ -229,6 +229,67 @@ function initSchema(db: Database.Database): void {
 			ON batch_tasks(batch_id, position);
 		CREATE INDEX IF NOT EXISTS idx_batch_tasks_status_position
 			ON batch_tasks(status, position);
+
+		-- ── B2: MCP 服务器配置 ─────────────────────────────────────
+		-- 桌面端 SettingsMcp 通过 PUT /config/mcp 同步过来，sidecar 启动时全量重连
+		-- name 唯一；headers 是 JSON 序列化的 Record<string,string>
+		CREATE TABLE IF NOT EXISTS mcp_servers (
+			name        TEXT    PRIMARY KEY,
+			url         TEXT    NOT NULL,
+			headers     TEXT,
+			enabled     INTEGER NOT NULL DEFAULT 1,
+			description TEXT,
+			updated_at  INTEGER NOT NULL
+		);
+
+		-- ── B3: Auto-Memory（跨会话记忆）─────────────────────────
+		-- embedding 是 Float32Array LE 字节流 (vec 维度由 EmbeddingService 决定)
+		CREATE TABLE IF NOT EXISTS memories (
+			id                TEXT    PRIMARY KEY,
+			scope             TEXT    NOT NULL,             -- global / workspace / session
+			workspace_id      TEXT,
+			session_id        TEXT,
+			category          TEXT    NOT NULL,             -- preference / convention / fact / style / tech-stack / other
+			content           TEXT    NOT NULL,
+			source            TEXT    NOT NULL DEFAULT 'auto', -- auto / manual
+			starred           INTEGER NOT NULL DEFAULT 0,
+			created_at        INTEGER NOT NULL,
+			last_accessed_at  INTEGER NOT NULL,
+			access_count      INTEGER NOT NULL DEFAULT 0,
+			embedding         BLOB                          -- Float32 LE 字节流；NULL 时降级到 keyword 现算
+		);
+		CREATE INDEX IF NOT EXISTS idx_memories_scope_ws
+			ON memories(scope, workspace_id);
+		CREATE INDEX IF NOT EXISTS idx_memories_session
+			ON memories(session_id);
+
+		-- ── B4: Codebase Index 元数据（实际向量条目仍存内存 + 持久化文件树/API/依赖图） ─
+		CREATE TABLE IF NOT EXISTS codebase_index_meta (
+			workspace_id    TEXT    PRIMARY KEY,
+			workspace_path  TEXT    NOT NULL,
+			last_indexed_at INTEGER NOT NULL,
+			file_count      INTEGER NOT NULL DEFAULT 0,
+			api_count       INTEGER NOT NULL DEFAULT 0,
+			module_count    INTEGER NOT NULL DEFAULT 0,
+			architecture    TEXT,                              -- 架构总结（≤2K tokens markdown）
+			tree_json       TEXT,                              -- 文件树+用途（JSON）
+			modules_json    TEXT,                              -- 关键模块概要（JSON）
+			deps_json       TEXT                               -- 依赖图（JSON）
+		);
+		CREATE TABLE IF NOT EXISTS codebase_index_apis (
+			id              INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id    TEXT    NOT NULL,
+			file_path       TEXT    NOT NULL,
+			symbol_name     TEXT    NOT NULL,
+			symbol_kind     TEXT    NOT NULL,                  -- function/class/method/interface/...
+			signature       TEXT,
+			docstring       TEXT,
+			start_line      INTEGER NOT NULL,
+			end_line        INTEGER NOT NULL,
+			embedding       BLOB
+		);
+		CREATE INDEX IF NOT EXISTS idx_codebase_apis_ws
+			ON codebase_index_apis(workspace_id);
 	`);
 
 	// ── 数据库迁移：补充新增列（对已存在的旧数据库） ─────────────────────────

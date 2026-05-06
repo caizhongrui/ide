@@ -17,6 +17,12 @@ import { BatchCreateForm } from './BatchCreateForm'
 interface Props {
 	client:     MaxianClient
 	workspaces: Workspace[]
+	/** 当前 globalMode（chat/code），用于顶部三段式高亮 */
+	currentMode:    'chat' | 'code'
+	onSwitchToChat: () => void
+	onSwitchToCode: () => void
+	/** 看日志：关闭批次面板 + 切到对应会话 */
+	onJumpToSession: (sessionId: string, workspaceId: string) => void
 }
 
 export const BatchPanel: Component<Props> = (props) => {
@@ -24,6 +30,8 @@ export const BatchPanel: Component<Props> = (props) => {
 	const [selectedBatchId, setSelectedBatchId] = createSignal<string | null>(null)
 	const [currentBatchTasks, setCurrentBatchTasks] = createSignal<BatchTask[]>([])
 	const [showCreateForm, setShowCreateForm] = createSignal(false)
+	/** 编辑模式：传入则 form 进入编辑现有 batch 状态 */
+	const [editingBatch, setEditingBatch] = createSignal<{ batch: TaskBatch; tasks: BatchTask[] } | null>(null)
 	const [loading, setLoading] = createSignal(false)
 	const [statusFilter, setStatusFilter] = createSignal<'all' | 'running' | 'paused' | 'completed' | 'aborted'>('all')
 
@@ -102,7 +110,36 @@ export const BatchPanel: Component<Props> = (props) => {
 		batches().find(b => b.id === selectedBatchId())
 
 	return (
-		<div class="batch-panel">
+		<div class="batch-panel-wrap">
+			{/* 顶部三段式（替代原 sidebar header） */}
+			<div class="batch-top-toolbar">
+				<div class="mode-segmented">
+					<button class="mode-seg-btn" onClick={props.onSwitchToChat} title="Chat — 智能对话">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+						</svg>
+						Chat
+					</button>
+					<button class="mode-seg-btn" onClick={props.onSwitchToCode} title="Code — 智能编码 Agent">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+							<polyline points="16 18 22 12 16 6"/>
+							<polyline points="8 6 2 12 8 18"/>
+						</svg>
+						Code
+					</button>
+					<button class="mode-seg-btn active" title="Task — 批量给项目派任务">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+							<rect x="3" y="3" width="7" height="7"/>
+							<rect x="14" y="3" width="7" height="7"/>
+							<rect x="3" y="14" width="7" height="7"/>
+							<rect x="14" y="14" width="7" height="7"/>
+						</svg>
+						Task
+					</button>
+				</div>
+			</div>
+
+			<div class="batch-panel">
 			{/* 左侧：批次列表 */}
 			<aside class="batch-list-pane">
 				<header class="batch-list-header">
@@ -114,7 +151,7 @@ export const BatchPanel: Component<Props> = (props) => {
 				<div class="batch-list-filter">
 					<For each={[
 						{ k: 'all', label: '全部' },
-						{ k: 'running', label: '跑中' },
+						{ k: 'running', label: '执行中' },
 						{ k: 'paused', label: '暂停' },
 						{ k: 'completed', label: '完成' },
 					] as const}>
@@ -158,6 +195,8 @@ export const BatchPanel: Component<Props> = (props) => {
 							loading={loading()}
 							onRefresh={() => void loadBatchDetail(batch().id)}
 							onTasksUpdated={(tasks) => setCurrentBatchTasks(tasks)}
+							onEditBatch={() => setEditingBatch({ batch: batch(), tasks: currentBatchTasks() })}
+							onJumpToSession={props.onJumpToSession}
 						/>
 					)}
 				</Show>
@@ -176,6 +215,24 @@ export const BatchPanel: Component<Props> = (props) => {
 					}}
 				/>
 			</Show>
+
+			{/* 编辑现有 draft 批次表单（reuse 同一个组件，传 editingBatch） */}
+			<Show when={editingBatch()}>
+				{(eb) => (
+					<BatchCreateForm
+						client={props.client}
+						workspaces={props.workspaces}
+						editingBatch={eb()}
+						onClose={() => setEditingBatch(null)}
+						onCreated={async (batchId) => {
+							setEditingBatch(null)
+							await refreshBatches()
+							await loadBatchDetail(batchId)
+						}}
+					/>
+				)}
+			</Show>
+			</div>
 		</div>
 	)
 }

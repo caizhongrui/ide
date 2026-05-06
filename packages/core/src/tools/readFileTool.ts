@@ -15,7 +15,8 @@
  */
 
 import * as path from 'path';
-import * as fs from 'fs';   // 仅模块级 helper + openSync/readSync/closeSync（platformFs 未覆盖）
+// K8e: 已异步化，所有 fs 调用走 platformFs(ctx) 的 async API。
+// 不再需要直接 import 'fs'。
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
@@ -437,10 +438,10 @@ function looksLikeShiftJIS(buffer: Buffer): boolean {
 
 /**
  * 使用检测到的编码读取文件内容
- * K8c：接收 pf 参数走 platform.fs.readBinaryFileSync
+ * K8e：异步化，走 platformFs.readBinaryFile()
  */
-function readFileWithEncoding(pf: import('./platformFs.js').ToolFs, filePath: string, encoding: string): string {
-	const data = pf.readBinaryFileSync(filePath);
+async function readFileWithEncoding(pf: import('./platformFs.js').ToolFs, filePath: string, encoding: string): Promise<string> {
+	const data = await pf.readBinaryFile(filePath);
 	const buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 
 	// Node.js 内置支持的编码
@@ -573,15 +574,16 @@ export async function readFileTool(
 			: path.resolve(ctx.workspacePath, filePath);
 
 		// 检查文件是否存在
-		if (!pf.existsSync(absolutePath)) {
+		if (!(await pf.exists(absolutePath))) {
 			const basename = path.basename(absolutePath);
 			// "Did you mean?" 模糊匹配（参考 OpenCode read.ts）
 			const parentDir = path.dirname(absolutePath);
-			const parentExists = pf.existsSync(parentDir);
+			const parentExists = await pf.exists(parentDir);
 			const targetName = basename.toLowerCase();
 			if (parentExists) {
 				try {
-					const dirContents = pf.readdirSync(parentDir) as string[];
+					const dirEntries = await pf.listFiles(parentDir);
+					const dirContents = dirEntries.map((e) => e.name);
 					const minMatchLen = Math.max(3, Math.floor(targetName.length * 0.6));
 					const suggestions = dirContents
 						.filter(f => {
@@ -609,7 +611,7 @@ export async function readFileTool(
 		}
 
 		// 获取文件状态
-		const stat = pf.statSync(absolutePath);
+		const stat = await pf.stat(absolutePath);
 
 		if (stat.isDirectory) {
 			return `Error: Path is a directory, not a file: ${filePath}\n\n💡 Use list_files tool to list directory contents.`;
@@ -637,8 +639,8 @@ export async function readFileTool(
 				return `⚠️ 图片过大\n\nFile: ${filePath}\nSize: ${formatBytes(stat.size)}\n超过 10MB 上限，无法嵌入上下文。`;
 			}
 			try {
-				// K8c：走 platform.fs.readBinaryFileSync
-				const data = pf.readBinaryFileSync(absolutePath);
+				// K8e: 走 platformFs 的 async readBinaryFile
+				const data = await pf.readBinaryFile(absolutePath);
 				const b64 = Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
 				return `# 图片文件: ${path.basename(absolutePath)}\n\n- 路径: \`${filePath}\`\n- 尺寸: ${formatBytes(stat.size)}\n- 类型: ${IMAGE_EXTS[ext]}\n\n![${path.basename(absolutePath)}](data:${IMAGE_EXTS[ext]};base64,${b64})`;
 			} catch (e) {
@@ -658,9 +660,8 @@ export async function readFileTool(
 		}
 
 		// 读取文件头部进行二进制检测
-		// K8c：用 platform.fs.readBinaryFileSync 替代 openSync/readSync/closeSync 三连
-		// （后者在 Web 形态下完全不可用；并且 platformFs 已封装跨形态降级）
-		const fullBuf = pf.readBinaryFileSync(absolutePath);
+		// K8e: 用 platformFs.readBinaryFile (async) 替代 sync 二进制读
+		const fullBuf = await pf.readBinaryFile(absolutePath);
 		const headerLen = Math.min(fullBuf.length, READ_FILE_CONFIG.BINARY_CHECK_SIZE);
 		const headerBuffer = Buffer.from(fullBuf.buffer, fullBuf.byteOffset, headerLen);
 
@@ -683,7 +684,7 @@ export async function readFileTool(
 			if (ctx.sessionId) {
 				try {
 					const { FileTime } = await import('../file/FileTime.js');
-					FileTime.read(ctx.sessionId, absolutePath);
+					await FileTime.read(ctx.sessionId, absolutePath);
 				} catch { /* FileTime 可选，不阻塞读 */ }
 			}
 			return formatFileContent(filePath, cachedEntry.content, cachedEntry.lineCount,
@@ -697,7 +698,7 @@ export async function readFileTool(
 		console.log(`[ReadFileTool] 检测到编码: ${encoding} for ${filePath}`);
 
 		// 读取文件内容
-		const content = readFileWithEncoding(pf, absolutePath, encoding);
+		const content = await readFileWithEncoding(pf, absolutePath, encoding);
 		const lines = content.split('\n');
 
 		// 更新缓存
@@ -720,7 +721,7 @@ export async function readFileTool(
 		if (ctx.sessionId) {
 			try {
 				const { FileTime } = await import('../file/FileTime.js');
-				FileTime.read(ctx.sessionId, absolutePath);
+				await FileTime.read(ctx.sessionId, absolutePath);
 			} catch { /* FileTime 可选，不阻塞读 */ }
 		}
 

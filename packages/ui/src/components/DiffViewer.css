@@ -1,0 +1,130 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   DiffViewer — K10f 抽离自 desktop styles.css（Unified + Split 视图）
+═══════════════════════════════════════════════════════════════════════════ */
+
+.diff-no-change {
+	padding: 24px;
+	text-align: center;
+	color: var(--text-faint);
+	font-size: 13px;
+}
+
+.diff-table {
+	font-family: var(--font-mono, 'SF Mono', 'Menlo', monospace);
+	font-size: 12px;
+}
+
+.diff-legend {
+	display: flex;
+	gap: 16px;
+	padding: 6px 14px;
+	background: var(--bg-subtle);
+	border-bottom: 1px solid var(--border);
+	font-size: 11px;
+}
+
+.diff-legend-del {
+	color: #f87171;
+}
+
+.diff-legend-add {
+	color: #4ade80;
+}
+
+.diff-lines {
+	display: flex;
+	flex-direction: column;
+}
+
+.diff-line {
+	display: flex;
+	align-items: baseline;
+	gap: 0;
+	line-height: 1.5;
+	min-height: 20px;
+}
+
+.diff-line-del {
+	background: rgba(239, 68, 68, 0.12);
+}
+
+.diff-line-add {
+	background: rgba(34, 197, 94, 0.12);
+}
+
+.diff-line-ctx {
+	background: transparent;
+}
+
+.diff-sign {
+	flex-shrink: 0;
+	width: 22px;
+	text-align: center;
+	font-weight: 700;
+	user-select: none;
+	padding: 0 2px;
+}
+
+.diff-line-del .diff-sign {
+	color: #f87171;
+}
+
+.diff-line-add .diff-sign {
+	color: #4ade80;
+}
+
+.diff-line-ctx .diff-sign {
+	color: var(--text-faint);
+}
+
+.diff-ln {
+	flex-shrink: 0;
+	width: 40px;
+	text-align: right;
+	padding-right: 8px;
+	color: var(--text-faint);
+	user-select: none;
+	font-size: 10px;
+}
+
+.diff-text {
+	flex: 1;
+	padding: 1px 8px 1px 0;
+	white-space: pre-wrap;
+	word-break: break-all;
+	color: var(--text-base);
+	font-size: 12px;
+}
+
+.diff-line-del .diff-text {
+	color: #fca5a5;
+}
+
+.diff-line-add .diff-text {
+	color: #86efac;
+}
+
+/* Split 视图 */
+.diff-split {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 0;
+	border-top: 1px solid var(--border);
+}
+
+.diff-split-col {
+	display: flex;
+	flex-direction: column;
+	overflow-x: auto;
+	border-right: 1px solid var(--border);
+}
+
+.diff-split-col:last-child {
+	border-right: none;
+}
+
+.diff-line-empty {
+	min-height: 20px;
+	background: var(--bg-subtle);
+	opacity: 0.4;
+}

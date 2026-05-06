@@ -6,7 +6,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { spawn } from 'node:child_process';
-import * as path from 'node:path';
+import * as path from 'path';
 import * as fs from 'node:fs';   // 仅 findRgPath 系统二进制探测仍走 fs（与平台抽象无关）
 import type { IToolContext } from './IToolContext.js';
 import { platformFs } from './platformFs.js';
@@ -64,9 +64,9 @@ export async function grepTool(
 		? (path.isAbsolute(params.path) ? params.path : path.resolve(ctx.workspacePath, params.path))
 		: ctx.workspacePath;
 
-	// 路径越界检查（工作区外需谨慎）
+	// 路径越界检查（工作区外需谨慎；K8e: async exists）
 	const abs = path.resolve(searchPath);
-	if (!abs.startsWith(path.resolve(ctx.workspacePath)) && !pf.existsSync(abs)) {
+	if (!abs.startsWith(path.resolve(ctx.workspacePath)) && !(await pf.exists(abs))) {
 		return { matches: 0, output: `Error: path not found: ${params.path}`, truncated: false };
 	}
 

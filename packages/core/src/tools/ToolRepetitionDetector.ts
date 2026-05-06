@@ -9,7 +9,7 @@
 
 import { ToolUse } from '../types/toolTypes.js';
 import { t } from '../i18n/index.js';
-import * as path from 'node:path';
+import * as path from 'path';
 
 /**
  * P2优化：工具调用历史条目

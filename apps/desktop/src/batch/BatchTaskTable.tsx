@@ -3,7 +3,7 @@
  *
  *  功能：
  *  - 状态颜色 + 图标
- *  - 拖拽排序（HTML5 native drag）：仅 queued + 草稿 / 跑中 batch 的 queued 行可拖
+ *  - 拖拽排序（HTML5 native drag）：仅 queued + 草稿 / 执行中 batch 的 queued 行可拖
  *  - 行内 on_failure 下拉
  *  - 失败行展开 [重试][跳过][暂停整批]
  *--------------------------------------------------------------------------------------------*/
@@ -13,11 +13,13 @@ import type { Component } from 'solid-js'
 import type { MaxianClient, TaskBatch, BatchTask, TaskStatus, OnFailureStrategy, Workspace } from '@maxian/sdk'
 
 interface Props {
-	client:         MaxianClient
-	batch:          TaskBatch
-	tasks:          BatchTask[]
-	workspaces:     Workspace[]
-	onTasksUpdated: (tasks: BatchTask[]) => void
+	client:           MaxianClient
+	batch:            TaskBatch
+	tasks:            BatchTask[]
+	workspaces:       Workspace[]
+	onTasksUpdated:   (tasks: BatchTask[]) => void
+	/** 跳到该任务对应的会话（chat / code 视图）实时看日志 */
+	onJumpToSession?: (sessionId: string, workspaceId: string) => void
 }
 
 const STATUS_ICONS: Record<TaskStatus, string> = {
@@ -31,7 +33,7 @@ const STATUS_ICONS: Record<TaskStatus, string> = {
 }
 const STATUS_LABELS: Record<TaskStatus, string> = {
 	queued:    '等待',
-	running:   '跑中',
+	running:   '执行中',
 	completed: '完成',
 	failed:    '失败',
 	skipped:   '跳过',
@@ -178,7 +180,26 @@ export const BatchTaskTable: Component<Props> = (props) => {
 									{wsName(task.workspaceId)}
 								</span>
 								<span class="col-title">
-									<span class="task-title-text" title={task.title}>{task.title}</span>
+									<Show when={props.batch.status === 'draft' && task.status === 'queued'}
+										fallback={<span class="task-title-text" title={task.title}>{task.title}</span>}
+									>
+										<input
+											class="task-title-edit"
+											value={task.title}
+											placeholder="任务标题"
+											onChange={async (e) => {
+												const newTitle = e.currentTarget.value.trim()
+												if (!newTitle || newTitle === task.title) return
+												try {
+													const res = await props.client.updateBatchTask(props.batch.id, task.id, { title: newTitle })
+													props.onTasksUpdated(props.tasks.map(t => t.id === task.id ? res.task : t))
+												} catch (err) {
+													console.error('[BatchTaskTable] update title 失败:', err)
+													e.currentTarget.value = task.title
+												}
+											}}
+										/>
+									</Show>
 									<Show when={task.status === 'failed' && task.failureReason}>
 										<div class="task-failure-reason" title={task.failureReason}>
 											↳ {task.failureReason!.slice(0, 60)}{task.failureReason!.length > 60 ? '...' : ''}
@@ -213,11 +234,12 @@ export const BatchTaskTable: Component<Props> = (props) => {
 									<Show when={task.status === 'stuck'}>
 										<button class="btn-mini" onClick={() => void onRetryTask(task)}>重试</button>
 									</Show>
-									<Show when={task.sessionId && (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled')}>
-										<button class="btn-mini btn-mini-ghost" onClick={() => {
-											// 跳到 session（外部 handler 注入：todo 集成 router）
-											console.log('[BatchTaskTable] 跳到 session:', task.sessionId)
-										}}>📝 看日志</button>
+									<Show when={task.sessionId}>
+										<button
+											class="btn-mini btn-mini-ghost"
+											title="跳转到该任务的会话视图，看完整 AI 对话和工具调用日志"
+											onClick={() => props.onJumpToSession?.(task.sessionId!, task.workspaceId)}
+										>📝 看日志</button>
 									</Show>
 								</span>
 							</div>

@@ -1,0 +1,157 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   TerminalPanel — K10b 抽离自 desktop styles.css
+   xterm.js 主题、变量（--terminal-bg / --bg-subtle / --border 等）依赖宿主提供。
+═══════════════════════════════════════════════════════════════════════════ */
+
+.terminal-panel {
+	flex-shrink: 0;
+	height: 280px;
+	background: var(--terminal-bg, #111111);
+	border-top: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	position: relative;
+	transition: height 200ms ease;
+}
+
+.terminal-panel.collapsed {
+	height: 36px;
+}
+
+.terminal-panel-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0 10px;
+	height: 34px;
+	flex-shrink: 0;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-subtle);
+}
+
+.terminal-tabs {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex: 1;
+	overflow: hidden;
+}
+
+.terminal-tab {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 3px 9px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 11.5px;
+	font-family: var(--font-sans);
+	color: var(--text-faint);
+	white-space: nowrap;
+	border: 1px solid transparent;
+	transition: background 80ms, color 80ms;
+}
+
+.terminal-tab.active {
+	background: var(--bg-hover);
+	color: var(--text-base);
+	border-color: var(--border);
+}
+
+.terminal-tab:hover:not(.active) {
+	background: var(--bg-muted);
+	color: var(--text-subtle);
+}
+
+.terminal-tab-close {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 13px;
+	height: 13px;
+	border-radius: 3px;
+	font-size: 10px;
+	color: var(--text-faint);
+	transition: background 80ms, color 80ms;
+	margin-left: 2px;
+}
+
+.terminal-tab-close:hover {
+	background: rgba(239, 68, 68, 0.3);
+	color: #fca5a5;
+}
+
+.terminal-panel-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+}
+
+.terminal-panel-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	border-radius: 4px;
+	color: var(--text-faint);
+	cursor: pointer;
+	transition: background 80ms, color 80ms;
+	border: none;
+	background: transparent;
+	font-size: 13px;
+}
+
+.terminal-panel-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-base);
+}
+
+.terminal-body {
+	flex: 1;
+	overflow: hidden;
+	position: relative;
+	background: var(--terminal-bg, #111111);
+	/* 给 xterm 一圈内边距，避免文字贴边 */
+	padding: 6px 10px 4px;
+}
+
+.terminal-xterm {
+	width: 100%;
+	height: 100%;
+}
+
+/* xterm.js overrides — 让 xterm 自身的 padding=0，统一由 .terminal-body 给 padding，
+   不然内外双重 padding 会让首列字符离边框 12px+，浪费横向空间。 */
+.terminal-body .xterm {
+	height: 100%;
+	padding: 0;
+}
+
+.terminal-body .xterm-viewport {
+	background: transparent !important;
+}
+
+/* xterm 行渲染微调：消除 div 行的隐式 line-height 漂移，
+   确保 powerline 背景色块在相邻字符之间无缝拼接（agnoster/Powerlevel10k 视觉关键）。 */
+.terminal-body .xterm-rows > div {
+	line-height: inherit !important;
+}
+
+/* Resize handle */
+.terminal-resize-handle {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 4px;
+	cursor: ns-resize;
+	z-index: 51;
+	background: transparent;
+	transition: background 150ms;
+}
+
+.terminal-resize-handle:hover {
+	background: var(--accent);
+	opacity: 0.4;
+}

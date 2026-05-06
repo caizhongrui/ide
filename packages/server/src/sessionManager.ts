@@ -7,8 +7,14 @@
 
 import { randomUUID } from 'node:crypto';
 import type { MaxianEvent } from '@maxian/core';
+import { McpHub, type McpServerConfig, type McpServerInfo } from '@maxian/core/mcp';
+import type { IMemoryStore } from '@maxian/core/memory';
 import type { SessionSummary } from './types.js';
 import { getDb } from './database.js';
+import { SubagentManager } from './subagentManager.js';
+import { SqliteMemoryStore } from './sqliteMemoryStore.js';
+import { SqliteCodebaseIndex } from './sqliteCodebaseIndex.js';
+import type { ICodebaseIndex } from '@maxian/core/codebase-index';
 
 export interface CreateSessionOptions {
 	title?: string;
@@ -121,6 +127,34 @@ interface SessionRuntime {
 
 export class SessionManager {
 	private runtimes = new Map<string, SessionRuntime>();
+	/** B2: 全局 MCP Hub，所有会话共享一个连接池 + 工具索引 */
+	private readonly _mcpHub: McpHub = new McpHub();
+	/** B1: 全局 Sub-agent Manager（task() 工具的统一登记/查询/取消入口） */
+	private readonly _subagentManager: SubagentManager = new SubagentManager({ maxConcurrentBackground: 8 });
+	/** B3: 跨会话记忆 Store（save_memory/recall_memory + 自动召回注入 system prompt） */
+	private readonly _memoryStore: IMemoryStore = new SqliteMemoryStore();
+	/** B4: 代码库索引（codebase_search + 进项目自动注入架构） */
+	private readonly _codebaseIndex: ICodebaseIndex = new SqliteCodebaseIndex();
+
+	/** 暴露 mcpHub 给 cli.ts agent 主循环（注入 ToolExecutionContext） */
+	get mcpHub(): McpHub {
+		return this._mcpHub;
+	}
+
+	/** 暴露 subagentManager 给 cli.ts task 工具调度层 */
+	get subagentManager(): SubagentManager {
+		return this._subagentManager;
+	}
+
+	/** B3: 暴露 memoryStore 给 cli.ts agent 主循环 + 自动捕获/召回逻辑 */
+	get memoryStore(): IMemoryStore {
+		return this._memoryStore;
+	}
+
+	/** B4: 暴露 codebaseIndex 给 cli.ts + HTTP routes */
+	get codebaseIndex(): ICodebaseIndex {
+		return this._codebaseIndex;
+	}
 
 	// ─── 初始化 ─────────────────────────────────────────────────────────────
 
@@ -137,7 +171,119 @@ export class SessionManager {
 
 		const count = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as { c: number }).c;
 		console.log(`[Database] 已加载 ${count} 个会话`);
+
+		// B2: 启动时加载持久化的 MCP 服务器配置 + 全部连接（fire-and-forget，失败不阻塞启动）
+		void mgr.loadAndConnectMcpServers().catch(err => {
+			console.warn('[SessionManager] 加载 MCP 服务器配置失败:', err);
+		});
+
 		return mgr;
+	}
+
+	// ─── B2: MCP 服务器配置 (持久化 + 加载) ────────────────────────────────────
+
+	/**
+	 * 列出所有持久化的 MCP 服务器配置（不论是否连接）。
+	 */
+	listMcpConfigs(): McpServerConfig[] {
+		const db = getDb();
+		const rows = db.prepare(
+			'SELECT name, url, headers, enabled, description FROM mcp_servers'
+		).all() as Array<{ name: string; url: string; headers: string | null; enabled: number; description: string | null }>;
+		return rows.map(r => ({
+			name:        r.name,
+			url:         r.url,
+			headers:     r.headers ? (() => { try { return JSON.parse(r.headers!); } catch { return undefined; } })() : undefined,
+			enabled:     !!r.enabled,
+			description: r.description ?? undefined,
+		}));
+	}
+
+	/**
+	 * 全量替换 MCP 服务器配置（桌面端 settings 保存时的语义）。
+	 * - 老库存的 server 不在新列表里 → 断开 + 删除
+	 * - 新列表的 server 在老库 → 更新（如 url/headers 变了，重连）
+	 * - 新列表的 server 不在老库 → 新增 + 连接（如 enabled）
+	 */
+	async replaceMcpConfigs(configs: McpServerConfig[]): Promise<{
+		added:    string[];
+		updated:  string[];
+		removed:  string[];
+		servers:  McpServerInfo[];
+	}> {
+		const db = getDb();
+		const oldRows = db.prepare('SELECT name FROM mcp_servers').all() as Array<{ name: string }>;
+		const oldNames = new Set(oldRows.map(r => r.name));
+		const newNames = new Set(configs.map(c => c.name));
+
+		const added:   string[] = [];
+		const updated: string[] = [];
+		const removed: string[] = [];
+
+		// 位置参数（bun:sqlite 的 @name 命名参数在某些情况下绑定丢失，统一改用 ?）
+		const upsert = db.prepare(
+			`INSERT INTO mcp_servers (name, url, headers, enabled, description, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(name) DO UPDATE SET
+				url=excluded.url,
+				headers=excluded.headers,
+				enabled=excluded.enabled,
+				description=excluded.description,
+				updated_at=excluded.updated_at`
+		);
+		const del = db.prepare('DELETE FROM mcp_servers WHERE name = ?');
+		const now = Date.now();
+
+		// 写入新配置
+		for (const c of configs) {
+			upsert.run(
+				c.name,
+				c.url,
+				c.headers ? JSON.stringify(c.headers) : null,
+				c.enabled ? 1 : 0,
+				c.description ?? null,
+				now,
+			);
+			if (oldNames.has(c.name)) updated.push(c.name);
+			else added.push(c.name);
+		}
+		// 删除老库里被移除的
+		for (const oldName of oldNames) {
+			if (!newNames.has(oldName)) {
+				del.run(oldName);
+				removed.push(oldName);
+				this._mcpHub.disconnectServer(oldName);
+			}
+		}
+
+		// 重连：先全部断（强制清缓存），再按 enabled 配置重连
+		for (const c of configs) {
+			this._mcpHub.disconnectServer(c.name);
+		}
+		await this._mcpHub.loadConfigs(configs);
+
+		return {
+			added,
+			updated,
+			removed,
+			servers: this._mcpHub.getAllServers(),
+		};
+	}
+
+	/**
+	 * 启动时从 sqlite 加载持久化配置 + 一次性 batch 连接所有 enabled 的 server。
+	 */
+	async loadAndConnectMcpServers(): Promise<void> {
+		const configs = this.listMcpConfigs();
+		if (configs.length === 0) {
+			return;
+		}
+		const enabled = configs.filter(c => c.enabled);
+		console.log(`[SessionManager] 加载 MCP 配置：${configs.length} 个（启用 ${enabled.length} 个）`);
+		await this._mcpHub.loadConfigs(configs);
+		const connected = this._mcpHub.getAllServers().filter(s => s.isConnected).length;
+		const indexSize = this._mcpHub.toolIndex.size();
+		console.log(`[SessionManager] MCP 连接完成：${connected}/${enabled.length} 个，索引 ${indexSize} 个工具`);
 	}
 
 	// ─── 运行时辅助 ─────────────────────────────────────────────────────────
@@ -277,7 +423,12 @@ export class SessionManager {
 	async emitEvent(id: string, event: MaxianEvent): Promise<void> {
 		const rt = this.getRuntime(id);
 		if (!rt) return;
-		for (const handler of rt.subscribers) {
+		// ⚠️ 关键：在迭代开始前 snapshot 订阅列表。
+		// 直接 for...of rt.subscribers 会让"迭代期间新加进来的订阅"也收到本事件——
+		// 在批量任务的同 session 共享场景下会导致 Task1 的 task_status:completed 事件
+		// 泄漏给刚刚 subscribe 的 Task2 runUntilDone，使 Task2 在 1ms 内被误判完成。
+		const handlers = Array.from(rt.subscribers);
+		for (const handler of handlers) {
 			try { await handler(event); } catch (err) {
 				console.error('[SessionManager] subscriber error:', err);
 			}
@@ -633,8 +784,9 @@ export class SessionManager {
 			'INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)'
 		).run(messageId, id, 'user', opts.content, now);
 
-		// 触发处理器
-		for (const handler of this.onSendMessageHandlers) {
+		// 触发处理器（snapshot 防迭代期间新增 handler 也被本次调用，与 emitEvent 同样动机）
+		const sendHandlers = Array.from(this.onSendMessageHandlers);
+		for (const handler of sendHandlers) {
 			try { await handler(id, messageId, opts); } catch (err) {
 				console.error('[SessionManager] sendMessage handler error:', err);
 			}
@@ -774,7 +926,9 @@ export class SessionManager {
 			console.warn('[SessionManager] emit task_aborted 失败:', err);
 		}
 
-		for (const handler of this.onCancelHandlers) {
+		// snapshot 同上
+		const cancelHandlers = Array.from(this.onCancelHandlers);
+		for (const handler of cancelHandlers) {
 			try { await handler(id); } catch (err) {
 				console.error('[SessionManager] cancel handler error:', err);
 			}

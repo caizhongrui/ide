@@ -22,6 +22,8 @@ use std::time::Duration;
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, RunEvent, WindowEvent};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+mod terminal;
+
 struct ServerHandle(Mutex<Option<CommandChild>>);
 struct ServerPid(Mutex<Option<u32>>);   // 备份 pid，即使 CommandChild 被 take 走也能最后一击
 
@@ -148,6 +150,43 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
     // sidecar 给 init 接管成为僵尸的问题
     let parent_pid = std::process::id().to_string();
 
+    // B5: 计算 maxian-deps 目录绝对路径（dev / release 都覆盖）
+    // dev：current_exe = <repo>/apps/desktop/src-tauri/target/debug/maxian-desktop
+    //      maxian-deps 在 <repo>/apps/desktop/src-tauri/bin/maxian-deps
+    //      → exe.parent().parent().parent() = src-tauri/，然后 join bin/maxian-deps
+    // release：current_exe = .../Contents/MacOS/maxian Dev
+    //      sidecar 同级 maxian-deps：.../Contents/MacOS/maxian-deps
+    let pty_deps_path = {
+        let mut found: Option<std::path::PathBuf> = None;
+        if let Ok(exe) = std::env::current_exe() {
+            // 收集候选锚点目录，逐层向上 5 级，每层尝试 ./maxian-deps、bin/maxian-deps、
+            // src-tauri/bin/maxian-deps、apps/desktop/src-tauri/bin/maxian-deps
+            let mut probe = exe.clone();
+            for _ in 0..6 {
+                for tail in [
+                    "maxian-deps",
+                    "bin/maxian-deps",
+                    "src-tauri/bin/maxian-deps",
+                    "apps/desktop/src-tauri/bin/maxian-deps",
+                ] {
+                    let cand = probe.join(tail);
+                    if cand.join("package.json").exists() {
+                        found = Some(cand);
+                        break;
+                    }
+                }
+                if found.is_some() { break; }
+                if let Some(parent) = probe.parent() {
+                    probe = parent.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+        }
+        found.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+    };
+    println!("[maxian-desktop] MAXIAN_PTY_DEPS={}", if pty_deps_path.is_empty() { "(未找到)" } else { &pty_deps_path });
+
     let sidecar = app
         .shell()
         .sidecar("maxian-server")
@@ -161,6 +200,7 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         ])
         .env("MAXIAN_PARENT_PID", &parent_pid)
         .env("MAXIAN_KILL_ON_PARENT_DEATH", "1")
+        .env("MAXIAN_PTY_DEPS", &pty_deps_path)
         // sidecar 内存上限：默认 2GB（agent + SQLite + bundles 够用）。
         // BUN_GC_HEAP_GROWTH_RATIO 限制 GC 堆增长率，避免无节制扩张。
         // NODE_MAX_OLD_SPACE_SIZE 是 Node 风格变量，Bun 部分场景兼容。
@@ -290,7 +330,15 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(ServerHandle(Mutex::new(None)))
         .manage(ServerPid(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![server_info, process_stats])
+        .manage(terminal::TerminalRegistry::default())
+        .invoke_handler(tauri::generate_handler![
+            server_info,
+            process_stats,
+            terminal::terminal_create,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
             match spawn_server(&handle) {

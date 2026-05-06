@@ -3,12 +3,14 @@
  *
  *  对标 OpenCode `packages/opencode/src/tool/ls.ts`
  *  目录列表（含文件类型/大小/修改时间），比 list_files 更细。
+ *
+ *  K8e: 已异步化（platformFs async API）。core 不再依赖 node:fs sync 调用。
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';   // 仅用作 fs.Stats / fs.Dirent 类型，运行时调用走 platformFs(ctx)
-import * as path from 'node:path';
+import * as path from 'path';
 import type { IToolContext } from './IToolContext.js';
 import { platformFs, type ToolFs } from './platformFs.js';
+import type { FileEntry } from '../interfaces/IFileSystem.js';
 
 export interface ILsToolParams {
 	/** 目标目录（相对或绝对，默认 "."） */
@@ -33,20 +35,27 @@ export interface ILsToolResult {
 	error?:  string;
 }
 
-function listDir(pf: ToolFs, root: string, rel: string, showHidden: boolean, recursive: boolean, depth: number, out: ILsEntry[]): void {
+async function listDir(
+	pf: ToolFs,
+	root: string,
+	rel: string,
+	showHidden: boolean,
+	recursive: boolean,
+	depth: number,
+	out: ILsEntry[]
+): Promise<void> {
 	if (depth > 5 || out.length > 1000) return;
-	let entries: fs.Dirent[];
+	let entries: FileEntry[];
 	try {
-		// platform.fs.readdirSync 接口未必返回 Dirent[]，但 NodeFs fallback 确实返回 Dirent[]
-		entries = pf.readdirSync(path.join(root, rel), { withFileTypes: true }) as fs.Dirent[];
+		entries = await pf.listFiles(path.join(root, rel));
 	} catch { return; }
 
 	for (const entry of entries) {
 		if (!showHidden && entry.name.startsWith('.')) continue;
 		const full = path.join(root, rel, entry.name);
-		// K8c：lstatSync 已加入 ToolFs，正确不解符号链接
+		// 用 lstat 不解符号链接，正确识别 symlink
 		let st;
-		try { st = pf.lstatSync(full); } catch { continue; }
+		try { st = await pf.lstat(full); } catch { continue; }
 
 		const item: ILsEntry = {
 			name:  entry.name,
@@ -57,8 +66,8 @@ function listDir(pf: ToolFs, root: string, rel: string, showHidden: boolean, rec
 		};
 		out.push(item);
 
-		if (recursive && entry.isDirectory() && !entry.name.startsWith('.')) {
-			listDir(pf, root, path.join(rel, entry.name), showHidden, recursive, depth + 1, out);
+		if (recursive && entry.isDirectory && !entry.name.startsWith('.')) {
+			await listDir(pf, root, path.join(rel, entry.name), showHidden, recursive, depth + 1, out);
 		}
 	}
 }
@@ -71,12 +80,12 @@ export async function lsTool(
 	const relPath = params.path ?? '.';
 	const absPath = path.isAbsolute(relPath) ? relPath : path.resolve(ctx.workspacePath, relPath);
 
-	if (!pf.existsSync(absPath)) {
+	if (!(await pf.exists(absPath))) {
 		return { dir: absPath, entries: [], error: `路径不存在: ${absPath}` };
 	}
 
 	let st;
-	try { st = pf.statSync(absPath); } catch (e) {
+	try { st = await pf.stat(absPath); } catch (e) {
 		return { dir: absPath, entries: [], error: (e as Error).message };
 	}
 	if (!st.isDirectory) {
@@ -84,7 +93,7 @@ export async function lsTool(
 	}
 
 	const entries: ILsEntry[] = [];
-	listDir(pf, absPath, '', params.showHidden ?? false, params.recursive ?? false, 0, entries);
+	await listDir(pf, absPath, '', params.showHidden ?? false, params.recursive ?? false, 0, entries);
 
 	// 目录优先 + 字母序
 	entries.sort((a, b) => {

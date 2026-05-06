@@ -15,10 +15,11 @@
  */
 
 import * as path from 'path';
-import * as fs from 'fs';   // 仅 fs.Dirent 类型 + realpathSync（platform 抽象未覆盖）
+// K8e: 已异步化，全部 fs 调用走 platformFs(ctx) 的 async API。
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
+import type { FileEntry as PlatformFileEntry } from '../interfaces/IFileSystem.js';
 import { platformFs, type ToolFs } from './platformFs.js';
 import { DIRS_TO_IGNORE } from '../utils/noiseFilter.js';
 import { getPathSuggestions } from '../utils/pathSuggestions.js';
@@ -170,9 +171,9 @@ function parseGitignore(content: string): IgnoreRule[] {
 }
 
 /**
- * 获取目录的 ignore 规则
+ * 获取目录的 ignore 规则（K8e: 已异步化，pf 必传）
  */
-function getIgnoreRules(dirPath: string, pf?: ToolFs): IgnoreRule[] {
+async function getIgnoreRules(dirPath: string, pf: ToolFs): Promise<IgnoreRule[]> {
 	const gitignorePath = path.join(dirPath, '.gitignore');
 
 	// 检查缓存
@@ -184,10 +185,8 @@ function getIgnoreRules(dirPath: string, pf?: ToolFs): IgnoreRule[] {
 	let rules: IgnoreRule[] = [];
 
 	try {
-		// 优先 platformFs，未传时降级 fs（向后兼容）
-		const exists = pf ? pf.existsSync(gitignorePath) : fs.existsSync(gitignorePath);
-		if (exists) {
-			const content = pf ? pf.readFileSync(gitignorePath, 'utf-8') : fs.readFileSync(gitignorePath, 'utf-8');
+		if (await pf.exists(gitignorePath)) {
+			const content = await pf.readFile(gitignorePath, 'utf-8');
 			rules = parseGitignore(content);
 		}
 	} catch {
@@ -291,16 +290,16 @@ export async function listFilesTool(
 			? dirPath
 			: path.resolve(ctx.workspacePath, dirPath);
 
-		// 检查目录是否存在 — 不存在时给路径建议（T-1 平移自 IDE）
-		if (!pf.existsSync(absolutePath)) {
-			const suggestions = getPathSuggestions(pf, absolutePath);
+		// 检查目录是否存在 — 不存在时给路径建议（T-1 平移自 IDE；K8e: async）
+		if (!(await pf.exists(absolutePath))) {
+			const suggestions = await getPathSuggestions(pf, absolutePath);
 			if (suggestions.length > 0) {
 				return `错误: 目录不存在\n路径: ${absolutePath}\n\n你是否要找:\n${suggestions.map(s => `  - ${s}`).join('\n')}`;
 			}
 			return `错误: 目录不存在\n路径: ${absolutePath}`;
 		}
 
-		const stat = pf.statSync(absolutePath);
+		const stat = await pf.stat(absolutePath);
 		if (!stat.isDirectory) {
 			return `错误: 路径不是目录: ${dirPath}\n\n💡 请使用 read_file 工具读取文件内容。`;
 		}
@@ -400,8 +399,13 @@ async function listDirAsync(
 
 	const fullPath = relativePath ? path.join(basePath, relativePath) : basePath;
 
-	// 防止循环引用（符号链接）
-	const realPath = pf.realpathSync(fullPath);
+	// 防止循环引用（符号链接）（K8e: async）
+	let realPath: string;
+	try {
+		realPath = await pf.realpath(fullPath);
+	} catch {
+		realPath = fullPath;   // realpath 失败时降级用原路径，避免阻塞遍历
+	}
 	if (visited.has(realPath)) {
 		return;
 	}
@@ -417,13 +421,24 @@ async function listDirAsync(
 	} else {
 		cacheMisses++;
 
-		// 使用并发限制读取目录
+		// 使用并发限制读取目录（K8e: async; size 也从 sync getFileSize 改成 async）
 		entries = await limiter.run(async () => {
-			const dirents = pf.readdirSync(fullPath, { withFileTypes: true }) as fs.Dirent[];
-			return dirents.map(dirent => ({
-				name: dirent.name,
-				isDirectory: dirent.isDirectory(),
-				size: dirent.isFile() ? getFileSize(pf, path.join(fullPath, dirent.name)) : undefined,
+			const dirents: PlatformFileEntry[] = await pf.listFiles(fullPath);
+			// size 需要单独 stat 拿，async + 并发取
+			const sizePromises = dirents.map(async (d) => {
+				if (d.isDirectory || d.isSymbolicLink) return undefined;
+				try {
+					const s = await pf.stat(path.join(fullPath, d.name));
+					return s.size;
+				} catch {
+					return undefined;
+				}
+			});
+			const sizes = await Promise.all(sizePromises);
+			return dirents.map((d, i) => ({
+				name: d.name,
+				isDirectory: d.isDirectory,
+				size: sizes[i],
 			}));
 		});
 
@@ -434,8 +449,8 @@ async function listDirAsync(
 		});
 	}
 
-	// 获取 ignore 规则
-	const ignoreRules = getIgnoreRules(basePath, pf);
+	// 获取 ignore 规则（K8e: async）
+	const ignoreRules = await getIgnoreRules(basePath, pf);
 
 	// 处理目录项
 	const subDirs: string[] = [];
@@ -487,17 +502,7 @@ async function listDirAsync(
 	}
 }
 
-/**
- * 获取文件大小（带错误处理）
- */
-function getFileSize(pf: ToolFs, filePath: string): number | undefined {
-	try {
-		const stat = pf.statSync(filePath);
-		return stat.size;
-	} catch {
-		return undefined;
-	}
-}
+// getFileSize 已经被 listDirAsync 内联（async + Promise.all 并发），不再需要独立函数。
 
 /**
  * 格式化字节大小

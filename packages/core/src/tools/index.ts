@@ -66,6 +66,15 @@ export * from './searchFilesViaService.js';   // T-1 新版：走 ISearchService
 export * from './listFilesTool.js';
 export * from './executeCommandTool.js';
 
+// B2: MCP Tool Search 元工具（懒加载 + 完整生命周期）
+export {
+	MCP_TOOL_SEARCH,
+	MCP_TOOL_LOAD,
+	MCP_TOOL_UNLOAD,
+	registerMcpMetaTools,
+	type McpAwareToolContext,
+} from './mcpToolSearch.js';
+
 // batchTool 仅暴露类型（描述走 batchToolDescription）
 export type { IBatchToolParams, IBatchToolResult, IBatchToolExecutor } from './batchTool.js';
 

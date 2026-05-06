@@ -42,14 +42,16 @@ async function getOutputDir(): Promise<string | null> {
 	if (outputDir) { return outputDir; }
 
 	try {
-		// 动态导入 fs/os（仅在 Node 环境执行）
+		// K8e: 动态导入 fs.promises 异步版本
 		const os = await import('os');
 		const fsPath = await import('path');
-		const fs = await import('fs');
+		const fsp = await import('fs/promises');
 
 		const dir = fsPath.join(os.homedir(), '.maxian', 'tool-outputs');
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true });
+		try {
+			await fsp.mkdir(dir, { recursive: true });
+		} catch {
+			// 已存在或其他错误，让后续 writeFile 自己处理
 		}
 		outputDir = dir;
 		return dir;
@@ -92,9 +94,9 @@ async function saveFullOutput(content: string, id: string): Promise<string | und
 
 	try {
 		const fsPath = await import('path');
-		const fs = await import('fs');
+		const fsp = await import('fs/promises');
 		const filePath = fsPath.join(dir, `${id}.txt`);
-		fs.writeFileSync(filePath, content, 'utf-8');
+		await fsp.writeFile(filePath, content, 'utf-8');
 		return filePath;
 	} catch {
 		return undefined;
@@ -252,19 +254,19 @@ export async function cleanupOldOutputFiles(): Promise<void> {
 	if (!dir) { return; }
 
 	try {
-		const fs = await import('fs');
+		const fsp = await import('fs/promises');
 		const fsPath = await import('path');
 
-		const files = fs.readdirSync(dir);
+		const files = await fsp.readdir(dir);
 		const cutoffTime = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 		for (const file of files) {
 			if (!file.endsWith('.txt')) { continue; }
 			const filePath = fsPath.join(dir, file);
 			try {
-				const stat = fs.statSync(filePath);
+				const stat = await fsp.stat(filePath);
 				if (stat.mtimeMs < cutoffTime) {
-					fs.unlinkSync(filePath);
+					await fsp.unlink(filePath);
 				}
 			} catch {
 				// 忽略单个文件清理失败

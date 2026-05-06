@@ -13,74 +13,24 @@
  * - 智能输出截断（保留首尾关键信息）
  * - 超时控制与进程管理
  * - 常见命令优化（npm、yarn、git 等）
+ *
+ * K8d: 已迁移到 ctx.platform.terminal（NodeTerminal 实现）。
+ * 本文件不再 `import 'child_process'`；shell 选择 / spawn / 取消 / 输出截断都在 NodeTerminal 内部。
+ * Windows 错误识别 + 命令建议 + 输出格式化逻辑保留在本文件。
  */
 
 import * as path from 'path';
-import * as fs from 'fs';
-import { spawn, ChildProcess } from 'child_process';
+
+/** 跨形态 UUID 生成：浏览器 / Node 18+ / Bun 都暴露 globalThis.crypto.randomUUID */
+function uuid(): string {
+	const c = (globalThis as any).crypto;
+	if (c?.randomUUID) return c.uuid();
+	const r = () => Math.random().toString(16).slice(2, 14).padEnd(12, '0');
+	return `${r()}-${r().slice(0,4)}-4${r().slice(0,3)}-a${r().slice(0,3)}-${r().slice(0,12)}`;
+}
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
-
-/**
- * Windows 下挑选合适的 shell（Git Bash → PowerShell → null 让 spawn 用 cmd 兜底）
- * 目的：AI 生成的 Unix 命令（ls/grep/cat/&& 链式）在 cmd.exe 下会"不识别"。
- */
-function pickWindowsShell(): { shell: string; prefixArgs: string[] } | null {
-	if (process.platform !== 'win32') return null;
-	const candidates = [
-		'C:\\Program Files\\Git\\bin\\bash.exe',
-		'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
-		'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-	];
-	for (const p of candidates) {
-		try { if (fs.existsSync(p)) return { shell: p, prefixArgs: ['-lc'] }; } catch { /* ignore */ }
-	}
-	const pathEntries = (process.env.PATH ?? '').split(';');
-	for (const dir of pathEntries) {
-		try {
-			const bashPath = path.join(dir, 'bash.exe');
-			if (fs.existsSync(bashPath)) return { shell: bashPath, prefixArgs: ['-lc'] };
-		} catch { /* ignore */ }
-	}
-	const psCandidates = [
-		'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
-		process.env.SystemRoot ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe` : '',
-	].filter(Boolean);
-	for (const p of psCandidates) {
-		try { if (fs.existsSync(p)) return { shell: p, prefixArgs: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'] }; } catch { /* ignore */ }
-	}
-	return null;
-}
-
-// ========== ANSI 色码剥除 ==========
-/** 匹配 ANSI escape 序列（颜色/光标控制等） */
-const ANSI_RE = /\x1B(?:\[[0-?]*[ -/]*[@-~])|\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B[=>]/g;
-function stripAnsi(s: string): string {
-	if (!s) return s;
-	return s.replace(ANSI_RE, '');
-}
-
-// ========== 长时间进程检测（dev server / watcher / tail -f …）==========
-const DEV_SERVER_PATTERNS: RegExp[] = [
-	/\b(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|serve|watch|preview)\b/i,
-	/\bvite(\s|$)/i,
-	/\bnext\s+(dev|start)\b/i,
-	/\bwebpack(-dev-server)?\s+(serve|--serve)\b/i,
-	/\bnuxt\s+dev\b/i,
-	/\brollup\s+-w\b/i,
-	/\bnodemon\b/i,
-	/\btail\s+-f\b/i,
-	/\bpython[0-9]*\s+.*\b(runserver|manage\.py\s+runserver)\b/i,
-	/\bflask\s+run\b/i,
-	/\buvicorn\b/i,
-	/\bgunicorn\b/i,
-	/\bdocker\s+logs\s+-f\b/i,
-	/\bkubectl\s+logs\s+-f\b/i,
-];
-function isDevServerCommand(cmd: string): boolean {
-	return DEV_SERVER_PATTERNS.some(re => re.test(cmd));
-}
 
 // ========== 配置常量 ==========
 const EXECUTE_CONFIG = {
@@ -98,12 +48,6 @@ const EXECUTE_CONFIG = {
 
 	/** 输出截断时保留的首尾行数 */
 	SUMMARY_LINES_TO_KEEP: 100,
-
-	/** 输出缓冲刷新间隔（毫秒） */
-	BUFFER_FLUSH_INTERVAL: 300,
-
-	/** 大输出阈值（超过此值写入临时文件） */
-	LARGE_OUTPUT_THRESHOLD: 100000,
 
 	/** 危险命令模式 */
 	DANGEROUS_COMMANDS: [
@@ -130,67 +74,7 @@ const EXECUTE_CONFIG = {
 	],
 };
 
-// ========== 后台任务管理 ==========
-interface BackgroundTask {
-	process: ChildProcess;
-	command: string;
-	startTime: number;
-	output: string[];
-	exitCode: number | null;
-	completed: boolean;
-}
-
-const backgroundTasks = new Map<string, BackgroundTask>();
-
-/**
- * 生成任务 ID
- */
-function generateTaskId(): string {
-	return `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-/**
- * 获取后台任务状态
- */
-export function getBackgroundTaskStatus(taskId: string): BackgroundTask | undefined {
-	return backgroundTasks.get(taskId);
-}
-
-/**
- * 列出所有后台任务
- */
-export function listBackgroundTasks(): { id: string; command: string; running: boolean; duration: number }[] {
-	return Array.from(backgroundTasks.entries()).map(([id, task]) => ({
-		id,
-		command: task.command,
-		running: !task.completed,
-		duration: Date.now() - task.startTime,
-	}));
-}
-
-/**
- * 终止后台任务（Windows 下使用 taskkill）
- */
-export function killBackgroundTask(taskId: string): boolean {
-	const task = backgroundTasks.get(taskId);
-	if (task && !task.completed) {
-		if (IS_WINDOWS && task.process.pid) {
-			const { exec } = require('child_process');
-			exec(`taskkill /PID ${task.process.pid} /T /F`, () => { });
-		} else {
-			task.process.kill('SIGTERM');
-			setTimeout(() => {
-				if (!task.completed) {
-					task.process.kill('SIGKILL');
-				}
-			}, 5000);
-		}
-		return true;
-	}
-	return false;
-}
-
-// ========== 输出处理 ==========
+// ========== 输出缓冲 ==========
 
 /**
  * 输出缓冲器
@@ -226,24 +110,6 @@ class OutputBuffer {
 			truncated: this.truncated,
 			lineCount: this.lines.length,
 		};
-	}
-
-	getTruncatedOutput(keepLines: number): string {
-		if (this.lines.length <= keepLines * 2) {
-			return this.lines.join('\n');
-		}
-
-		const head = this.lines.slice(0, keepLines);
-		const tail = this.lines.slice(-keepLines);
-		const skipped = this.lines.length - keepLines * 2;
-
-		return [
-			...head,
-			'',
-			`... (${skipped} lines omitted) ...`,
-			'',
-			...tail,
-		].join('\n');
 	}
 }
 
@@ -328,14 +194,12 @@ const WINDOWS_FILE_NOT_FOUND_PATTERNS = [
 
 /**
  * 检测输出中是否包含 Windows 错误关键词（即使 exit code 为 0）
- * 某些 Windows 命令失败时仍返回 exit code 0，需要通过输出检测
  */
 function detectWindowsErrorInOutput(stdout: string, stderr: string): { hasError: boolean; errorType: string } {
 	if (!IS_WINDOWS) return { hasError: false, errorType: '' };
 
 	const combined = (stderr + '\n' + stdout).toLowerCase();
 
-	// Unix 命令在 Windows 上被误用（最常见场景）
 	const unixCommandsOnWindows = [
 		{ pattern: "'ls' is not recognized", msg: 'unix-command' },
 		{ pattern: "'cat' is not recognized", msg: 'unix-command' },
@@ -348,7 +212,6 @@ function detectWindowsErrorInOutput(stdout: string, stderr: string): { hasError:
 		{ pattern: "'cp' is not recognized", msg: 'unix-command' },
 		{ pattern: "'which' is not recognized", msg: 'unix-command' },
 		{ pattern: "'clear' is not recognized", msg: 'unix-command' },
-		// 中文系统
 		{ pattern: "'ls' 不是内部或外部命令", msg: 'unix-command' },
 		{ pattern: "'cat' 不是内部或外部命令", msg: 'unix-command' },
 		{ pattern: "'rm' 不是内部或外部命令", msg: 'unix-command' },
@@ -390,7 +253,6 @@ function getCommandSuggestions(command: string, error: string, stdout: string = 
 	const program = getCommandProgram(command);
 	const combined = error + '\n' + stdout;
 
-	// Windows：Unix 命令被误用
 	if (IS_WINDOWS) {
 		const unixToWindowsMap: Record<string, string> = {
 			'ls': 'dir 或 Get-ChildItem（PowerShell）',
@@ -412,7 +274,6 @@ function getCommandSuggestions(command: string, error: string, stdout: string = 
 			suggestions.push(`Windows 不支持 "${program}" 命令，请改用: ${unixToWindowsMap[program]}`);
 		}
 
-		// 检测常见 Windows 错误文本
 		if (
 			WINDOWS_COMMAND_NOT_FOUND_PATTERNS.some(p => combined.toLowerCase().includes(p.toLowerCase())) ||
 			combined.includes('not recognized')
@@ -481,6 +342,10 @@ export async function executeCommandTool(
 		return 'Error: No command provided';
 	}
 
+	if (!ctx.platform?.terminal) {
+		return 'Error: platform.terminal 未注入；core 已不再直接调用 child_process，调用方需提供 ITerminal 实现。';
+	}
+
 	// 检查危险命令
 	const dangerCheck = isDangerousCommand(command);
 	if (dangerCheck.dangerous) {
@@ -498,9 +363,12 @@ export async function executeCommandTool(
 			workingDir = path.resolve(ctx.workspacePath, customCwd);
 		}
 
-		// 检查目录是否存在
-		if (!fs.existsSync(workingDir)) {
-			return `Error: Working directory does not exist: ${workingDir}`;
+		// 检查目录是否存在（K8e: async via platform.fs）
+		if (ctx.platform?.fs) {
+			const exists = await ctx.platform.fs.exists(workingDir);
+			if (!exists) {
+				return `Error: Working directory does not exist: ${workingDir}`;
+			}
 		}
 
 		// 确定超时时间
@@ -515,11 +383,11 @@ export async function executeCommandTool(
 
 		// 后台任务模式
 		if (background) {
-			return await executeBackgroundCommand(command, workingDir);
+			return await executeBackgroundCommand(ctx, command, workingDir);
 		}
 
 		// 前台任务模式
-		return await executeForegroundCommand(command, workingDir, timeout, ctx, onOutput);
+		return await executeForegroundCommand(ctx, command, workingDir, timeout, onOutput);
 
 	} catch (error: any) {
 		const errorMessage = error.message || String(error);
@@ -543,241 +411,135 @@ export async function executeCommandTool(
 }
 
 /**
- * 执行前台命令
+ * 执行前台命令（K8d: 走 ctx.platform.terminal.executeStream）
  */
 async function executeForegroundCommand(
+	ctx: IToolContext,
 	command: string,
 	workingDir: string,
 	timeout: number,
-	ctx: IToolContext,
 	onOutput?: CommandOutputSink,
 ): Promise<ToolResponse> {
-	return new Promise((resolve) => {
-		const startTime = Date.now();
-		const stdoutBuffer = new OutputBuffer(
-			EXECUTE_CONFIG.MAX_OUTPUT_LINES,
-			EXECUTE_CONFIG.MAX_OUTPUT_LENGTH
-		);
-		const stderrBuffer = new OutputBuffer(
-			EXECUTE_CONFIG.MAX_OUTPUT_LINES / 2,
-			EXECUTE_CONFIG.MAX_OUTPUT_LENGTH / 2
-		);
+	const terminal = ctx.platform!.terminal;
+	const startTime = Date.now();
+	const stdoutBuffer = new OutputBuffer(
+		EXECUTE_CONFIG.MAX_OUTPUT_LINES,
+		EXECUTE_CONFIG.MAX_OUTPUT_LENGTH
+	);
+	const stderrBuffer = new OutputBuffer(
+		EXECUTE_CONFIG.MAX_OUTPUT_LINES / 2,
+		EXECUTE_CONFIG.MAX_OUTPUT_LENGTH / 2
+	);
 
-		// dev server / watcher 检测 → 更激进的 idle-detach 策略
-		const isDevServer = isDevServerCommand(command);
+	const cancellationToken = uuid();
+	let exitCode: number | null = null;
+	let timedOut = false;
+	let devServerStarted = false;
+	let devServerPid: string | undefined;
 
-		// Windows: 优先走 Git Bash / PowerShell，避免 cmd.exe 不识别 Unix 命令
-		const winShell = pickWindowsShell();
-
-		const spawnOpts: any = {
+	try {
+		for await (const chunk of terminal.executeStream(command, {
 			cwd: workingDir,
-			env: {
-				...process.env,
-				FORCE_COLOR: '0',
-				NO_COLOR: '1',
-				TERM: 'dumb',
-				CI: 'true',
-			},
-			// Windows 下绝不 detached，参考 OpenCode 的 cross-spawn-spawner 行为
-			detached: process.platform !== 'win32' && isDevServer,
-			windowsHide: true,
-		};
-		const childProcess = winShell
-			? spawn(winShell.shell, [...winShell.prefixArgs, command], spawnOpts)
-			: spawn(command, { ...spawnOpts, shell: true });
-
-		let completed = false;
-		let lastOutputTime = Date.now();
-
-		// ── idle-detach：仅对 dev server / watcher / tail -f 类命令启用 ──
-		// 思路（参考 OpenCode 但更友好）：OpenCode 无脑靠硬超时杀死，dev server 会被误杀；
-		// 我们只对识别到的长服务类命令启用"空闲即脱离"，普通命令仍走硬超时（不会误伤 curl 等）。
-		// dev server：首次输出后 3s 无新输出就 detach（让 AI 尽快拿回控制权）
-		const IDLE_MS  = 3000;
-		const MIN_WAIT = 2500;
-		const idleChecker = isDevServer ? setInterval(() => {
-			if (completed) return;
-			const now = Date.now();
-			const elapsed = now - startTime;
-			const idleFor = now - lastOutputTime;
-			if (elapsed >= MIN_WAIT && idleFor >= IDLE_MS) {
-				detachAndResolve();
-			}
-		}, 500) : null;
-
-		// 超时处理（硬超时仍然 kill）
-		const timeoutId = setTimeout(() => {
-			if (!completed) {
-				if (IS_WINDOWS && childProcess.pid) {
-					const { exec } = require('child_process');
-					exec(`taskkill /PID ${childProcess.pid} /T /F`, () => { });
-				} else {
-					childProcess.kill('SIGTERM');
-					setTimeout(() => { if (!completed) childProcess.kill('SIGKILL'); }, 5000);
+			timeoutMs: timeout,
+			detectDevServer: true,
+			cancellationToken,
+		})) {
+			if (chunk.type === 'stdout' && chunk.data) {
+				stdoutBuffer.append(chunk.data);
+				if (onOutput) {
+					try { await onOutput(chunk.data, 'stdout'); } catch { /* ignore */ }
 				}
+				// dev server detect：NodeTerminal 检测到 idle 后会推一段标记文本然后 exit
+				if (/\[dev server 已识别为就绪/.test(chunk.data)) {
+					devServerStarted = true;
+					const m = chunk.data.match(/pid=(\d+)/);
+					if (m) devServerPid = m[1];
+				}
+			} else if (chunk.type === 'stderr' && chunk.data) {
+				stderrBuffer.append(chunk.data);
+				if (onOutput) {
+					try { await onOutput(chunk.data, 'stderr'); } catch { /* ignore */ }
+				}
+			} else if (chunk.type === 'exit') {
+				exitCode = chunk.exitCode ?? null;
+				timedOut = chunk.timedOut ?? false;
 			}
-		}, timeout);
+		}
+	} catch (error) {
+		const elapsed = Date.now() - startTime;
+		return [
+			`❌ 命令启动失败`,
+			'',
+			`命令: ${command}`,
+			`工作目录: ${workingDir}`,
+			`错误: ${(error as Error).message}`,
+			`耗时: ${formatDuration(elapsed)}`,
+		].join('\n');
+	}
 
-		const detachAndResolve = () => {
-			if (completed) return;
-			completed = true;
-			clearTimeout(timeoutId);
-			if (idleChecker) clearInterval(idleChecker);
-			// 不 kill，让进程继续运行；解除父进程对子的引用
-			try { childProcess.unref(); } catch { /* ignore */ }
-			// 移除 stdio 监听，避免后续输出再触发回调
-			try { childProcess.stdout?.removeAllListeners('data'); } catch {}
-			try { childProcess.stderr?.removeAllListeners('data'); } catch {}
-			const elapsed = Date.now() - startTime;
-			const stdout = stdoutBuffer.getOutput();
-			const stderr = stderrBuffer.getOutput();
-			const pid = childProcess.pid;
-			if (onOutput) {
-				try { void onOutput(`\n[服务已后台运行 pid=${pid}，AI 可继续下一步]\n`, 'stdout'); } catch { /* ignore */ }
-			}
-			const base = formatCommandResult(
-				command, workingDir,
-				0, stdout, stderr, elapsed, timeout,
-			);
-			const note = `\n\n💡 此命令被识别为长时间运行的服务（dev server / watcher / tail -f 等），已在后台继续运行（pid=${pid}）。上方输出为前 ${Math.round(elapsed/1000)}s 捕获到的内容，服务仍在运行，不会被自动终止。`;
-			resolve(base + note);
-		};
+	const elapsed = Date.now() - startTime;
+	const stdout = stdoutBuffer.getOutput();
+	const stderr = stderrBuffer.getOutput();
 
-		// 收集 stdout（剥 ANSI 色码 + 实时推送）
-		childProcess.stdout?.on('data', (data: Buffer) => {
-			lastOutputTime = Date.now();
-			const s = stripAnsi(data.toString('utf8'));
-			stdoutBuffer.append(s);
-			if (onOutput) {
-				try { void onOutput(s, 'stdout'); } catch { /* ignore */ }
-			}
-		});
+	ctx.didEditFile = true;
 
-		// 收集 stderr
-		childProcess.stderr?.on('data', (data: Buffer) => {
-			lastOutputTime = Date.now();
-			const s = stripAnsi(data.toString('utf8'));
-			stderrBuffer.append(s);
-			if (onOutput) {
-				try { void onOutput(s, 'stderr'); } catch { /* ignore */ }
-			}
-		});
+	// dev server 模式：返回简短说明 + 部分输出
+	if (devServerStarted) {
+		const base = formatCommandResult(
+			command, workingDir,
+			0, stdout, stderr, elapsed, timeout,
+		);
+		const note = `\n\n💡 此命令被识别为长时间运行的服务（dev server / watcher / tail -f 等），已在后台继续运行（pid=${devServerPid ?? 'unknown'}）。上方输出为前 ${Math.round(elapsed / 1000)}s 捕获到的内容，服务仍在运行，不会被自动终止。`;
+		return base + note;
+	}
 
-		// 进程正常结束
-		childProcess.on('close', (code) => {
-			if (completed) return;
-			completed = true;
-			clearTimeout(timeoutId);
-			if (idleChecker) clearInterval(idleChecker);
+	if (timedOut) {
+		return formatCommandResult(command, workingDir, -1, stdout, stderr, elapsed, timeout) +
+			'\n\n⚠️ 已达超时阈值，进程被强制终止。';
+	}
 
-			const elapsed = Date.now() - startTime;
-			const stdout = stdoutBuffer.getOutput();
-			const stderr = stderrBuffer.getOutput();
-
-			ctx.didEditFile = true;
-
-			resolve(formatCommandResult(
-				command,
-				workingDir,
-				code ?? -1,
-				stdout,
-				stderr,
-				elapsed,
-				timeout
-			));
-		});
-
-		// 进程错误
-		childProcess.on('error', (error) => {
-			if (completed) return;
-			completed = true;
-			clearTimeout(timeoutId);
-			if (idleChecker) clearInterval(idleChecker);
-
-			const elapsed = Date.now() - startTime;
-
-			resolve([
-				`❌ 命令启动失败`,
-				'',
-				`命令: ${command}`,
-				`工作目录: ${workingDir}`,
-				`错误: ${error.message}`,
-				`耗时: ${formatDuration(elapsed)}`,
-			].join('\n'));
-		});
-	});
+	return formatCommandResult(
+		command,
+		workingDir,
+		exitCode ?? -1,
+		stdout,
+		stderr,
+		elapsed,
+		timeout
+	);
 }
 
 /**
- * 执行后台命令
+ * 执行后台命令（K8d: 走 ctx.platform.terminal.executeBackground）
  */
 async function executeBackgroundCommand(
+	ctx: IToolContext,
 	command: string,
-	workingDir: string
+	workingDir: string,
 ): Promise<ToolResponse> {
-	const taskId = generateTaskId();
+	const terminal = ctx.platform!.terminal;
+	if (!terminal.executeBackground) {
+		return 'Error: platform.terminal 不支持 executeBackground（IDE 形态可能无此能力）';
+	}
 
-	const winShell = pickWindowsShell();
-	const spawnOpts: any = {
-		cwd: workingDir,
-		// Windows 下后台任务用 child.unref() 脱离，不用 detached（会引起孤儿进程）
-		detached: process.platform !== 'win32',
-		env: { ...process.env, FORCE_COLOR: '0' },
-		windowsHide: true,
-	};
-	const childProcess = winShell
-		? spawn(winShell.shell, [...winShell.prefixArgs, command], spawnOpts)
-		: spawn(command, { ...spawnOpts, shell: true });
-
-	const task: BackgroundTask = {
-		process: childProcess,
-		command,
-		startTime: Date.now(),
-		output: [],
-		exitCode: null,
-		completed: false,
-	};
-
-	backgroundTasks.set(taskId, task);
-
-	// 收集输出
-	childProcess.stdout?.on('data', (data: Buffer) => {
-		task.output.push(data.toString());
-		// 限制输出大小
-		if (task.output.length > EXECUTE_CONFIG.MAX_OUTPUT_LINES) {
-			task.output.shift();
-		}
-	});
-
-	childProcess.stderr?.on('data', (data: Buffer) => {
-		task.output.push(`[stderr] ${data.toString()}`);
-	});
-
-	childProcess.on('close', (code) => {
-		task.exitCode = code;
-		task.completed = true;
-	});
-
-	childProcess.on('error', (error) => {
-		task.output.push(`[error] ${error.message}`);
-		task.completed = true;
-	});
-
-	// 分离进程
-	childProcess.unref();
-
-	return [
-		`🚀 后台任务已启动`,
-		'',
-		`任务 ID: ${taskId}`,
-		`命令: ${command}`,
-		`工作目录: ${workingDir}`,
-		'',
-		'💡 使用以下方式管理任务:',
-		`  - 查看状态: 调用 execute_command 工具，参数 command="task_status ${taskId}"`,
-		`  - 终止任务: 调用 execute_command 工具，参数 command="task_kill ${taskId}"`,
-	].join('\n');
+	try {
+		const { pid } = await terminal.executeBackground(command, { cwd: workingDir });
+		return [
+			`🚀 后台任务已启动`,
+			'',
+			`命令: ${command}`,
+			`工作目录: ${workingDir}`,
+			`PID: ${pid}`,
+			'',
+			'💡 提示：后台进程已脱离父进程组，不会被本会话取消时连带杀掉。',
+			'   如需终止，请手动使用 kill 或 task manager。',
+		].join('\n');
+	} catch (err) {
+		return `❌ 后台任务启动失败：${(err as Error).message}`;
+	}
 }
+
+// ========== 输出格式化 ==========
 
 /**
  * 格式化命令结果
@@ -794,7 +556,7 @@ function formatCommandResult(
 	// Windows 下即使 exit code 为 0，也可能通过输出内容检测到错误
 	const windowsOutputError = detectWindowsErrorInOutput(stdout.content, stderr.content);
 	const isSuccess = exitCode === 0 && !windowsOutputError.hasError;
-	const isTimeout = elapsed >= timeout - 1000; // 接近超时
+	const isTimeout = elapsed >= timeout - 1000;
 
 	let failReason = '';
 	if (exitCode !== 0) {
@@ -813,12 +575,10 @@ function formatCommandResult(
 
 	const output: string[] = [...header];
 
-	// 输出头尾截断：超过 30KB 时保留头 10KB + 尾 10KB（字节级）
 	const BYTE_LIMIT = 30 * 1024;
 	const BYTE_HEAD = 10 * 1024;
 	const BYTE_TAIL = 10 * 1024;
 
-	// 添加 stdout
 	if (stdout.content.trim()) {
 		const stdoutBytes = Buffer.byteLength(stdout.content, 'utf8');
 		const needsByteTruncate = stdoutBytes > BYTE_LIMIT;
@@ -829,7 +589,6 @@ function formatCommandResult(
 
 		let content = stdout.content;
 		if (stdout.truncated) {
-			// 行级截断优先（保留行级智能裁剪）
 			content = truncateOutput(content, EXECUTE_CONFIG.SUMMARY_LINES_TO_KEEP);
 		}
 		if (Buffer.byteLength(content, 'utf8') > BYTE_LIMIT) {
@@ -840,7 +599,6 @@ function formatCommandResult(
 		output.push('```');
 	}
 
-	// 添加 stderr
 	if (stderr.content.trim()) {
 		const stderrBytes = Buffer.byteLength(stderr.content, 'utf8');
 		const needsByteTruncate = stderrBytes > BYTE_LIMIT;
@@ -861,7 +619,6 @@ function formatCommandResult(
 		output.push('```');
 	}
 
-	// 如果失败，添加建议
 	if (!isSuccess) {
 		const suggestions = getCommandSuggestions(command, stderr.content, stdout.content);
 		if (suggestions.length > 0) {
@@ -870,7 +627,6 @@ function formatCommandResult(
 			suggestions.forEach(s => output.push(`  - ${s}`));
 		}
 
-		// Windows 下如果 exit code 为 0 但检测到错误，额外提示
 		if (windowsOutputError.hasError && exitCode === 0) {
 			output.push('');
 			output.push('⚠️ 注意: 此命令返回了退出码 0，但输出中包含错误信息，任务实际上未成功执行。');
@@ -884,8 +640,7 @@ function formatCommandResult(
 }
 
 /**
- * 按字节数做头尾截断：超过 limit 时保留头 headBytes + 尾 tailBytes，
- * 中间折叠为 "... [N lines / M bytes omitted] ..."
+ * 按字节数做头尾截断
  */
 function truncateByBytes(content: string, limit: number, headBytes: number, tailBytes: number): string {
 	const totalBytes = Buffer.byteLength(content, 'utf8');
@@ -893,11 +648,8 @@ function truncateByBytes(content: string, limit: number, headBytes: number, tail
 		return content;
 	}
 
-	// 按字节切（避免 UTF-8 截断异常，使用 Buffer + 回退到字符边界）
 	const buf = Buffer.from(content, 'utf8');
-	// 从头往后找 headBytes 附近的换行，确保不截断多字节字符
 	let headEnd = Math.min(headBytes, buf.length);
-	// 向前回退，直到遇到完整字符边界
 	while (headEnd > 0 && (buf[headEnd] & 0xC0) === 0x80) {
 		headEnd--;
 	}

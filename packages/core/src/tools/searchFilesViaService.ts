@@ -18,7 +18,7 @@
  *  - cleanSearchQuery 暂未实现（codebase_search 用同入口时建议调用方自己清洗 query）
  *--------------------------------------------------------------------------------------------*/
 
-import * as path from 'node:path';
+import * as path from 'path';
 
 import type { IToolContext } from './IToolContext.js';
 import type { ToolResponse } from '../types/toolTypes.js';
@@ -82,17 +82,19 @@ export async function searchFilesViaService(
 		? rawPath
 		: path.resolve(workspaceRoot, rawPath);
 
+	// K8e: async 化路径检测
 	const lastSegment   = path.basename(searchPath);
-	const isFilePath    = lastSegment.includes('.') && !rawPath.endsWith('/') && !pf.existsSync(searchPath)
-		? false   // 不存在 → 不强制视为文件
-		: lastSegment.includes('.') && !rawPath.endsWith('/') && (() => {
-			try { return pf.statSync(searchPath).isFile; } catch { return false; }
-		})();
+	let isFilePath = false;
+	if (lastSegment.includes('.') && !rawPath.endsWith('/')) {
+		if (await pf.exists(searchPath)) {
+			try { isFilePath = (await pf.stat(searchPath)).isFile; } catch { /* ignore */ }
+		}
+	}
 	const folderPath    = isFilePath ? path.dirname(searchPath) : searchPath;
 	const fileNameFilter = isFilePath ? lastSegment : undefined;
 
-	// 检查目录存在性
-	if (!pf.existsSync(folderPath)) {
+	// 检查目录存在性（K8e: async）
+	if (!(await pf.exists(folderPath))) {
 		return `未找到匹配的文件。\n\n📁 目录 "${folderPath}" 不存在。\n\n💡 建议：如果你需要创建文件，请逐步使用 write_to_file 创建，并在关键步骤后验证结果。`;
 	}
 
@@ -144,7 +146,7 @@ export async function searchFilesViaService(
 				if (!resultsByFile.has(filePath)) resultsByFile.set(filePath, []);
 				resultsByFile.get(filePath)!.push({ lineNumber, line });
 			}
-			const sortedFiles = sortFilesByMtimeSync(pf, [...resultsByFile.keys()]);
+			const sortedFiles = await sortFilesByMtime(pf, [...resultsByFile.keys()]);
 
 			// count 模式
 			if (outputMode === 'count') {
@@ -203,17 +205,19 @@ function normalizeFilePattern(pattern: string | undefined): string | undefined {
 }
 
 /**
- * 同步按 mtime 降序排序文件（少量 statSync 调用，对中小型项目可接受）
+ * 按 mtime 降序排序文件（K8e: async + 并发 stat）
  */
-function sortFilesByMtimeSync(
+async function sortFilesByMtime(
 	pf: ReturnType<typeof platformFs>,
 	files: string[],
-): string[] {
-	const withMtime = files.map(f => {
-		let mtime = 0;
-		try { mtime = pf.statSync(f).mtime; } catch { /* ignore */ }
-		return { f, mtime };
-	});
+): Promise<string[]> {
+	const withMtime = await Promise.all(
+		files.map(async (f) => {
+			let mtime = 0;
+			try { mtime = (await pf.stat(f)).mtime; } catch { /* ignore */ }
+			return { f, mtime };
+		})
+	);
 	withMtime.sort((a, b) => b.mtime - a.mtime);
-	return withMtime.map(x => x.f);
+	return withMtime.map((x) => x.f);
 }

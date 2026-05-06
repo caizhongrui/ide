@@ -13,12 +13,85 @@ import {
 } from "./api"
 import { initI18n, t, setLocale, getLocale } from "./i18n"
 import { BatchPanel } from "./batch/BatchPanel"
+import { SettingsAppearance } from "./settings/SettingsAppearance"
+import { SettingsGeneral } from "./settings/SettingsGeneral"
+import { SettingsKeybinds } from "./settings/SettingsKeybinds"
+import { SettingsTemplates } from "./settings/SettingsTemplates"
+import { SettingsUsage } from "./settings/SettingsUsage"
+import { SettingsErrors } from "./settings/SettingsErrors"
+import { SettingsPlugins } from "./settings/SettingsPlugins"
+import { SettingsAbout } from "./settings/SettingsAbout"
+import { SettingsMcp } from "./settings/SettingsMcp"
+import { SettingsWorktree } from "./settings/SettingsWorktree"
+import { QuestionDialog } from "./dialogs/QuestionDialog"
+import { PlanExitDialog } from "./dialogs/PlanExitDialog"
+import { ApplyToFileDialog } from "./dialogs/ApplyToFileDialog"
+import { ToolErrorPanel } from "./panels/ToolErrorPanel"
+import { SkillsPanel } from "./panels/SkillsPanel"
+import { WorkspaceExplorerPanel } from "./panels/WorkspaceExplorerPanel"
+import { FilePreviewPanel } from "./panels/FilePreviewPanel"
+import { ContextPanel } from "./panels/ContextPanel"
+import { TodoDock } from "./panels/TodoDock"
+import { FollowupDock } from "./panels/FollowupDock"
+import { RevertDock } from "./panels/RevertDock"
+import { CompactingBanner, RateLimitBanner } from "./panels/StatusBanners"
+import { Sidebar } from "./sidebar/Sidebar"
+import { AnimatedNumber } from "./components/AnimatedNumber"
+import { ToastHost, type ToastItem } from "./components/ToastHost"
+import { GlobalCommandPalette, type PaletteItem } from "./components/GlobalCommandPalette"
+import { KeybindHelpModal } from "./components/KeybindHelpModal"
+import { ModeSelector, type ComposerMode } from "./components/ModeSelector"
+import { GitStatusBar } from "./components/GitStatusBar"
+import { LoginView } from "./components/LoginView"
+import { BootingScreen, BootErrorScreen } from "./components/BootScreens"
+import { SettingsNav, type SettingsTab } from "./components/SettingsNav"
+import type { Theme, ChatMessage, PreviewTab, AttachedImage } from "./lib/types"
+import { classifyFileKind } from "./lib/types"
+import type {
+  FileChangeEntry, TodoItem, RateLimitState, QuestionRequest,
+  CompactingState, PlanExitRequest,
+} from "./lib/chatEventTypes"
+import { TOOL_LABELS, TOOL_ICONS, getToolLabel, getToolSubtitle } from "./lib/toolMeta"
+import {
+  THEME_KEY, FONT_FAMILY_KEY, FONT_SIZE_KEY, DEFAULT_API_URL, FONT_FAMILIES,
+  loadTheme, applyTheme, loadFontFamily, loadFontSize, applyFont, formatBytes,
+} from "./lib/themeFont"
+import {
+  formatTime, formatFullTime, userInitials, shortPath, formatRecv,
+  storedToChatMessage,
+} from "./lib/format"
+import { SLASH_COMMANDS } from "./lib/slashCommands"
+import { useApprovalQueue } from "./hooks/useApprovalQueue"
+import { useTokenUsage } from "./hooks/useTokenUsage"
+import { useFileWatcher } from "./hooks/useFileWatcher"
+import { useVimMode } from "./hooks/useVimMode"
+import {
+  useCustomKeybinds,
+  KEYBIND_DEFAULTS,
+  eventToKeybind,
+  matchKeybind,
+  type KeybindAction,
+} from "./hooks/useCustomKeybinds"
+import { useInChatSearch } from "./hooks/useInChatSearch"
+import { createChatEventHandler } from "./hooks/useChatEventHandler"
+import { usePromptHistory } from "./hooks/usePromptHistory"
+import { useGitBranchPicker } from "./hooks/useGitBranchPicker"
+import { MemoryPanel } from "./panels/MemoryPanel"
+import { CodebaseIndexPanel } from "./panels/CodebaseIndexPanel"
+import { SubagentDashboard } from "./panels/SubagentDashboard"
 import {
   ApprovalDialog as SharedApprovalDialog,
   MessageList as SharedMessageList,
   EditDiffView,
   createMessagesStore,
   type ChatMessage as SharedChatMessage,
+  TerminalPanel as SharedTerminalPanel,
+  type TerminalTab,
+  TokenUsageBar as SharedTokenUsageBar,
+  CommandPalette as SharedCommandPalette,
+  MentionDropdown as SharedMentionDropdown,
+  FileChangesPanel as SharedFileChangesPanel,
+  DiffViewer as SharedDiffViewer,
 } from "@maxian/ui"
 
 /** 等待工具审批时的状态 */
@@ -29,49 +102,9 @@ interface ApprovalRequest {
   toolParams: Record<string, unknown>
 }
 
-/** 文件变更记录 */
-interface FileChangeEntry {
-  path: string
-  action: 'modified' | 'created' | 'deleted'
-}
-
-/** 预览标签（右侧预览面板中的一个打开文件） */
-interface PreviewTab {
-  path:      string                           // 文件路径（相对或绝对）
-  title:     string                           // 标签页标题（basename）
-  kind:      'text' | 'image' | 'audio' | 'video' | 'binary' | 'markdown'
-  content:   string                           // 文本或 base64
-  mimeType:  string
-  size:      number
-  error?:    string
-  loading:   boolean
-  viewMode:  'source' | 'diff' | 'rendered'   // markdown: source/rendered, 变更文件: source/diff
-  changed?:  FileChangeEntry['action']        // 若该文件在会话中被修改过
-  // diff 数据（懒加载）
-  diffOriginal?: string | null
-  diffCurrent?:  string
-  diffLoading?:  boolean
-  /** 外部变更检测（P0-4）: 监测到文件被外部修改时的时间戳 */
-  extChangedAt?: number
-  /** 跳转到行号（P0-1）: 加载完成后滚动定位 */
-  pendingLine?: number
-  /** 已加载时的磁盘 mtime（P0-4: 外部变更检测） */
-  mtimeMs?: number
-}
-
-/** 附加图片 */
-interface AttachedImage {
-  id: string
-  dataUrl: string  // base64 data URL
-  name: string
-}
-
-/** 集成终端 Tab */
-interface TerminalTab {
-  id: string
-  title: string
-  sessionId: string   // 所属会话 ID，用于多会话终端隔离
-}
+// FileChangeEntry / TodoItem / RateLimitState / QuestionRequest / CompactingState /
+// PlanExitRequest 已抽到 ./lib/chatEventTypes.ts
+// PreviewTab / AttachedImage / classifyFileKind 已抽到 ./lib/types.ts
 
 /** 弹出确认对话框：Tauri 环境用插件，浏览器用 window.confirm */
 async function appConfirm(message: string): Promise<boolean> {
@@ -87,136 +120,11 @@ async function appConfirm(message: string): Promise<boolean> {
 }
 
 type AppStatus  = "login" | "booting" | "ready" | "error"
-type SettingsTab = "general" | "appearance" | "worktree" | "mcp" | "keybinds" | "templates" | "usage" | "errors" | "plugins" | "about"
-type Theme      = "dark" | "light" | "system"
-
-interface ChatMessage {
-  id: string
-  role: "user" | "assistant" | "system" | "error" | "tool" | "reasoning"
-  content: string
-  isPartial?: boolean
-  /** 创建时间戳（毫秒），live 消息用 Date.now()，DB 消息用 created_at */
-  createdAt?: number
-  /** 工具调用专属字段 */
-  toolName?: string
-  toolUseId?: string
-  toolSuccess?: boolean
-  toolParams?: Record<string, unknown>   // 工具原始参数（用于展示文件路径等）
-  toolResult?: string                    // 工具执行结果摘要
-  liveOutput?: string                    // 流式工具实时输出（bash 的 stdout/stderr）
-  /** 思考过程专属字段 */
-  charCount?: number                     // 完成时的字符数
-}
-
-// ─── 工具名称 → 中文标签映射 ───────────────────────────────────────────────
-const TOOL_LABELS: Record<string, string> = {
-  read_file:       "读取文件",
-  write_to_file:   "写入文件",
-  edit:            "编辑文件",
-  multiedit:       "多处编辑",
-  search_files:    "搜索文件",
-  list_files:      "列出目录",
-  execute_command: "执行命令",
-  todo_write:      "更新任务",
-  web_fetch:       "获取网页",
-  load_skill:      "加载技能",
-}
-
-// ─── 工具名称 → SVG 图标路径（codicon 风格） ──────────────────────────────
-const TOOL_ICONS: Record<string, string> = {
-  read_file:       "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM6 20V4h5v7h7v9H6z",
-  write_to_file:   "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
-  edit:            "M20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83zM3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z",
-  multiedit:       "M3 17.25V21h3.75l11.06-11.06-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83zM7 4h2v2H7zm0 4h2v2H7zm0 4h2v2H7z",
-  search_files:    "M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
-  list_files:      "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z",
-  execute_command: "M8 5v14l11-7z",
-  todo_write:      "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 3c1.93 0 3.5 1.57 3.5 3.5S13.93 13 12 13s-3.5-1.57-3.5-3.5S10.07 6 12 6zm7 13H5v-.23c0-.62.28-1.2.76-1.58C7.47 15.82 9.64 15 12 15s4.53.82 6.24 2.19c.48.38.76.97.76 1.58V19z",
-  web_fetch:       "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z",
-}
-
-function getToolLabel(name: string): string {
-  return TOOL_LABELS[name] ?? name
-}
-
-function getToolSubtitle(name: string, params?: Record<string, unknown>): string {
-  if (!params) return ""
-  switch (name) {
-    case "read_file":
-    case "write_to_file":
-    case "edit":
-    case "multiedit":
-      return (params.path as string) || ""
-    case "search_files": {
-      const p = (params.path as string) || ""
-      const r = (params.regex as string) || ""
-      return p && r ? `${p}  ·  ${r}` : (p || r)
-    }
-    case "list_files":
-      return (params.path as string) || ""
-    case "execute_command": {
-      const cmd = (params.command as string) || ""
-      return cmd.length > 72 ? cmd.slice(0, 72) + "…" : cmd
-    }
-    case "todo_write": {
-      const todos = params.todos as Array<{status: string; content: string}> | undefined
-      if (!todos) return ""
-      const inProgress = todos.find(t => t.status === 'in_progress')
-      if (inProgress) return `正在: ${inProgress.content}`
-      const pending = todos.filter(t => t.status === 'pending').length
-      const done = todos.filter(t => t.status === 'completed').length
-      return `${done}/${todos.length} 已完成`
-    }
-    case "web_fetch":
-      return (params.url as string) || ""
-    default:
-      return ""
-  }
-}
-
-const THEME_KEY       = "maxian_theme"
-const FONT_FAMILY_KEY = "maxian_font_family"
-const FONT_SIZE_KEY   = "maxian_font_size"
-const DEFAULT_API_URL = "http://10.205.81.162/api"
-
-// ─── Font options ────────────────────────────────────────────────────────────
-const FONT_FAMILIES = [
-  { value: "system",      label: "系统默认",    css: "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif" },
-  { value: "pingfang",   label: "PingFang SC",  css: "'PingFang SC', 'Hiragino Sans GB', sans-serif" },
-  { value: "msyahei",    label: "微软雅黑",      css: "'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif" },
-  { value: "sourcehansans", label: "思源黑体",   css: "'Source Han Sans CN', 'Noto Sans CJK SC', 'PingFang SC', sans-serif" },
-  { value: "noto",       label: "Noto Sans",    css: "'Noto Sans', 'Noto Sans CJK SC', sans-serif" },
-  { value: "helvetica",  label: "Helvetica Neue", css: "'Helvetica Neue', Helvetica, Arial, sans-serif" },
-]
-
-// ─── Theme / font helpers ────────────────────────────────────────────────────
-function loadTheme(): Theme {
-  return (localStorage.getItem(THEME_KEY) as Theme) || "dark"
-}
-function applyTheme(t: Theme) {
-  document.documentElement.setAttribute("data-theme", t)
-  localStorage.setItem(THEME_KEY, t)
-}
-
-function loadFontFamily(): string {
-  return localStorage.getItem(FONT_FAMILY_KEY) || "system"
-}
-function loadFontSize(): number {
-  return parseInt(localStorage.getItem(FONT_SIZE_KEY) || "13", 10)
-}
-function applyFont(family: string, size: number) {
-  const def = FONT_FAMILIES.find(f => f.value === family) ?? FONT_FAMILIES[0]
-  document.documentElement.style.setProperty("--font-sans", def.css)
-  document.documentElement.style.setProperty("--font-size-base", `${size}px`)
-}
+// SettingsTab 类型已抽到 ./components/SettingsNav
+// 类型 / 常量 / helpers 已抽到 ./lib/types.ts / ./lib/toolMeta.ts / ./lib/themeFont.ts
 
 // ─── ProcStats: 左下角进程资源监控（webview + sidecar 内存/CPU 实时） ───────
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n}B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)}K`
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(0)}M`
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)}G`
-}
+// formatBytes 已抽到 ./lib/themeFont
 function ProcStats() {
   const [stats, setStats] = createSignal<{
     self:    { pid: number; memBytes: number; cpuPercent: number }
@@ -341,8 +249,7 @@ export default function App() {
   // ── Diff 视图模式（P1-12）: unified / split ─────────────────────────────
   const [diffViewMode, setDiffViewMode] = createSignal<'unified' | 'split'>('unified')
 
-  // ── Todo 跟踪面板（P0-1） ────────────────────────────────────────────────
-  interface TodoItem { id: string; content: string; status: 'pending' | 'in_progress' | 'completed' | 'cancelled' }
+  // ── Todo 跟踪面板（P0-1）—— TodoItem 类型已抽到 lib/chatEventTypes ──
   const [todos, setTodos] = createSignal<TodoItem[]>([])
   const [todoDockCollapsed, setTodoDockCollapsed] = createSignal(false)
   // 任务结束时如果还有 in_progress/pending 项，标记为"AI 提前结束未完成"以便 UI 显示警告
@@ -353,8 +260,7 @@ export default function App() {
   const [followupQueue, setFollowupQueue] = createSignal<string[]>([])
   const [followupCollapsed, setFollowupCollapsed] = createSignal(false)
 
-  // ── Rate-limit 重试 UI（P0-6） ──────────────────────────────────────────
-  interface RateLimitState { active: boolean; resetAt: number; attempt: number; message: string }
+  // ── Rate-limit 重试 UI（P0-6）—— RateLimitState 已抽到 lib/chatEventTypes ──
   const [rateLimit, setRateLimit] = createSignal<RateLimitState>({ active: false, resetAt: 0, attempt: 0, message: '' })
 
   // ── Context 标签页（P1-10） ─────────────────────────────────────────────
@@ -364,33 +270,12 @@ export default function App() {
   // ── Session revert dock（P1-11） ────────────────────────────────────────
   const [showRevertDock, setShowRevertDock] = createSignal(false)
 
-  // ── Agent 提问对话框（question 工具）───────────────────────────────────
-  interface QuestionRequest {
-    sessionId: string
-    question:  string
-    options:   string[]
-    multi:     boolean
-  }
-  const [questionRequest, setQuestionRequest] = createSignal<QuestionRequest | null>(null)
-
-  // ── 上下文压缩状态（进行中时显示持续 banner） ─────────────────────────
-  interface CompactingState {
-    tokensCurrent: number
-    willLevel2:    boolean
-    manual:        boolean
-    startedAt:     number
-  }
-  const [compactingState, setCompactingState] = createSignal<CompactingState | null>(null)
-  const [questionAnswer,  setQuestionAnswer]  = createSignal('')
+  // ── Agent 提问 / 上下文压缩 / Plan Exit 状态 —— 类型已抽到 lib/chatEventTypes ──
+  const [questionRequest, setQuestionRequest]   = createSignal<QuestionRequest | null>(null)
+  const [compactingState, setCompactingState]   = createSignal<CompactingState | null>(null)
+  const [questionAnswer,  setQuestionAnswer]    = createSignal('')
   const [questionSelected, setQuestionSelected] = createSignal<string[]>([])
-
-  // ── Plan Exit 对话框 ──────────────────────────────────────────────────
-  interface PlanExitRequest {
-    sessionId: string
-    summary:   string
-    steps:     string
-  }
-  const [planExitRequest, setPlanExitRequest] = createSignal<PlanExitRequest | null>(null)
+  const [planExitRequest, setPlanExitRequest]   = createSignal<PlanExitRequest | null>(null)
   const [planExitFeedback, setPlanExitFeedback] = createSignal('')
 
   async function revertToMessage(msgId: string) {
@@ -423,16 +308,230 @@ export default function App() {
     size:        number
   }
   const [showSkillsPanel, setShowSkillsPanel] = createSignal(false)
+
+  // ── B1: 子代理任务编排面板 ────────────────────────────────────────────
+  const [showSubagentPanel, setShowSubagentPanel] = createSignal(false)
+  const [subagentRecords, setSubagentRecords] = createSignal<import('@maxian/sdk').SubagentRecord[]>([])
+  const [subagentLoading, setSubagentLoading] = createSignal(false)
+  const [subagentStatusFilter, setSubagentStatusFilter] = createSignal<import('@maxian/sdk').SubagentStatus | 'all'>('all')
+  let _subagentEventsUnsub: (() => void) | null = null
+
+  async function loadSubagents() {
+    setSubagentLoading(true)
+    try {
+      const c = await getClient()
+      const r = await c.listSubagents()
+      setSubagentRecords(r.records as import('@maxian/sdk').SubagentRecord[])
+    } catch (e) {
+      console.error('[Subagent] load failed:', e)
+    } finally {
+      setSubagentLoading(false)
+    }
+  }
+
+  /** 打开面板时拉一次 + 订阅 SSE；关闭时 unsub */
+  createEffect(() => {
+    if (!showSubagentPanel()) {
+      _subagentEventsUnsub?.()
+      _subagentEventsUnsub = null
+      return
+    }
+    void loadSubagents()
+    void (async () => {
+      try {
+        const c = await getClient()
+        _subagentEventsUnsub?.()
+        const sub = c.subscribeSubagentEvents({
+          onUpdate: (rec) => {
+            // 实时合并：已存在则更新，否则追加
+            setSubagentRecords((prev) => {
+              const idx = prev.findIndex(r => r.taskId === rec.taskId)
+              if (idx >= 0) {
+                const next = prev.slice()
+                next[idx] = rec as import('@maxian/sdk').SubagentRecord
+                return next
+              }
+              return [rec as import('@maxian/sdk').SubagentRecord, ...prev]
+            })
+          },
+        })
+        _subagentEventsUnsub = sub.close
+      } catch (e) {
+        console.error('[Subagent] subscribe failed:', e)
+      }
+    })()
+  })
+
+  // ── B4: 项目知识库面板 ─────────────────────────────────────────────────
+  const [showCodebasePanel, setShowCodebasePanel] = createSignal(false)
+  const [codebaseSnapshot, setCodebaseSnapshot] = createSignal<import('@maxian/sdk').CodebaseIndexSnapshot | null>(null)
+  const [codebaseLoading, setCodebaseLoading] = createSignal(false)
+  const [codebaseProgress, setCodebaseProgress] = createSignal('')
+  const [codebaseTab, setCodebaseTab] = createSignal<import('./panels/CodebaseIndexPanel').CodebaseTab>('architecture')
+  const [codebaseSearchQuery, setCodebaseSearchQuery] = createSignal('')
+  const [codebaseSearchHits, setCodebaseSearchHits] = createSignal<import('@maxian/sdk').CodebaseSearchHit[]>([])
+  const [codebaseSearchLoading, setCodebaseSearchLoading] = createSignal(false)
+  async function loadCodebaseSnapshot() {
+    const ws = activeWorkspace()
+    if (!ws) { setCodebaseSnapshot(null); return }
+    try {
+      const c = await getClient()
+      const r = await c.getCodebaseSnapshot(ws.id)
+      setCodebaseSnapshot(r.snapshot)
+    } catch (e) {
+      console.error('[Codebase] load snapshot failed:', e)
+    }
+  }
+
+  let _codebaseRefreshUnsub: (() => void) | null = null
+
+  async function refreshCodebaseIndexUI(incremental: boolean) {
+    const ws = activeWorkspace()
+    if (!ws) {
+      showToast({ message: '请先选择工作区', kind: 'warn', duration: 2500 })
+      return
+    }
+    if (codebaseLoading()) return  // 防止并发触发
+    setCodebaseLoading(true)
+    setCodebaseProgress(incremental ? '增量扫描中…' : '全量重建中…')
+    try {
+      const c = await getClient()
+      _codebaseRefreshUnsub?.()
+      const sub = c.subscribeCodebaseRefresh(ws.id, {
+        incremental,
+        onStart:    (e) => setCodebaseProgress(`开始${e.incremental ? '增量' : '全量'}扫描…`),
+        onProgress: (e) => setCodebaseProgress(e.message),
+        onDone:     (e) => {
+          if (e.ok && e.snapshot) {
+            setCodebaseSnapshot(e.snapshot)
+            showToast({
+              message: `索引完成：${e.snapshot.fileCount} 文件 / ${e.snapshot.apiCount} API（${(e.durationMs / 1000).toFixed(1)}s）`,
+              kind: 'success',
+              duration: 4000,
+            })
+          }
+          setCodebaseLoading(false)
+          setCodebaseProgress('')
+          _codebaseRefreshUnsub?.()
+          _codebaseRefreshUnsub = null
+        },
+        onError:    (e) => {
+          showToast({ message: `索引失败：${e.message}`, kind: 'error', duration: 6000 })
+          pushError('codebase', `索引失败：${e.message}`)
+          setCodebaseLoading(false)
+          setCodebaseProgress('')
+          _codebaseRefreshUnsub?.()
+          _codebaseRefreshUnsub = null
+        },
+      })
+      _codebaseRefreshUnsub = sub.close
+    } catch (e) {
+      const msg = (e as Error).message
+      showToast({ message: `索引启动失败：${msg}`, kind: 'error', duration: 6000 })
+      pushError('codebase', `索引启动失败：${msg}`)
+      setCodebaseLoading(false)
+      setCodebaseProgress('')
+    }
+  }
+
+  async function searchCodebaseUI(query: string) {
+    const ws = activeWorkspace()
+    if (!ws) return
+    if (!query.trim()) { setCodebaseSearchHits([]); return }
+    setCodebaseSearchLoading(true)
+    try {
+      const c = await getClient()
+      const r = await c.searchCodebase(ws.id, query, 30)
+      setCodebaseSearchHits(r.hits)
+    } catch (e) {
+      pushError('codebase', `搜索失败：${(e as Error).message}`)
+    } finally {
+      setCodebaseSearchLoading(false)
+    }
+  }
+
+  /** 打开面板时拉一次快照；切工作区也重拉 */
+  createEffect(() => {
+    if (!showCodebasePanel()) return
+    void activeWorkspace()  // 订阅
+    void loadCodebaseSnapshot()
+  })
+
+  // ── B3: 记忆面板 ──────────────────────────────────────────────────────
+  const [showMemoryPanel, setShowMemoryPanel] = createSignal(false)
+  const [memoryRecords, setMemoryRecords] = createSignal<import('@maxian/sdk').MemoryRecord[]>([])
+  const [memoryLoading, setMemoryLoading] = createSignal(false)
+  const [memoryScopeFilter, setMemoryScopeFilter] = createSignal<import('@maxian/sdk').MemoryScope | 'all'>('all')
+  const [memoryCategoryFilter, setMemoryCategoryFilter] = createSignal<import('@maxian/sdk').MemoryCategory | 'all'>('all')
+  const [memorySearchQuery, setMemorySearchQuery] = createSignal('')
+
+  async function loadMemories() {
+    setMemoryLoading(true)
+    try {
+      const c = await getClient()
+      const sc = memoryScopeFilter()
+      const filter: { scope?: import('@maxian/sdk').MemoryScope; workspaceId?: string; sessionId?: string } = {}
+      if (sc !== 'all') filter.scope = sc
+      if (sc === 'workspace') {
+        const ws = activeWorkspace()
+        if (ws) filter.workspaceId = ws.id
+      } else if (sc === 'session') {
+        const sid = activeSessionId()
+        if (sid) filter.sessionId = sid
+      }
+      const r = await c.listMemories(filter)
+      setMemoryRecords(r.records)
+    } catch (err) {
+      console.error('[Memory] load failed:', err)
+      pushError('memory', `加载记忆失败：${(err as Error).message}`)
+    } finally {
+      setMemoryLoading(false)
+    }
+  }
+
+  async function searchMemoriesUI(query: string) {
+    if (!query.trim()) { void loadMemories(); return }
+    setMemoryLoading(true)
+    try {
+      const c = await getClient()
+      const sc = memoryScopeFilter()
+      const r = await c.searchMemories({
+        query,
+        scope:        sc !== 'all' ? sc : undefined,
+        workspaceId:  sc === 'workspace' ? activeWorkspace()?.id : undefined,
+        sessionId:    sc === 'session'   ? (activeSessionId() ?? undefined) : undefined,
+        category:     memoryCategoryFilter() !== 'all' ? memoryCategoryFilter() as import('@maxian/sdk').MemoryCategory : undefined,
+        maxResults:   50,
+        minScore:     0.05,
+      })
+      setMemoryRecords(r.hits.map(h => h.record))
+    } catch (err) {
+      console.error('[Memory] search failed:', err)
+      pushError('memory', `搜索记忆失败：${(err as Error).message}`)
+    } finally {
+      setMemoryLoading(false)
+    }
+  }
+
+  /** 切换 scope/打开面板时重新加载 */
+  createEffect(() => {
+    if (!showMemoryPanel()) return
+    void memoryScopeFilter()  // 订阅
+    void loadMemories()
+  })
   const [skillsList, setSkillsList] = createSignal<SkillEntry[]>([])
   const [skillsLoading, setSkillsLoading] = createSignal(false)
   const [skillsSearchedDirs, setSkillsSearchedDirs] = createSignal<Array<{ path: string; source: string; exists: boolean }>>([])
 
-  // ── Token 用量 ─────────────────────────────────────────────────────────────
-  const [tokenUsed, setTokenUsed] = createSignal(0)
+  // ── Token 用量（K11a-cont：抽到 ./hooks/useTokenUsage） ────────────────────
   // tokenLimit 由后端根据实际模型窗口上报（token_usage 事件的 limit 字段）
   // 默认 1M（Qwen3-coder-plus / Claude 1M / Qwen-max-longcontext），
   // 后端通过 MAXIAN_CONTEXT_WINDOW 环境变量可覆盖，上报给前端后实时更新
-  const [tokenLimit, setTokenLimit] = createSignal(1_000_000)
+  const _tokenUsage = useTokenUsage({ defaultLimit: 1_000_000 })
+  const tokenUsed    = _tokenUsage.tokenUsed
+  const tokenLimit   = _tokenUsage.tokenLimit
+  const setTokenUsed = _tokenUsage.setTokenUsed
+  const setTokenLimit = _tokenUsage.setTokenLimit
 
   // ── Slash 命令面板 ─────────────────────────────────────────────────────────
   const [showSlash, setShowSlash] = createSignal(false)
@@ -443,13 +542,7 @@ export default function App() {
   const [attachedImages, setAttachedImages] = createSignal<AttachedImage[]>([])
 
   // ── 全局 Toast 系统（带 action 按钮） ─────────────────────────────────────
-  interface ToastItem {
-    id:       string
-    message:  string
-    kind:     'info' | 'success' | 'warn' | 'error'
-    action?:  { label: string; onClick: () => void }
-    duration: number
-  }
+  // ToastItem 类型 + ToastHost 组件已抽到 ./components/ToastHost.tsx
   const [toasts, setToasts] = createSignal<ToastItem[]>([])
   function showToast(opts: {
     message:  string
@@ -475,136 +568,21 @@ export default function App() {
     setToasts(prev => prev.filter(t => t.id !== id))
   }
 
-  // ── Prompt 历史（↑/↓ 翻历史）────────────────────────────────────────────
-  const HISTORY_STORAGE_KEY = 'maxian:prompt-history'
-  const HISTORY_MAX         = 100
-  const [promptHistory, setPromptHistory] = createSignal<string[]>(
-    (() => { try { return JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]') } catch { return [] } })()
-  )
-  const [historyIdx, setHistoryIdx] = createSignal(-1)  // -1 = 新输入；0..n-1 = 历史条目
-  const [historyDraft, setHistoryDraft] = createSignal('')
-  function pushPromptHistory(text: string) {
-    if (!text.trim()) return
-    setPromptHistory(prev => {
-      // 去重：若最新一条相同则跳过
-      if (prev[prev.length - 1] === text) return prev
-      const next = [...prev, text].slice(-HISTORY_MAX)
-      try { localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(next)) } catch {}
-      return next
-    })
-    setHistoryIdx(-1)
-  }
+  // K11b: prompt 历史已抽到 ./hooks/usePromptHistory
+  const _promptHistoryHook = usePromptHistory()
+  const promptHistory     = _promptHistoryHook.promptHistory
+  const historyIdx        = _promptHistoryHook.historyIdx
+  const setHistoryIdx     = _promptHistoryHook.setHistoryIdx
+  const historyDraft      = _promptHistoryHook.historyDraft
+  const setHistoryDraft   = _promptHistoryHook.setHistoryDraft
+  const pushPromptHistory = _promptHistoryHook.pushPromptHistory
 
   // ── 键盘快捷键速查面板 ───────────────────────────────────────────────────
   const [showKeybindHelp, setShowKeybindHelp] = createSignal(false)
   const [keybindSearch, setKeybindSearch] = createSignal('')
 
-  // ── Vim 模式（composer textarea 的基础 modal 编辑）────────────────────
-  const VIM_ENABLED_KEY = 'maxian:vim-enabled'
-  const [vimEnabled, setVimEnabled] = createSignal<boolean>(
-    (() => { try { return localStorage.getItem(VIM_ENABLED_KEY) === '1' } catch { return false } })()
-  )
-  function toggleVim(on: boolean) {
-    setVimEnabled(on)
-    try { localStorage.setItem(VIM_ENABLED_KEY, on ? '1' : '0') } catch {}
-  }
-  type VimMode = 'normal' | 'insert' | 'visual'
-  const [vimMode, setVimMode] = createSignal<VimMode>('insert')
-  // 暂存寄存器（yank / delete）
-  let vimRegister = ''
-  /** vim 按键处理器（返回 true 表示已处理，阻止默认） */
-  function handleVimKey(e: KeyboardEvent, ta: HTMLTextAreaElement): boolean {
-    if (!vimEnabled()) return false
-    if (e.metaKey || e.ctrlKey || e.altKey) return false
-    const mode = vimMode()
-    const k = e.key
-
-    // Esc 任何时候 → normal
-    if (k === 'Escape') { setVimMode('normal'); e.preventDefault(); return true }
-
-    if (mode === 'insert') {
-      // insert 模式下除了 Esc 都透传
-      return false
-    }
-
-    if (mode === 'normal' || mode === 'visual') {
-      const val = ta.value
-      const pos = ta.selectionStart
-      const lineStart = val.lastIndexOf('\n', pos - 1) + 1
-      const lineEnd   = val.indexOf('\n', pos); const lineEndIdx = lineEnd < 0 ? val.length : lineEnd
-
-      const set = (s: number, ePos?: number) => {
-        ta.selectionStart = s
-        ta.selectionEnd   = ePos ?? s
-      }
-
-      if (k === 'i') { setVimMode('insert'); e.preventDefault(); return true }
-      if (k === 'a') { set(pos + 1); setVimMode('insert'); e.preventDefault(); return true }
-      if (k === 'A') { set(lineEndIdx); setVimMode('insert'); e.preventDefault(); return true }
-      if (k === 'I') { set(lineStart); setVimMode('insert'); e.preventDefault(); return true }
-      if (k === 'o') {
-        ta.value = val.slice(0, lineEndIdx) + '\n' + val.slice(lineEndIdx)
-        set(lineEndIdx + 1); setVimMode('insert'); e.preventDefault(); return true
-      }
-      if (k === 'O') {
-        ta.value = val.slice(0, lineStart) + '\n' + val.slice(lineStart)
-        set(lineStart); setVimMode('insert'); e.preventDefault(); return true
-      }
-      if (k === 'h') { set(Math.max(0, pos - 1)); e.preventDefault(); return true }
-      if (k === 'l') { set(Math.min(val.length, pos + 1)); e.preventDefault(); return true }
-      if (k === 'j') {
-        const nextLineStart = lineEndIdx + 1
-        if (nextLineStart > val.length) return true
-        const col = pos - lineStart
-        const nextLineEnd = val.indexOf('\n', nextLineStart)
-        const nlEnd = nextLineEnd < 0 ? val.length : nextLineEnd
-        set(Math.min(nextLineStart + col, nlEnd))
-        e.preventDefault(); return true
-      }
-      if (k === 'k') {
-        if (lineStart === 0) return true
-        const prevLineEnd = lineStart - 1
-        const prevLineStart = val.lastIndexOf('\n', prevLineEnd - 1) + 1
-        const col = pos - lineStart
-        set(Math.min(prevLineStart + col, prevLineEnd))
-        e.preventDefault(); return true
-      }
-      if (k === '0' || k === 'Home') { set(lineStart); e.preventDefault(); return true }
-      if (k === '$' || k === 'End')  { set(lineEndIdx); e.preventDefault(); return true }
-      if (k === 'w') {
-        // 下一个单词起点
-        let i = pos
-        while (i < val.length && /\w/.test(val[i])) i++
-        while (i < val.length && !/\w/.test(val[i])) i++
-        set(i); e.preventDefault(); return true
-      }
-      if (k === 'b') {
-        let i = pos
-        while (i > 0 && !/\w/.test(val[i - 1])) i--
-        while (i > 0 && /\w/.test(val[i - 1])) i--
-        set(i); e.preventDefault(); return true
-      }
-      if (k === 'x') {
-        ta.value = val.slice(0, pos) + val.slice(pos + 1)
-        set(pos); e.preventDefault(); return true
-      }
-      if (k === 'D') {
-        ta.value = val.slice(0, pos) + val.slice(lineEndIdx)
-        vimRegister = val.slice(pos, lineEndIdx)
-        set(pos); e.preventDefault(); return true
-      }
-      if (k === 'p') {
-        ta.value = val.slice(0, pos + 1) + vimRegister + val.slice(pos + 1)
-        set(pos + 1 + vimRegister.length); e.preventDefault(); return true
-      }
-      // 屏蔽普通字符输入
-      if (k.length === 1 && /[a-zA-Z0-9]/.test(k)) {
-        e.preventDefault()
-        return true
-      }
-    }
-    return false
-  }
+  // K11b: Vim 模式逻辑已抽到 ./hooks/useVimMode
+  const { vimEnabled, toggleVim, vimMode, setVimMode, handleVimKey } = useVimMode()
 
   // ── 项目级自定义 command（从 .maxian/commands/*.md 加载，动态合入 slash 面板） ──
   interface CustomCmdEntry { name: string; description: string; template: string; agent?: string }
@@ -650,67 +628,11 @@ export default function App() {
     ].slice(0, 50))
   }
 
-  // ── 自定义快捷键（localStorage 持久化）────────────────────────────────
-  const KEYBIND_STORAGE = 'maxian:keybinds'
-  type KeybindAction = 'new-session' | 'close-session' | 'prev-session' | 'next-session'
-    | 'cmd-palette' | 'slash-cmd' | 'terminal' | 'settings' | 'help' | 'global-search'
-  interface KeybindEntry { action: KeybindAction; label: string; defaultKey: string }
-  const KEYBIND_DEFAULTS: KeybindEntry[] = [
-    { action: 'new-session',   label: '新建会话',        defaultKey: 'mod+n' },
-    { action: 'close-session', label: '关闭当前会话',    defaultKey: 'mod+w' },
-    { action: 'prev-session',  label: '上一个会话',      defaultKey: 'mod+[' },
-    { action: 'next-session',  label: '下一个会话',      defaultKey: 'mod+]' },
-    { action: 'slash-cmd',     label: '斜杠命令面板',    defaultKey: 'mod+k' },
-    { action: 'cmd-palette',   label: '全局搜索',        defaultKey: 'mod+p' },
-    { action: 'terminal',      label: '切换终端',        defaultKey: 'mod+`' },
-    { action: 'settings',      label: '打开设置',        defaultKey: 'mod+,' },
-    { action: 'help',          label: '快捷键速查',      defaultKey: 'mod+/' },
-  ]
-  const [customKeybinds, setCustomKeybinds] = createSignal<Record<string, string>>(
-    (() => { try { return JSON.parse(localStorage.getItem(KEYBIND_STORAGE) || '{}') } catch { return {} } })()
-  )
-  function getKeybind(action: KeybindAction): string {
-    const custom = customKeybinds()[action]
-    if (custom) return custom
-    return KEYBIND_DEFAULTS.find(k => k.action === action)?.defaultKey ?? ''
-  }
-  function setKeybind(action: KeybindAction, key: string) {
-    const next = { ...customKeybinds(), [action]: key }
-    setCustomKeybinds(next)
-    try { localStorage.setItem(KEYBIND_STORAGE, JSON.stringify(next)) } catch {}
-  }
-  function resetKeybind(action: KeybindAction) {
-    const next = { ...customKeybinds() }
-    delete next[action]
-    setCustomKeybinds(next)
-    try { localStorage.setItem(KEYBIND_STORAGE, JSON.stringify(next)) } catch {}
-  }
-  /** 把 KeyboardEvent 转成 "mod+X" 字符串 */
-  function eventToKeybind(e: KeyboardEvent): string {
-    const mod = e.metaKey || e.ctrlKey
-    const shift = e.shiftKey
-    const alt = e.altKey
-    let k = e.key.toLowerCase()
-    if (k === ' ') k = 'space'
-    const parts: string[] = []
-    if (mod) parts.push('mod')
-    if (alt) parts.push('alt')
-    if (shift) parts.push('shift')
-    parts.push(k)
-    return parts.join('+')
-  }
-  /** 检查 KeyboardEvent 是否匹配绑定字符串 */
-  function matchKeybind(e: KeyboardEvent, bind: string): boolean {
-    return eventToKeybind(e) === bind.toLowerCase()
-  }
+  // K11b: 自定义快捷键已抽到 ./hooks/useCustomKeybinds
+  const { customKeybinds, getKeybind, setKeybind, resetKeybind } = useCustomKeybinds()
 
   // ── 全局命令面板（⌘P）────────────────────────────────────────────────
-  interface PaletteItem {
-    type:   'session' | 'file' | 'symbol' | 'command'
-    label:  string
-    desc?:  string
-    onSelect: () => void | Promise<void>
-  }
+  // PaletteItem 类型 + GlobalCommandPalette 组件已抽到 ./components/GlobalCommandPalette.tsx
   const [showCmdPalette, setShowCmdPalette] = createSignal(false)
   const [cmdPaletteQuery, setCmdPaletteQuery] = createSignal('')
   const [cmdPaletteIdx, setCmdPaletteIdx] = createSignal(0)
@@ -783,44 +705,22 @@ export default function App() {
     }
   }
 
-  // ── 会话内 Cmd+F 搜索（P0-3）─────────────────────────────────────────────
-  const [showInChatSearch, setShowInChatSearch] = createSignal(false)
-  const [inChatSearchQuery, setInChatSearchQuery] = createSignal('')
-  const [inChatSearchIdx, setInChatSearchIdx] = createSignal(0)
-  let inChatSearchInputRef: HTMLInputElement | undefined
-  /** 当前所有命中消息的 idx（在 messages 数组中的索引） */
-  const inChatSearchHits = createMemo((): number[] => {
-    const q = inChatSearchQuery().trim().toLowerCase()
-    if (!q || !showInChatSearch()) return []
-    const hits: number[] = []
-    const list = messages()
-    for (let i = 0; i < list.length; i++) {
-      const m = list[i]
-      const text = (m.content ?? '') + ' ' + (m.toolName ?? '') + ' ' + (m.toolResult ?? '')
-      if (text.toLowerCase().includes(q)) hits.push(i)
-    }
-    return hits
+  // K11b: 会话内 ⌘F 搜索已抽到 ./hooks/useInChatSearch
+  const _inChatSearch = useInChatSearch({
+    messages:         () => messages(),
+    setFocusedMsgIdx: (idx) => setFocusedMsgIdx(idx),
   })
-  function openInChatSearch() {
-    setShowInChatSearch(true)
-    setInChatSearchIdx(0)
-    setTimeout(() => { inChatSearchInputRef?.focus(); inChatSearchInputRef?.select() }, 0)
-  }
-  function closeInChatSearch() {
-    setShowInChatSearch(false)
-  }
-  function jumpToSearchHit(idx: number) {
-    const hits = inChatSearchHits()
-    if (hits.length === 0) return
-    const i = ((idx % hits.length) + hits.length) % hits.length
-    setInChatSearchIdx(i)
-    const targetMsgIdx = hits[i]
-    setFocusedMsgIdx(targetMsgIdx)
-    queueMicrotask(() => {
-      const el = document.querySelector(`[data-msg-idx="${targetMsgIdx}"]`) as HTMLElement | null
-      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    })
-  }
+  const showInChatSearch    = _inChatSearch.showInChatSearch
+  const setShowInChatSearch = _inChatSearch.setShowInChatSearch
+  const inChatSearchQuery    = _inChatSearch.inChatSearchQuery
+  const setInChatSearchQuery = _inChatSearch.setInChatSearchQuery
+  const inChatSearchIdx      = _inChatSearch.inChatSearchIdx
+  const setInChatSearchIdx   = _inChatSearch.setInChatSearchIdx
+  const inChatSearchHits     = _inChatSearch.inChatSearchHits
+  const openInChatSearch     = _inChatSearch.openInChatSearch
+  const closeInChatSearch    = _inChatSearch.closeInChatSearch
+  const jumpToSearchHit      = _inChatSearch.jumpToSearchHit
+  let inChatSearchInputRef: HTMLInputElement | undefined  // 兼容老代码 ref={...} 用法
 
   // ── 消息过滤器（P1-13）: 隐藏内部工具、折叠 reasoning ─────────────────────
   const FILTER_STORAGE_KEY = 'maxian:msg-filter'
@@ -841,47 +741,16 @@ export default function App() {
   const INTERNAL_TOOL_NAMES = new Set(['todo_write', 'load_skill', 'ask_followup_question', 'update_todo_list'])
 
   // ── 权限记忆（P1-14）: 持久化到 localStorage ──────────────────────────────
-  const ALLOW_ALWAYS_KEY = 'maxian:tool-allow-always'  // 全局：永久允许的工具名
-  const [allowAlways, setAllowAlways] = createSignal<Set<string>>(
-    new Set<string>(
-      (() => { try { return JSON.parse(localStorage.getItem(ALLOW_ALWAYS_KEY) || '[]') } catch { return [] } })()
-    )
-  )
-  // 当前会话的一次性允许列表（不持久化，切会话就重置）
-  const [sessionAllow, setSessionAllow] = createSignal<Map<string, Set<string>>>(new Map())
-  function addAllowAlways(toolName: string) {
-    setAllowAlways(prev => {
-      const next = new Set(prev)
-      next.add(toolName)
-      try { localStorage.setItem(ALLOW_ALWAYS_KEY, JSON.stringify([...next])) } catch {}
-      return next
-    })
-  }
-  function removeAllowAlways(toolName: string) {
-    setAllowAlways(prev => {
-      const next = new Set(prev)
-      next.delete(toolName)
-      try { localStorage.setItem(ALLOW_ALWAYS_KEY, JSON.stringify([...next])) } catch {}
-      return next
-    })
-  }
-  function addSessionAllow(sessionId: string, toolName: string) {
-    setSessionAllow(prev => {
-      const next = new Map(prev)
-      const set = new Set(next.get(sessionId) ?? [])
-      set.add(toolName)
-      next.set(sessionId, set)
-      return next
-    })
-  }
-  function isAutoApproved(sessionId: string, toolName: string): boolean {
-    if (allowAlways().has(toolName)) return true
-    if (sessionAllow().get(sessionId)?.has(toolName)) return true
-    return false
-  }
+  // K11a-cont: 审批白名单 已抽到 ./hooks/useApprovalQueue
+  const _approvalQueue = useApprovalQueue()
+  const allowAlways      = _approvalQueue.allowAlways
+  const addAllowAlways   = _approvalQueue.addAllowAlways
+  const removeAllowAlways = _approvalQueue.removeAllowAlways
+  const addSessionAllow  = _approvalQueue.addSessionAllow
+  const isAutoApproved   = _approvalQueue.isAutoApproved
 
   // ── 作曲模式 (Code / Ask / Plan / Bypass) ────────────────────────────────
-  type ComposerMode = 'code' | 'ask' | 'plan' | 'bypass'
+  // ComposerMode 类型已从 ./components/ModeSelector 导入
   const [composerMode, setComposerMode] = createSignal<ComposerMode>('code')
   const [showModeDropdown, setShowModeDropdown] = createSignal(false)
 
@@ -889,13 +758,21 @@ export default function App() {
   const [paletteRect, setPaletteRect] = createSignal({ bottom: 100, left: 0, width: 600 })
   let composerWrapRef: HTMLDivElement | undefined
 
-  // ── Git 状态栏 ────────────────────────────────────────────────────────────
-  const [currentBranch, setCurrentBranch] = createSignal<string | null>(null)
-  const [showBranchPicker, setShowBranchPicker] = createSignal(false)
-  const [branchPickerBranches, setBranchPickerBranches] = createSignal<string[]>([])
-  const [branchPickerLoading, setBranchPickerLoading] = createSignal(false)
-  const [branchPickerSearch, setBranchPickerSearch] = createSignal("")
-  const [branchPickerRect, setBranchPickerRect] = createSignal({ bottom: 0, left: 0 })
+  // K11b: Git 分支选择器已抽到 ./hooks/useGitBranchPicker
+  const _branchPicker = useGitBranchPicker({
+    activeWorkspace: () => activeWorkspace(),
+    getClient: () => getClient() as any,
+  })
+  const currentBranch           = _branchPicker.currentBranch
+  const setCurrentBranch        = _branchPicker.setCurrentBranch
+  const showBranchPicker        = _branchPicker.showBranchPicker
+  const setShowBranchPicker     = _branchPicker.setShowBranchPicker
+  const branchPickerBranches    = _branchPicker.branchPickerBranches
+  const setBranchPickerBranches = _branchPicker.setBranchPickerBranches
+  const branchPickerLoading     = _branchPicker.branchPickerLoading
+  const branchPickerSearch      = _branchPicker.branchPickerSearch
+  const setBranchPickerSearch   = _branchPicker.setBranchPickerSearch
+  const branchPickerRect        = _branchPicker.branchPickerRect
 
   // ── 集成终端 ──────────────────────────────────────────────────────────────
   const [showTerminal, setShowTerminal] = createSignal(false)
@@ -905,7 +782,21 @@ export default function App() {
   const [activeTermId, setActiveTermId] = createSignal<string | null>(null)
   /** xterm.js + WebSocket 实例 Map（id → 实例），生命周期与 App 相同 */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const termInstances = new Map<string, { term: any; ws: WebSocket; fit: any; resizeObs?: ResizeObserver }>()
+  /**
+   * 终端实例。
+   * 注意：从 v0.2.16 起 PTY 改由 Tauri Rust（portable-pty）侧管理，绕开 Bun 运行时
+   * 在 @lydell/node-pty 上的 PTY 子进程 bug。前端通过 Tauri command 启停 / 写 / 调整尺寸，
+   * 通过 listen('terminal://data') 接收输出。`terminalId` 是 Rust 侧返回的唯一标识，
+   * 命令调用必须用这个 id；前端 tab 自己的 id 仅用于 DOM key（两者独立）。
+   */
+  type TerminalInstance = {
+    term:        any
+    fit:         any
+    terminalId:  string                   // Rust portable-pty 返回的会话 id
+    unlistenFns: Array<() => void>        // listen() 返回的 unsub
+    resizeObs?:  ResizeObserver
+  }
+  const termInstances = new Map<string, TerminalInstance>()
   /** 每个会话的终端状态快照（仅记录 show/collapsed/height，tabs 通过 sessionId 字段过滤） */
   interface SessionTerminalSnapshot {
     show: boolean
@@ -919,6 +810,20 @@ export default function App() {
   const [workspaces, setWorkspaces] = createSignal<Workspace[]>([])
   // v0.2.16+：任务批次面板显隐（在主区覆盖渲染）
   const [showBatchPanel, setShowBatchPanel] = createSignal(false)
+  // v0.2.16+：从 Task → 看日志 跳转时，临时记下跳前的 activeSessionId，
+  // 用户点 Chat/Code 段切换离开"被临时打开的任务会话"时恢复，避免污染最近会话。
+  // selectSession 默认会清掉它（任何"非跳转"的会话切换 = 用户的新选择，覆盖回退目标）。
+  const [_jumpReturnSessionId, _setJumpReturnSessionId] = createSignal<string | null>(null)
+  /** 切到 chat/code 段：若刚才是从 Task → 看日志 临时跳过来的，恢复跳前的会话 */
+  const leaveBatchPanelToMode = (mode: 'chat' | 'code'): void => {
+    setShowBatchPanel(false)
+    setGlobalMode(mode)
+    const saved = _jumpReturnSessionId()
+    if (saved && saved !== activeSessionId()) {
+      // selectSession 内部会自动清掉 _jumpReturnSessionId
+      void selectSession(saved)
+    }
+  }
   // 给 BatchPanel 用的 client（lazy 拿一次缓存）
   const [batchClient, setBatchClient] = createSignal<Awaited<ReturnType<typeof getClient>> | null>(null)
   createEffect(() => {
@@ -1062,18 +967,7 @@ export default function App() {
   // 当前会话最早一条消息的 createdAt（用作 before 游标）
   const [msgOldestTs, setMsgOldestTs] = createSignal<number | undefined>(undefined)
 
-  // ── Slash 命令列表 ─────────────────────────────────────────────────────────
-  const SLASH_COMMANDS = [
-    { name: "clear",    label: "清空会话",    desc: "清空当前对话所有消息",       icon: "🗑️" },
-    { name: "new",      label: "新建会话",    desc: "创建一个新的会话",            icon: "✏️" },
-    { name: "compact",  label: "压缩上下文",  desc: "手动压缩对话历史释放 token", icon: "🗜" },
-    { name: "plan",     label: "计划模式",    desc: "切换到只规划不执行的模式",    icon: "📋" },
-    { name: "fork",     label: "分叉会话",    desc: "复制当前会话到新分支",        icon: "🔀" },
-    { name: "terminal", label: "打开终端",    desc: "打开集成终端 (⌘`)",          icon: "⚡" },
-    { name: "files",    label: "查看变更",    desc: "显示本次会话修改的文件",      icon: "📁" },
-    { name: "export",   label: "导出会话",    desc: "将对话历史导出为 Markdown",   icon: "💾" },
-    { name: "help",     label: "帮助",        desc: "显示可用命令列表",            icon: "❓" },
-  ] as const
+  // SLASH_COMMANDS 已抽到 ./lib/slashCommands.ts
 
   // 接收计数器：用普通变量 + DOM ref 直接写，绕过 SolidJS batching，保证每次事件立即更新
   let _recvCount = 0
@@ -1392,6 +1286,9 @@ export default function App() {
   }
 
   async function selectSession(id: string) {
+    // 任意"显式选会话"都意味着用户的最新意图覆盖了"看日志临时跳转"的回退目标。
+    // 看日志 handler 会在 selectSession 完成 *之后* 重新写入 _jumpReturnSessionId，从而保住跳前的会话。
+    _setJumpReturnSessionId(null)
     // ── 保存当前会话的终端状态快照 ──
     const outgoingId = activeSessionId()
     if (outgoingId) {
@@ -1712,476 +1609,39 @@ export default function App() {
   }
 
   // ─── SSE ──────────────────────────────────────────────────────────────────
-  // 任务取消时间戳：cancel 触发后，后续残留的 reasoning_delta / assistant_message
-  // / tool_input_delta 事件全部忽略，避免 UI 持续显示"已停止任务"的输出
-  let _abortedAt = 0
+  // K11b: handleEvent (465 行 SSE 事件分发) 已抽到 ./hooks/useChatEventHandler。
+  // 内部封装 _abortedAt（取消时间戳）和事件分发逻辑；通过 deps 注入所有需要的 setter / helper。
+  const _chatEventHandler = createChatEventHandler({
+    setMessages: (updater) => setMessages(updater),
+    setSending,
+    bumpRecv: _bumpRecv,
+    setChangedFiles: (updater) => setChangedFiles(updater),
+    setTokenUsed,
+    tokenLimit,
+    setTokenLimit,
+    todos,
+    setTodos: (list) => setTodos(list),
+    setTodosLeftover,
+    setFollowupSuggestions: (list) => setFollowupSuggestions(list),
+    setRateLimit: (state) => setRateLimit(state),
+    setQuestionRequest: (req) => setQuestionRequest(req),
+    setQuestionAnswer,
+    setQuestionSelected: (list) => setQuestionSelected(list),
+    setPlanExitRequest: (req) => setPlanExitRequest(req),
+    setPlanExitFeedback,
+    compactingState,
+    setCompactingState: (s) => setCompactingState(s),
+    setApprovalRequest: (req) => setApprovalRequest(req),
+    isAutoApproved,
+    getClient: () => getClient() as any,
+    showToast,
+    pushError,
+    refreshSessions: () => refreshSessions(),
+    maybeScrollToBottom,
+    nextMsgId: () => String(++msgId),
+  })
+  const handleEvent = _chatEventHandler.handle
 
-  function handleEvent(e: MaxianEvent) {
-    const type = e.type as string
-
-    // task_aborted = 后端强制中止信号，立刻进入"忽略后续流"模式
-    if (type === "task_aborted") {
-      _abortedAt = Date.now()
-      console.log('[handleEvent] 收到 task_aborted，后续 200ms 内的流式事件全部忽略')
-      // 收尾所有 isPartial 消息
-      setMessages((prev) => prev.map(m => {
-        if (!m.isPartial) return m
-        if (m.role === 'tool') {
-          return { ...m, isPartial: false, toolSuccess: false, toolResult: m.toolResult || '[任务已中止]' }
-        }
-        if (m.role === 'reasoning') return { ...m, isPartial: false, charCount: m.content.length }
-        return { ...m, isPartial: false }
-      }))
-      setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
-      setSending(false)
-      return
-    }
-
-    // 流式事件白名单：abort 后 1.5 秒内丢弃这些（兜底防 SSE buffer 残留）
-    const STREAM_EVENTS = new Set([
-      'reasoning_delta', 'assistant_message', 'tool_input_delta', 'tool_call_start',
-      'tool_call_result', 'tool_output_chunk', 'todos_updated',
-    ])
-    if (_abortedAt > 0 && STREAM_EVENTS.has(type) && (Date.now() - _abortedAt) < 1500) {
-      return  // 静默丢弃
-    }
-
-    // 文件变更事件
-    if (type === "file_changed") {
-      const filePath = (e as any).path as string
-      const action   = (e as any).action as FileChangeEntry['action']
-      setChangedFiles(prev => {
-        const next = new Map(prev)
-        next.set(filePath, { path: filePath, action })
-        return next
-      })
-      return
-    }
-    // Token 用量事件
-    if (type === "token_usage") {
-      const used  = (e as any).used  as number
-      const limit = (e as any).limit as number | undefined
-      setTokenUsed(used)
-      // 后端上报的 limit 作为真实上下文窗口大小（覆盖前端默认 128K）
-      if (typeof limit === 'number' && limit > 0 && limit !== tokenLimit()) {
-        setTokenLimit(limit)
-      }
-      return
-    }
-    // Todos 更新事件（AI 调用 todo_write 工具时触发）
-    if (type === "todos_updated") {
-      const list = (e as any).todos as TodoItem[]
-      setTodos(Array.isArray(list) ? list : [])
-      setTodosLeftover(false)   // AI 又更新了 todos，清掉上一轮的"未完成"提示
-      return
-    }
-    // Followup 建议
-    if (type === "followup_suggestions") {
-      const list = (e as any).suggestions as string[]
-      setFollowupSuggestions(Array.isArray(list) ? list : [])
-      return
-    }
-    // Rate-limit 事件
-    if (type === "rate_limit") {
-      const resetAt = Number((e as any).resetAt) || (Date.now() + 30000)
-      const attempt = Number((e as any).attempt) || 1
-      const message = String((e as any).message ?? '触发限流，正在等待重试…')
-      setRateLimit({ active: true, resetAt, attempt, message })
-      return
-    }
-    if (type === "rate_limit_cleared") {
-      setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
-      return
-    }
-    // Agent 提问
-    if (type === "question_request") {
-      setQuestionAnswer('')
-      setQuestionSelected([])
-      setQuestionRequest({
-        sessionId: (e as any).sessionId as string,
-        question:  (e as any).question as string,
-        options:   ((e as any).options as string[]) ?? [],
-        multi:     ((e as any).multi as boolean) ?? false,
-      })
-      return
-    }
-    // Plan Exit 请求
-    if (type === "plan_exit_request") {
-      setPlanExitFeedback('')
-      setPlanExitRequest({
-        sessionId: (e as any).sessionId as string,
-        summary:   (e as any).summary as string,
-        steps:     ((e as any).steps as string) ?? '',
-      })
-      return
-    }
-    // 上下文压缩开始
-    if (type === "context_compacting") {
-      setCompactingState({
-        tokensCurrent: (e as any).tokensCurrent as number,
-        willLevel2:    !!(e as any).willLevel2,
-        manual:        !!(e as any).manual,
-        startedAt:     Date.now(),
-      })
-      return
-    }
-    // 上下文压缩完成
-    if (type === "context_compacted") {
-      const level  = (e as any).level  as number
-      const before = (e as any).tokensBefore as number
-      const after  = (e as any).tokensAfter  as number
-      const pruned = (e as any).prunedTools as number
-      const summd  = (e as any).summarizedMsgs as number
-      const manual = (e as any).manual as boolean
-      const error  = (e as any).error  as string | undefined
-      const compactStart = compactingState()?.startedAt
-      const elapsed = compactStart ? ((Date.now() - compactStart) / 1000).toFixed(1) : null
-      setCompactingState(null)
-
-      if (error) {
-        setMessages(prev => [...prev, {
-          id: String(++msgId),
-          role: 'error',
-          createdAt: Date.now(),
-          content: `🗜 上下文压缩失败：${error}`,
-        }])
-        showToast({ message: `压缩失败：${error}`, kind: 'error', duration: 5000 })
-        return
-      }
-
-      if (level === 0) {
-        // 压缩实际未运行（比如 token 未达阈值、剪枝没够效果）
-        setMessages(prev => [...prev, {
-          id: String(++msgId),
-          role: 'system',
-          createdAt: Date.now(),
-          content: `🗜 上下文压缩：未触发（当前 ${before.toLocaleString()} tokens 未达阈值）${elapsed ? ` · ${elapsed}s` : ''}`,
-        }])
-        return
-      }
-
-      const levelLabel = level === 2 ? 'LLM 总结' : '按类型剪枝'
-      const saved = before - after
-      const savedPct = before > 0 ? Math.round(saved / before * 100) : 0
-      const detail = [
-        `${before.toLocaleString()} → ${after.toLocaleString()} tokens`,
-        saved > 0 ? `节省 ${saved.toLocaleString()} (${savedPct}%)` : null,
-        pruned > 0 ? `剪 ${pruned} 工具结果` : null,
-        summd > 0 ? `总结 ${summd} 条` : null,
-        elapsed ? `${elapsed}s` : null,
-      ].filter(Boolean).join(' · ')
-      setMessages(prev => [...prev, {
-        id: String(++msgId),
-        role: 'system',
-        createdAt: Date.now(),
-        content: `🗜 ${manual ? '手动' : '自动'}上下文压缩完成（${levelLabel}）：${detail}`,
-      }])
-      showToast({
-        message: `压缩完成：${before.toLocaleString()} → ${after.toLocaleString()} tokens${elapsed ? ` · ${elapsed}s` : ''}`,
-        kind: 'success',
-        duration: 4000,
-      })
-      return
-    }
-    // 流式 tool input 增量（实时显示工具参数生成进度）
-    if (type === "tool_input_delta") {
-      const inputDelta = (e as any).inputDelta as string
-      // 只更新接收计数器让 UI "已接收 X 字" 动起来。
-      // ⚠️ 重要：之前每个 chunk 都 setMessages 把 inputDelta 累积到 tool message 的
-      // content 字段——但 ToolCallCard 在 streaming 期间根本不显示 content，纯无用写。
-      // 副作用：multiedit 转 2000 行 SP 时单次工具参数 100KB，每 50ms 复制整个 messages
-      // 数组 + Solid <For> 全表 memo 重算 + hljs 反复跑 → webview OOM 真凶。
-      // 完整 toolParams 在 tool_call_start streaming=false 时一次性写入即可，无需流式累积。
-      if (inputDelta) _bumpRecv(inputDelta.length)
-      return
-    }
-    // 工具流式输出（bash 的 stdout/stderr 实时增量）
-    if (type === "tool_output_chunk") {
-      const toolUseId = (e as any).toolUseId as string
-      const chunk     = (e as any).chunk     as string
-      const kind      = ((e as any).kind     as 'stdout' | 'stderr') ?? 'stdout'
-      if (!toolUseId || !chunk) return
-      // 追加到对应工具消息的 liveOutput 字段（供工具卡片实时显示）。
-      // 上限 64KB：长期跑的 bash（npm install / build）输出能到几 MB，
-      // 多任务累积容易让 webview OOM。超限保留尾部 64KB 即可（UI 也只看 tail）。
-      const LIVE_OUTPUT_CAP = 64 * 1024
-      setMessages((prev) => {
-        const idx = [...prev].reverse().findIndex(m => m.role === 'tool' && m.toolUseId === toolUseId)
-        if (idx === -1) return prev
-        const realIdx = prev.length - 1 - idx
-        const t = prev[realIdx] as any
-        const prevLive = t.liveOutput ?? ''
-        const marker = kind === 'stderr' ? '⚠ ' : ''
-        let next = prevLive + marker + chunk
-        if (next.length > LIVE_OUTPUT_CAP) {
-          next = '... [输出超 64KB，已截断头部]\n' + next.slice(-LIVE_OUTPUT_CAP)
-        }
-        return [
-          ...prev.slice(0, realIdx),
-          { ...t, liveOutput: next },
-          ...prev.slice(realIdx + 1),
-        ]
-      })
-      return
-    }
-    // 工具审批请求事件
-    if (type === "tool_approval_request") {
-      const sid = (e as any).sessionId as string
-      const toolUseId = (e as any).toolUseId as string
-      const toolName  = (e as any).toolName  as string
-      const toolParams = (e as any).toolParams as Record<string, unknown>
-      // 自动审批：已记忆的工具跳过弹窗
-      if (isAutoApproved(sid, toolName)) {
-        void (async () => {
-          try {
-            const c = await getClient()
-            await c.approveToolCall(sid, toolUseId, true)
-          } catch (err) {
-            console.error('[auto-approve] failed:', err)
-          }
-        })()
-        return
-      }
-      setApprovalRequest({ sessionId: sid, toolUseId, toolName, toolParams })
-      return
-    }
-    if (type === "reasoning_delta") {
-      // 思考过程流式 delta
-      const content = (e as any).content as string
-      if (!content) return
-      _bumpRecv(content.length)
-      // 单条 reasoning 上限 30KB：DeepSeek thinking 一轮可累 50KB+ 思维链，
-      // 600 条 messages × 50KB = 30MB 仅 reasoning 文本；给单条加 cap 把 worst case 砍半。
-      const REASONING_PER_MSG_CAP = 30 * 1024
-      setMessages((prev) => {
-        if (prev.length > 0 && prev[prev.length - 1].role === "reasoning" && prev[prev.length - 1].isPartial) {
-          const last = prev[prev.length - 1]
-          let nextContent = last.content + content
-          if (nextContent.length > REASONING_PER_MSG_CAP) {
-            // 保留头部 + 尾部，省略中间（思考有用的信息常在结论附近）
-            const head = nextContent.slice(0, REASONING_PER_MSG_CAP / 2)
-            const tail = nextContent.slice(-REASONING_PER_MSG_CAP / 2)
-            nextContent = head + `\n\n... [思维链中段 ${nextContent.length - REASONING_PER_MSG_CAP} 字省略，仅 UI 显示]\n\n` + tail
-          }
-          return [...prev.slice(0, -1), { ...last, content: nextContent }]
-        }
-        return [...prev, { id: String(++msgId), role: "reasoning", content, isPartial: true, createdAt: Date.now() }]
-      })
-    } else if (type === "assistant_message") {
-      const content = (e as any).content as string
-      const isPartial = (e as any).isPartial as boolean
-      if (content) _bumpRecv(content.length)
-      // 单条 assistant 上限 80KB：超长回复（如代码生成）单条文本能到几十 KB，
-      // 给 cap 防长会话×长输出双重累积。代码段已经写到工具结果，自然语言部分够用。
-      const ASSISTANT_PER_MSG_CAP = 80 * 1024
-      setMessages((prev) => {
-        let base = prev
-        const lastMsg = base.length > 0 ? base[base.length - 1] : null
-        if (lastMsg?.role === 'reasoning' && lastMsg.isPartial) {
-          base = [...base.slice(0, -1), { ...lastMsg, isPartial: false, charCount: lastMsg.content.length }]
-        }
-        if (isPartial && base.length > 0 && base[base.length - 1].role === "assistant") {
-          const last = base[base.length - 1]
-          let nextContent = last.content + content
-          if (nextContent.length > ASSISTANT_PER_MSG_CAP) {
-            const head = nextContent.slice(0, ASSISTANT_PER_MSG_CAP / 2)
-            const tail = nextContent.slice(-ASSISTANT_PER_MSG_CAP / 2)
-            nextContent = head + `\n\n... [回复中段 ${nextContent.length - ASSISTANT_PER_MSG_CAP} 字省略]\n\n` + tail
-          }
-          return [...base.slice(0, -1), { ...last, content: nextContent, isPartial }]
-        }
-        return [...base, { id: String(++msgId), role: "assistant", content, isPartial, createdAt: Date.now() }]
-      })
-    } else if (type === "convert_reasoning_to_assistant") {
-      // Agent 模式：最终迭代的文本以 reasoning_delta 流出，完成后转为普通助手消息
-      setMessages((prev) => {
-        if (prev.length === 0) return prev
-        const last = prev[prev.length - 1]
-        if (last.role === "reasoning") {
-          // 将最后一条 reasoning 转为 assistant（保留内容，渲染切为 markdown）
-          return [...prev.slice(0, -1), {
-            ...last, role: "assistant" as const, isPartial: false,
-          }]
-        }
-        return prev
-      })
-    } else if (type === "completion") {
-      setMessages((prev) => prev.map(m => {
-        // 完成所有残余 partial assistant
-        if (m.role === "assistant" && m.isPartial) return { ...m, isPartial: false }
-        // 完成所有残余 partial reasoning（中间迭代留下的）
-        if (m.role === "reasoning" && m.isPartial) return { ...m, isPartial: false, charCount: m.content.length }
-        return m
-      }))
-      setSending(false); void refreshSessions()
-      // 系统通知：当文档不在前台时发送 OS 通知
-      if (document.visibilityState !== 'visible') {
-        void (async () => {
-          try {
-            if ((window as any).__TAURI_INTERNALS__) {
-              const { sendNotification } = await import('@tauri-apps/plugin-notification' as any)
-              await sendNotification({ title: '码弦 AI', body: 'AI 已完成任务' })
-            } else if ('Notification' in window && (Notification as any).permission === 'granted') {
-              new Notification('码弦 AI', { body: 'AI 已完成任务', icon: '/favicon.ico' })
-            }
-          } catch { /* 忽略通知失败 */ }
-        })()
-      }
-      // 提示音（Web Audio API）
-      try {
-        const ctx = new AudioContext()
-        const osc = ctx.createOscillator()
-        const gain = ctx.createGain()
-        osc.connect(gain); gain.connect(ctx.destination)
-        osc.frequency.setValueAtTime(880, ctx.currentTime)
-        osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.15)
-        gain.gain.setValueAtTime(0.1, ctx.currentTime)
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3)
-        osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.3)
-        osc.onended = () => ctx.close()
-      } catch { /* 忽略音频失败 */ }
-    } else if (type === "task_status") {
-      const s = (e as any).status as string
-      if (s === "processing") {
-        _bumpRecv(1)   // 后端开始处理，让蓝点亮起
-        setTodosLeftover(false)   // 新一轮处理开始，清掉上一轮的"未完成"提示
-        // 新任务一律清空上一轮 todos（不论状态）：AI 调 todo_write 时会重写完整列表，
-        // 清空避免新任务 sending 期间把旧清单搬回来显示。
-        setTodos([])
-      }
-      if (s === "completed" || s === "aborted" || s === "error") {
-        setSending(false)
-        // 检查 todos 是否有未收尾的项目（AI 提前结束的兜底提示）
-        const list = todos()
-        if (list.length > 0 && list.some(t => t.status === 'in_progress' || t.status === 'pending')) {
-          setTodosLeftover(true)
-        }
-      }
-    } else if (type === "tool_call_start") {
-      _bumpRecv(1)
-      const toolName   = (e as any).toolName   as string
-      const toolUseId  = (e as any).toolUseId  as string
-      let   toolParams = (e as any).toolParams as Record<string, unknown> | undefined
-      const streaming  = (e as any).streaming  as boolean | undefined
-      // toolParams 大字段截断（multiedit 转 2000 行文件时 edits[].oldString/newString 各 100KB+
-      // 直接进 messages signal 会把 webview 内存撑爆）。
-      // UI 只用 path / command 等"主参数"展示，长字符串字段用占位符替换。
-      if (toolParams) {
-        const TRIM_FIELD_BYTES = 4096
-        const trimmed: Record<string, unknown> = {}
-        for (const [k, v] of Object.entries(toolParams)) {
-          if (typeof v === 'string' && v.length > TRIM_FIELD_BYTES) {
-            trimmed[k] = v.slice(0, TRIM_FIELD_BYTES) + `\n... [${v.length - TRIM_FIELD_BYTES} 字节已截断]`
-          } else if (Array.isArray(v)) {
-            // multiedit 的 edits 数组逐项截断
-            trimmed[k] = v.map((item: any) => {
-              if (item && typeof item === 'object') {
-                const out: Record<string, unknown> = {}
-                for (const [ik, iv] of Object.entries(item)) {
-                  out[ik] = (typeof iv === 'string' && iv.length > TRIM_FIELD_BYTES)
-                    ? iv.slice(0, TRIM_FIELD_BYTES) + `\n... [${iv.length - TRIM_FIELD_BYTES} 字节已截断]`
-                    : iv
-                }
-                return out
-              }
-              return item
-            })
-          } else {
-            trimmed[k] = v
-          }
-        }
-        toolParams = trimmed
-      }
-      setMessages((prev) => {
-        // 如果是 streaming=false（工具参数完整到达），查找已有占位消息更新其 toolParams
-        if (streaming === false) {
-          const idx = [...prev].reverse().findIndex(m => m.role === "tool" && m.toolUseId === toolUseId)
-          if (idx !== -1) {
-            const realIdx = prev.length - 1 - idx
-            return [
-              ...prev.slice(0, realIdx),
-              { ...prev[realIdx], toolParams, content: '' /* 清空 streaming 文本，正式结果在 toolResult 里 */ },
-              ...prev.slice(realIdx + 1),
-            ]
-          }
-        }
-        // streaming=true（首次）或没找到占位：新建工具消息
-        let base = prev
-        if (prev.length > 0) {
-          const last = prev[prev.length - 1]
-          if (last.isPartial && (last.role === 'assistant' || last.role === 'reasoning')) {
-            base = [...prev.slice(0, -1), {
-              ...last,
-              isPartial: false,
-              ...(last.role === 'reasoning' ? { charCount: last.content.length } : {}),
-            }]
-          }
-        }
-        return [...base, {
-          id: String(++msgId), role: "tool" as const, content: "",
-          toolName, toolUseId, toolSuccess: undefined, isPartial: true, toolParams,
-          createdAt: Date.now(),
-        }]
-      })
-    } else if (type === "tool_call_result") {
-      const toolUseId  = (e as any).toolUseId as string
-      const success    = (e as any).success   as boolean
-      let   toolResult = (e as any).result    as string | undefined
-      // 工具结果也算接收到的数据
-      if (toolResult) _bumpRecv(toolResult.length)
-      // 超大 toolResult（log 转储 / 大文件 grep）截 200KB，避免单条消息吃几 MB 内存
-      const TOOL_RESULT_CAP = 200 * 1024
-      if (toolResult && toolResult.length > TOOL_RESULT_CAP) {
-        const head = toolResult.slice(0, TOOL_RESULT_CAP / 2)
-        const tail = toolResult.slice(-TOOL_RESULT_CAP / 2)
-        toolResult = head + `\n\n... [中段省略 ${toolResult.length - TOOL_RESULT_CAP} 字]\n\n` + tail
-      }
-      setMessages((prev) => {
-        const idx = [...prev].reverse().findIndex(m => m.role === "tool" && m.toolUseId === toolUseId)
-        if (idx === -1) return prev
-        const realIdx = prev.length - 1 - idx
-        return [
-          ...prev.slice(0, realIdx),
-          // ✨ 关键：清空 liveOutput（已被 toolResult 替代），释放 streaming 期间累积的内存
-          { ...prev[realIdx], isPartial: false, toolSuccess: success, toolResult, liveOutput: undefined },
-          ...prev.slice(realIdx + 1),
-        ]
-      })
-    } else if (type === "error") {
-      const errMsg = (e as any).message ?? "未知错误"
-      // 把所有 isPartial 的消息收尾（reasoning/tool/assistant），避免留下"执行中..."转圈
-      setMessages((prev) => {
-        const cleaned = prev.map(m => {
-          if (!m.isPartial) return m
-          if (m.role === 'tool') {
-            return {
-              ...m,
-              isPartial: false,
-              toolSuccess: false,
-              toolResult: m.toolResult || '[任务已中断]',
-            }
-          }
-          if (m.role === 'reasoning') {
-            return { ...m, isPartial: false, charCount: m.content.length }
-          }
-          // assistant / 其他
-          return { ...m, isPartial: false }
-        })
-        return [...cleaned, {
-          id: String(++msgId),
-          role: "error" as const,
-          content: errMsg,
-          createdAt: Date.now(),
-        }]
-      })
-      pushError('agent', errMsg, (e as any).sessionId as string | undefined)
-      // 清除限流提示、sending、followup 等残留状态
-      setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
-      setSending(false)
-    }
-    // 仅当用户在底部时才 auto-scroll（避免打断向上翻阅读）
-    maybeScrollToBottom()
-  }
 
   // ─── Send ──────────────────────────────────────────────────────────────────
   async function send() {
@@ -2189,7 +1649,7 @@ export default function App() {
     if (!sid || !content || sending()) return
     setSending(true)
     _resetRecv()  // 重置接收计数器 + 直接清空 DOM
-    _abortedAt = 0  // 新任务开始，清掉上次取消的丢弃窗口
+    _chatEventHandler.resetAbortedAt()  // 新任务开始，清掉上次取消的丢弃窗口
     const imgs = attachedImages()
     const displayContent = imgs.length > 0
       ? `${content}\n\n[附图 ${imgs.length} 张]`
@@ -2866,7 +2326,17 @@ export default function App() {
       }
     } else {
       // 浅色主题：使用浅灰背景（#f2f2f2），接近 macOS Terminal 默认浅色。
-      // 所有 ANSI 颜色都为深色系，确保在浅色背景上清晰可见。
+      // 所有 ANSI 颜色都为深色系（除 ANSI black 外），确保在浅色背景上清晰可见。
+      //
+      // 关键 hack：**theme.black（ANSI color 0）== background**。
+      //   - 大多数 prompt 主题（agnoster / Powerlevel10k / spaceship）会在段间隙
+      //     emit `%K{black}`（即 `\e[40m` 把 bg 设成 ANSI 0）作为 powerline filler。
+      //     原本设计预期是黑色终端，filler 段隐形与 bg 融合；浅色终端下就会露出突兀的黑条。
+      //   - 把 ANSI 0 重映射到浅灰 bg 后，所有 `%K{black}` 段直接与 bg 融为一体，
+      //     powerline 箭头在两个彩色段之间干净过渡，不再有黑条。
+      //   - 副作用：`\e[30m`（ANSI 黑前景）也会变成 bg 色不可见。但实际 CLI 工具
+      //     在浅色终端上用 ANSI 黑前景画文字本就罕见（git/ls/diff 用彩色），代价可接受。
+      //   - 用户输入的文本走默认 foreground（#1c1c1e），不受影响。
       return {
         background:          '#f2f2f2',
         foreground:          '#1c1c1e',
@@ -2874,8 +2344,8 @@ export default function App() {
         cursorAccent:        '#f2f2f2',
         selectionBackground: 'rgba(0,0,0,0.15)',
         selectionForeground: '#1c1c1e',
-        // 参照 macOS Terminal "Basic" 浅色方案
-        black:         '#1c1c1e',
+        // ANSI black 重映射到 bg —— 让 agnoster/p10k 的 %K{black} filler 与 bg 融合
+        black:         '#f2f2f2',
         red:           '#c0392b',
         green:         '#27ae60',
         yellow:        '#c67c00',
@@ -2895,16 +2365,22 @@ export default function App() {
     }
   }
 
-  /** 主题变化时，更新所有已存在的 xterm 实例颜色 */
+  /** 主题变化时同步外层 .terminal-body 背景色到 UI 主题
+   *
+   * 注意（xterm v6 已知问题）：
+   *   不在运行时调 `term.options.theme = ...` 更新已开终端的颜色 —— v6 的 DOM renderer
+   *   在动态切 theme 时会清掉 viewport 内容、并 dispose helper-textarea，导致终端
+   *   "白屏 + 不接收输入"，没有公开的可靠 workaround。
+   *
+   *   折中策略：
+   *   1) 已有的终端实例保留创建时的颜色不动（用户切主题不会破坏 session）。
+   *   2) `--terminal-bg` CSS 变量同步 UI 主题，让外层 panel 背景与 UI 协调。
+   *   3) 新建终端使用当前 UI 主题对应配色。
+   *   4) 如想让所有终端跟着切，关闭旧 tab 重开即可。
+   */
   createEffect(() => {
     const isDark = resolveIsDark()
-    // 读取 theme() 使 effect 订阅主题变化
-    void theme()
-    const xtermTheme = getXtermTheme(isDark)
-    for (const { term } of termInstances.values()) {
-      try { term.options.theme = xtermTheme } catch { /* 实例可能已销毁 */ }
-    }
-    // 同步 CSS 变量给 terminal-body 背景
+    void theme()  // 订阅主题变化
     document.documentElement.style.setProperty(
       '--terminal-bg', isDark ? '#111111' : '#f2f2f2'
     )
@@ -2931,105 +2407,118 @@ export default function App() {
     })
   })
 
-  /** 构建 WebSocket 终端 URL（复用 HTTP server 端口） */
-  function buildTermWsUrl(cwd: string): string {
-    const wsBase = BASE.replace(/^http/, 'ws')
-    const auth = btoa(`${USER}:${PASS}`)
-    return `${wsBase}/terminal?auth=${encodeURIComponent(auth)}&cwd=${encodeURIComponent(cwd)}`
-  }
-
-  /** 创建新终端 tab */
+  /**
+   * 创建新终端 tab。
+   *
+   * 实现路径（v0.2.16）：Tauri Rust 侧（portable-pty）管 PTY，前端只负责 xterm.js 渲染。
+   * 流程：
+   *   1. 创建 xterm Terminal 实例（不挂 DOM，等 mountTerminalToDOM 异步挂）
+   *   2. invoke('terminal_create') → Rust 侧 spawn shell + 开 reader 线程
+   *   3. listen('terminal://data') 把 Rust 推过来的字节直接写进 xterm
+   *   4. listen('terminal://exit') 显示退出码并清理
+   *   5. xterm.onData → invoke('terminal_write') 把用户输入回传 PTY
+   *
+   * 旧实现（WebSocket /terminal）已废弃 —— Bun --compile sidecar 无法正确驱动 @lydell/node-pty。
+   */
   async function addTerminalTab() {
     const { Terminal } = await import('@xterm/xterm')
     const { FitAddon } = await import('@xterm/addon-fit')
+    const { invoke }   = await import('@tauri-apps/api/core')
+    const { listen }   = await import('@tauri-apps/api/event')
 
-    const id = Math.random().toString(36).slice(2, 10)
+    const tabId    = Math.random().toString(36).slice(2, 10)
     const tabTitle = `终端 ${terminalTabs().length + 1}`
-    const cwd = activeWorkspace()?.path ?? '/'
-    const wsUrl = buildTermWsUrl(cwd)
+    const cwd      = activeWorkspace()?.path ?? '/'
 
-    // xterm 实例——使用当前主题色
     const term = new Terminal({
+      // 终端跟随 UI 主题（light/dark）切换。
+      // 注意：用户若使用 agnoster / Powerlevel10k 等假设深色终端背景的 prompt 主题，
+      // 在 light mode 下可能看到 prompt 内嵌的硬编码黑色 filler 段 —— 这是 prompt 主题
+      // 设计选择，不是终端 bug。
       theme: getXtermTheme(resolveIsDark()),
-      fontFamily: '"Menlo", "Monaco", "Courier New", monospace',
+      // 优先 Powerline / Nerd font（按用户机器实测顺序排列），fallback 到 Menlo。
+      // Powerline / Nerd Font 能正确渲染 agnoster / Powerlevel10k 用的箭头与图标，
+      // 否则会显示成方框 □。
+      fontFamily: [
+        '"Meslo LG M for Powerline"',     // 用户已装（macOS 常见 oh-my-zsh 默认推荐字体）
+        '"MesloLGS NF"',                   // p10k 默认
+        '"Hack Nerd Font Mono"',
+        '"FiraCode Nerd Font Mono"',
+        '"JetBrainsMono Nerd Font"',
+        '"Menlo"',
+        '"Monaco"',
+        '"Courier New"',
+        'monospace',
+      ].join(', '),
       fontSize: 13,
-      lineHeight: 1.4,
+      // lineHeight: agnoster 默认设计是 1.0；1.4 会把行拉太宽，破坏 powerline 段之间的连续色块。
+      lineHeight: 1.0,
+      letterSpacing: 0,
       cursorBlink: true,
       cursorStyle: 'bar',
       scrollback: 5000,
       allowProposedApi: true,
+      // macOS 上 Option 键作 Meta（Bash readline / vim Esc 序列等）
+      macOptionIsMeta: true,
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
 
-    // WebSocket — 必须在创建后立即设置 binaryType，才能以 ArrayBuffer 接收二进制帧
-    const ws = new WebSocket(wsUrl)
-    ws.binaryType = 'arraybuffer'
+    // 占位 instance — terminalId 等 Rust 创建后填入
+    const inst: TerminalInstance = { term, fit, terminalId: '', unlistenFns: [] }
+    termInstances.set(tabId, inst)
 
-    termInstances.set(id, { term, ws, fit })
     const sessionId = activeSessionId() ?? '__global__'
-    setTerminalTabs(prev => [...prev, { id, title: tabTitle, sessionId }])
-    setActiveTermId(id)
+    setTerminalTabs(prev => [...prev, { id: tabId, title: tabTitle, sessionId }])
+    setActiveTermId(tabId)
     setShowTerminal(true)
     setTerminalCollapsed(false)
 
-    ws.onopen = () => {
-      console.log(`[Terminal] WS 已连接 (${id})`)
-    }
+    // 异步挂 DOM（等 SolidJS 把 term-body-${tabId} 渲染出来）
+    queueMicrotask(() => mountTerminalToDOM(tabId))
 
-    ws.onmessage = (e: MessageEvent) => {
-      const data = e.data
-      // 二进制帧 = PTY 原始 UTF-8 字节流（新服务端），直接传 xterm
-      if (data instanceof ArrayBuffer) {
-        term.write(new Uint8Array(data))
-        return
-      }
-      // 文本帧：先尝试解析为控制 JSON，否则当作 PTY 文本输出（兼容旧服务端）
-      const str = typeof data === 'string' ? data : ''
-      if (!str) return
-      try {
-        const msg = JSON.parse(str) as { type: string; pid?: number; code?: number; message?: string }
-        if (msg.type === 'ready') {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
-          }
-          return
-        }
-        if (msg.type === 'exit') {
-          term.write(`\r\n\x1b[90m[进程已退出 (exitCode=${msg.code ?? 0})]\x1b[0m\r\n`)
-          return
-        }
-        if (msg.type === 'error') {
-          term.write(`\r\n\x1b[31m[错误: ${msg.message}]\x1b[0m\r\n`)
-          return
-        }
-        // 其他 JSON 控制消息忽略
-        return
-      } catch { /* 非 JSON → 作为 PTY 文本输出（旧服务端兼容） */ }
-      term.write(str)
+    // Rust 侧 spawn PTY
+    let terminalId: string
+    try {
+      terminalId = await invoke<string>('terminal_create', {
+        args: { cwd, cols: term.cols, rows: term.rows },
+      })
+    } catch (e) {
+      term.write(`\r\n\x1b[31m[创建终端失败: ${(e as Error).message}]\x1b[0m\r\n`)
+      console.error('[Terminal] terminal_create 失败:', e)
+      return
     }
+    inst.terminalId = terminalId
+    console.log(`[Terminal] Rust PTY 已创建 (id=${terminalId})`)
 
-    ws.onerror = () => {
-      term.write('\r\n\x1b[31m[WebSocket 连接失败，请确认服务端已启动]\x1b[0m\r\n')
-    }
-
-    ws.onclose = () => {
-      term.write('\r\n\x1b[90m[连接已关闭]\x1b[0m\r\n')
-    }
-
-    // PTY 输入：xterm → WebSocket
-    term.onData((data: string) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data)
-      }
+    // 接 PTY → xterm 数据流
+    const unlistenData = await listen<{ id: string; data: number[] }>('terminal://data', (event) => {
+      if (event.payload.id !== terminalId) return
+      // payload.data 是 number[] —— Tauri 的 serde 把 Vec<u8> 序列化成 JS 数组
+      term.write(new Uint8Array(event.payload.data))
     })
+    inst.unlistenFns.push(unlistenData)
 
-    // 等待 DOM 渲染后挂载终端
-    queueMicrotask(() => mountTerminalToDOM(id))
+    // 接 PTY 退出事件
+    const unlistenExit = await listen<{ id: string; exitCode: number | null }>('terminal://exit', (event) => {
+      if (event.payload.id !== terminalId) return
+      const code = event.payload.exitCode ?? 0
+      term.write(`\r\n\x1b[90m[进程已退出 (exitCode=${code})]\x1b[0m\r\n`)
+    })
+    inst.unlistenFns.push(unlistenExit)
+
+    // xterm → PTY（用户输入）
+    term.onData((data: string) => {
+      const id = inst.terminalId
+      if (!id) return
+      void invoke('terminal_write', { args: { id, data } }).catch(e => {
+        console.error(`[Terminal ${id}] write 失败:`, e)
+      })
+    })
   }
 
   /** 将 xterm 挂载到指定容器元素（id 对应 DOM） */
-  function mountTerminalToDOM(id: string) {
+  async function mountTerminalToDOM(id: string) {
     const inst = termInstances.get(id)
     if (!inst) return
     const container = document.getElementById(`term-body-${id}`)
@@ -3040,8 +2529,26 @@ export default function App() {
     }
     if (container.querySelector('.xterm')) return  // 已挂载
 
-    const { term, fit, ws } = inst
+    const { term, fit } = inst
+    // **关键**：把 xterm theme 的 bg 钉到 term-body 容器的 inline style，
+    // 不走 CSS 变量。这样切换全局主题时，已开的终端不会被改 bg —— xterm
+    // 内部 fg 色已经烘焙到 color cache，container bg 必须保持原色，否则
+    // 出现"深色 fg + 深色 bg = 看不见"。
+    const xtermTheme = (term.options as any).theme ?? {}
+    if (xtermTheme.background) {
+      container.style.backgroundColor = xtermTheme.background as string
+    }
     term.open(container)
+
+    const { invoke } = await import('@tauri-apps/api/core')
+
+    // 通知 Rust PTY 当前尺寸（仅在 terminalId 就绪时；初次创建可能还在 await 中）
+    const pushSizeToBackend = () => {
+      const tid = inst.terminalId
+      if (!tid) return
+      void invoke('terminal_resize', { args: { id: tid, cols: term.cols, rows: term.rows } })
+        .catch(e => console.error(`[Terminal ${tid}] resize 失败:`, e))
+    }
 
     // 用 rAF 确保浏览器完成布局后再 fit，避免 display:none 父容器导致 0 尺寸
     requestAnimationFrame(() => {
@@ -3049,26 +2556,16 @@ export default function App() {
         if (container.clientWidth > 0) {
           fit.fit()
           term.focus()
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
-          }
+          pushSizeToBackend()
         } else {
-          // 若仍为 0，再等一帧（极端情况：父容器动画中）
           requestAnimationFrame(() => {
             fit.fit()
             term.focus()
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
-            }
+            pushSizeToBackend()
           })
         }
       })
     })
-
-    // 发送初始尺寸（在 WebSocket 就绪时发送；WebSocket 可能比 rAF 先开）
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
-    }
 
     // ResizeObserver 自动适配
     // 关键：只在容器实际可见（clientWidth > 0）时才 fit，
@@ -3077,34 +2574,45 @@ export default function App() {
     const observer = new ResizeObserver(() => {
       if (container.clientWidth > 0 && container.clientHeight > 0) {
         fit.fit()
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
-        }
+        pushSizeToBackend()
       }
     })
     observer.observe(container)
     inst.resizeObs = observer
   }
 
-  /** 切换 terminal tab */
+  /** 切换 terminal tab
+   *
+   * 只设置 activeTermId 即可 —— 由 activeTermId 触发的 createEffect（约 2935 行）
+   * 用 double-rAF 等 DOM 完成 display:none → '' 的切换后再 fit + focus。
+   *
+   * 历史教训：之前这里用 queueMicrotask 立即 fit + focus，但 microtask 跑在 Solid
+   * 完成 DOM 更新之前，term-body 还是 display:none，fit 把尺寸算成 0，focus 也无效。
+   * 用户表现为"点一下 tab 不响应，点两下才生效"。
+   */
   function switchTerminalTab(id: string) {
     setActiveTermId(id)
-    queueMicrotask(() => {
-      const inst = termInstances.get(id)
-      if (inst) {
-        inst.fit.fit()
-        inst.term.focus()
-      }
-    })
   }
 
   /** 关闭 terminal tab */
-  function closeTerminalTab(id: string, e: MouseEvent) {
+  async function closeTerminalTab(id: string, e: MouseEvent) {
     e.stopPropagation()
     const inst = termInstances.get(id)
     if (inst) {
       inst.resizeObs?.disconnect()
-      try { inst.ws.close() } catch { /* ignore */ }
+      // 取消所有 listen 订阅
+      for (const fn of inst.unlistenFns) {
+        try { fn() } catch { /* ignore */ }
+      }
+      // 通知 Rust 关闭 PTY（kill shell 进程）
+      if (inst.terminalId) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('terminal_close', { args: { id: inst.terminalId } })
+        } catch (err) {
+          console.error('[Terminal] terminal_close 失败:', err)
+        }
+      }
       inst.term.dispose()
       termInstances.delete(id)
     }
@@ -3156,82 +2664,8 @@ export default function App() {
   }
 
   /** TerminalPanel 组件 */
-  function TerminalPanel() {
-    // 当前会话的 terminal tab（仅用于 header 显示）
-    const sessionTabs = () => terminalTabs().filter(t => t.sessionId === (activeSessionId() ?? '__global__'))
-
-    return (
-      <div
-        class="terminal-panel"
-        classList={{ collapsed: terminalCollapsed() }}
-        style={!terminalCollapsed() ? `height:${terminalHeight()}px` : ''}
-      >
-        {/* 拖拽 resize handle */}
-        <div class="terminal-resize-handle" onPointerDown={onTerminalResizeStart} />
-
-        {/* 顶部 header */}
-        <div class="terminal-panel-header">
-          <div class="terminal-tabs">
-            {/* 只显示当前会话的 tab 标签 */}
-            <For each={sessionTabs()}>
-              {(tab) => (
-                <div
-                  class="terminal-tab"
-                  classList={{ active: activeTermId() === tab.id }}
-                  onClick={() => switchTerminalTab(tab.id)}
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-                  </svg>
-                  {tab.title}
-                  <span class="terminal-tab-close" onClick={(e) => closeTerminalTab(tab.id, e)}>✕</span>
-                </div>
-              )}
-            </For>
-            {/* 新建终端按钮 */}
-            <button class="terminal-panel-btn" onClick={addTerminalTab} title="新建终端">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-              </svg>
-            </button>
-          </div>
-          <div class="terminal-panel-actions">
-            <button class="terminal-panel-btn" onClick={() => setTerminalCollapsed(v => !v)} title={terminalCollapsed() ? "展开" : "折叠"}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <Show when={terminalCollapsed()} fallback={<polyline points="18 15 12 9 6 15"/>}>
-                  <polyline points="6 9 12 15 18 9"/>
-                </Show>
-              </svg>
-            </button>
-            <button class="terminal-panel-btn" onClick={() => {
-              // 仅关闭当前会话的终端
-              for (const tab of sessionTabs()) closeTerminalTab(tab.id, new MouseEvent('click'))
-              setShowTerminal(false)
-            }} title="关闭终端">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        {/* 终端内容区（不折叠时显示）
-            关键：body 里渲染【所有会话】的 term-body div，通过 CSS display 控制可见性。
-            这样 xterm canvas 永远不会被 SolidJS 的 <For> 卸载，避免切换会话后内容丢失。 */}
-        <div class="terminal-body" style={terminalCollapsed() ? 'display:none' : ''}>
-          <For each={terminalTabs()}>
-            {(tab) => (
-              <div
-                id={`term-body-${tab.id}`}
-                class="terminal-xterm"
-                style={activeTermId() === tab.id ? '' : 'display:none'}
-              />
-            )}
-          </For>
-        </div>
-      </div>
-    )
-  }
+  // K10b: TerminalPanel 已抽到 @maxian/ui，作为 SharedTerminalPanel 使用。
+  // 渲染处见 main 区（约第 8620 行）—— 通过 props 传入 App 内的所有终端状态/回调。
 
   // ─── 图片附件处理 ──────────────────────────────────────────────────────────
   function handleImageFile(file: File) {
@@ -3428,18 +2862,7 @@ export default function App() {
 
   // ─── 预览面板操作 ────────────────────────────────────────────────────────
   /** 根据扩展名/MIME 判定 PreviewTab.kind */
-  function classifyFileKind(file: {
-    isImage: boolean; isAudio: boolean; isVideo: boolean; isBinary: boolean;
-    path: string; mimeType: string;
-  }): PreviewTab['kind'] {
-    if (file.isImage) return 'image'
-    if (file.isAudio) return 'audio'
-    if (file.isVideo) return 'video'
-    if (file.isBinary) return 'binary'
-    const ext = file.path.split('.').pop()?.toLowerCase() ?? ''
-    if (['md','markdown','mdx'].includes(ext)) return 'markdown'
-    return 'text'
-  }
+  // classifyFileKind 已抽到 ./lib/types
 
   /** 打开一个文件到预览面板（或激活已打开的标签） */
   async function openPreview(filePath: string, opts?: { viewMode?: PreviewTab['viewMode']; line?: number }) {
@@ -3594,36 +3017,22 @@ export default function App() {
     }
   }
 
-  // P0-4: 外部文件变更检测（每 3s 轮询已打开预览的 mtime）
-  onMount(() => {
-    let stopped = false
-    const tick = async () => {
-      if (stopped) return
-      try {
-        const ws = activeWorkspace()
-        const tabs = previewTabs()
-        if (ws && tabs.length > 0) {
-          const c = await getClient()
-          for (const tab of tabs) {
-            if (tab.loading) continue
-            if (tab.mtimeMs === undefined) continue
-            // 已标记过的保持（用户未重载前不重复提示）
-            if (tab.extChangedAt) continue
-            try {
-              const st = await c.getFileStat(ws.id, tab.path)
-              if (st.exists && Math.abs(st.mtimeMs - tab.mtimeMs) > 2) {
-                setPreviewTabs(prev => prev.map(t =>
-                  t.path === tab.path ? { ...t, extChangedAt: Date.now() } : t
-                ))
-              }
-            } catch { /* ignore per-tab errors */ }
-          }
-        }
-      } catch { /* ignore */ }
-      if (!stopped) setTimeout(tick, 3000)
-    }
-    setTimeout(tick, 3000)
-    onCleanup(() => { stopped = true })
+  // P0-4: 外部文件变更检测（K11a-cont：抽到 ./hooks/useFileWatcher）
+  useFileWatcher<Workspace>({
+    workspace: activeWorkspace,
+    getWorkspaceId: (ws) => ws.id,
+    tabs: previewTabs,
+    getFileStat: async (wsId, path) => {
+      const c = await getClient()
+      return c.getFileStat(wsId, path)
+    },
+    onExternalChange: (path) => {
+      setPreviewTabs(prev => prev.map(t =>
+        t.path === path ? { ...t, extChangedAt: Date.now() } : t
+      ))
+    },
+    intervalMs: 3000,
+    tolerance: 2,
   })
 
   /** 懒加载某标签的 diff 数据 */
@@ -3679,76 +3088,8 @@ export default function App() {
     await openPreview(filePath, { viewMode: 'diff' })
   }
 
-  function formatTime(ts: number) {
-    return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
-  }
-
-  /**
-   * 将 DB 存储的 StoredMessage 转换为前端 ChatMessage，
-   * 'tool' 角色的 content 是 JSON（toolName/toolUseId/toolParams/toolResult/toolSuccess）需要解析。
-   */
-  function storedToChatMessage(m: StoredMessage): ChatMessage {
-    if (m.role === 'tool') {
-      try {
-        const parsed = JSON.parse(m.content);
-        return {
-          id:          m.id,
-          role:        'tool',
-          content:     '',
-          isPartial:   false,
-          createdAt:   m.createdAt,
-          toolName:    parsed.toolName    ?? 'unknown',
-          toolUseId:   parsed.toolUseId   ?? m.id,
-          toolParams:  parsed.toolParams  ?? {},
-          toolResult:  parsed.toolResult  ?? '',
-          toolSuccess: parsed.toolSuccess ?? true,
-        }
-      } catch {
-        return { id: m.id, role: 'tool', content: m.content, isPartial: false, createdAt: m.createdAt, toolName: 'unknown', toolUseId: m.id, toolSuccess: true }
-      }
-    }
-    if (m.role === 'reasoning') {
-      return {
-        id:        m.id,
-        role:      'reasoning',
-        content:   m.content,
-        isPartial: false,
-        createdAt: m.createdAt,
-        charCount: m.content.length,
-      }
-    }
-    return {
-      id:        m.id,
-      role:      m.role as ChatMessage["role"],
-      content:   m.content,
-      isPartial: false,
-      createdAt: m.createdAt,
-    }
-  }
-
-  /** 格式化时间戳为 yyyy-mm-dd hh:mm:ss */
-  function formatFullTime(ts?: number): string {
-    if (!ts) return ''
-    const d = new Date(ts)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-  }
-
-  function userInitials(u: UserInfo) {
-    const n = u.nickName || u.userName || ""
-    return n.slice(0, 1).toUpperCase() || "U"
-  }
-
-  function shortPath(p: string) {
-    if (!p) return "未知工作区"
-    const parts = p.replace(/\\/g, "/").split("/")
-    return parts[parts.length - 1] || p
-  }
-
-  function formatRecv(n: number): string {
-    if (n < 1000) return `${n} 字`
-    return `${(n / 1000).toFixed(1)}K 字`
-  }
+  // 纯格式化工具（formatTime / formatFullTime / userInitials / shortPath / formatRecv /
+  // storedToChatMessage）已抽到 ./lib/format.ts
 
   function toggleReasoning(id: string) {
     setExpandedReasonings(prev => {
@@ -3760,1195 +3101,29 @@ export default function App() {
   }
 
   // ─── Settings panels ──────────────────────────────────────────────────────
-  function SettingsAppearance() {
-    return (
-      <>
-        <div class="settings-title">外观</div>
+  // K11c-1: SettingsAppearance 已抽到 ./settings/SettingsAppearance.tsx
+  // 渲染处见 settings tab dispatch（约第 7648 行）。
 
-        {/* Vim 模式 */}
-        <div class="settings-group">
-          <div class="settings-group-title">编辑器</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">Vim 模式</div>
-                <div class="settings-row-desc">
-                  在输入框启用 Vim 模态编辑（h/j/k/l 移动、i/a/o 进入 insert、Esc 回 normal、x/dd 删除、p 粘贴、w/b 按词跳转）
-                </div>
-              </div>
-              <label class="toggle">
-                <input type="checkbox" checked={vimEnabled()}
-                  onChange={(e) => toggleVim(e.currentTarget.checked)} />
-                <span class="toggle-track" />
-              </label>
-            </div>
-          </div>
-        </div>
-
-        {/* Theme */}
-        <div class="settings-group">
-          <div class="settings-group-title">主题</div>
-          <div class="settings-card">
-            <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:16px">
-              <div class="settings-row-label">
-                <div class="settings-row-name">颜色主题</div>
-                <div class="settings-row-desc">使用浅色、深色，或匹配系统设置</div>
-              </div>
-              <div class="theme-picker">
-                <button class="theme-option" classList={{ active: theme() === "light" }} onClick={() => setTheme("light")}>
-                  <div class="theme-preview theme-preview-light" />
-                  <span class="theme-label">浅色</span>
-                </button>
-                <button class="theme-option" classList={{ active: theme() === "dark" }} onClick={() => setTheme("dark")}>
-                  <div class="theme-preview theme-preview-dark" />
-                  <span class="theme-label">深色</span>
-                </button>
-                <button class="theme-option" classList={{ active: theme() === "system" }} onClick={() => setTheme("system")}>
-                  <div class="theme-preview theme-preview-system" />
-                  <span class="theme-label">系统</span>
-                </button>
-              </div>
-              <div class="code-preview-wrap" style="width:100%">
-                <div class="code-preview code-preview-light">
-                  <div class="code-preview-header">浅色预览</div>
-                  <div class="code-preview-body">
-                    <div class="code-line code-hl-del">
-                      <span class="code-ln">1</span>
-                      <span><span class="token-key">surface</span><span class="token-punct">: </span><span class="token-str">"sidebar"</span><span class="token-punct">,</span></span>
-                    </div>
-                    <div class="code-line">
-                      <span class="code-ln">2</span>
-                      <span><span class="token-key">contrast</span><span class="token-punct">: </span><span class="token-num">42</span><span class="token-punct">,</span></span>
-                    </div>
-                  </div>
-                </div>
-                <div class="code-preview code-preview-dark">
-                  <div class="code-preview-header">深色预览</div>
-                  <div class="code-preview-body">
-                    <div class="code-line code-hl-add">
-                      <span class="code-ln">1</span>
-                      <span><span class="token-key">surface</span><span class="token-punct">: </span><span class="token-str">"elevated"</span><span class="token-punct">,</span></span>
-                    </div>
-                    <div class="code-line">
-                      <span class="code-ln">2</span>
-                      <span><span class="token-key">contrast</span><span class="token-punct">: </span><span class="token-num">68</span><span class="token-punct">,</span></span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Font */}
-        <div class="settings-group">
-          <div class="settings-group-title">字体</div>
-          <div class="settings-card">
-            {/* Font family */}
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">界面字体</div>
-                <div class="settings-row-desc">应用 UI 使用的字体</div>
-              </div>
-              <select
-                class="settings-select"
-                value={fontFamily()}
-                onChange={(e) => setFontFamily(e.currentTarget.value)}
-              >
-                <For each={FONT_FAMILIES}>
-                  {(f) => <option value={f.value}>{f.label}</option>}
-                </For>
-              </select>
-            </div>
-
-            {/* Font size */}
-            <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:12px">
-              <div class="settings-row-label">
-                <div class="settings-row-name">字体大小</div>
-                <div class="settings-row-desc">界面文字大小（11 – 18 px）</div>
-              </div>
-              <div class="font-size-control">
-                <span class="font-size-label">A</span>
-                <input
-                  type="range"
-                  min="11" max="18" step="1"
-                  class="font-size-slider"
-                  value={fontSize()}
-                  onInput={(e) => setFontSize(parseInt(e.currentTarget.value, 10))}
-                />
-                <span class="font-size-label large">A</span>
-                <input
-                  type="number"
-                  min="11" max="18"
-                  class="font-size-input"
-                  value={fontSize()}
-                  onInput={(e) => {
-                    const v = parseInt(e.currentTarget.value, 10)
-                    if (!isNaN(v) && v >= 11 && v <= 18) setFontSize(v)
-                  }}
-                />
-                <span class="font-size-unit">px</span>
-              </div>
-              {/* Live preview */}
-              <div class="font-preview" style={`font-family:${FONT_FAMILIES.find(f => f.value === fontFamily())?.css ?? "inherit"};font-size:${fontSize()}px`}>
-                码弦 AI 编程助手 · Maxian 0.1.0
-              </div>
-            </div>
-          </div>
-        </div>
-      </>
-    )
-  }
-
-  function SettingsGeneral() {
-    return (
-      <>
-        <div class="settings-title">常规</div>
-        <div class="settings-group">
-          <div class="settings-group-title">账号</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">用户</div>
-                <div class="settings-row-desc">{currentUser()?.email || currentUser()?.userName || "—"}</div>
-              </div>
-              <button class="btn btn-ghost" style="font-size:12px" onClick={handleLogout}>退出登录</button>
-            </div>
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">服务器</div>
-                <div class="settings-row-desc">{loginApiUrl()}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">键盘快捷键</div>
-          <div class="settings-card">
-            {[
-              ['⌘↵',      '发送消息'],
-              ['⌘N',      '新建会话'],
-              ['⌘W',      '关闭当前会话'],
-              ['⌘[',      '上一个会话'],
-              ['⌘]',      '下一个会话'],
-              ['⌘K',      '命令面板 (/)'],
-              ['⌘`',      '切换终端'],
-              ['⌘,',      '打开设置'],
-              ['Esc',     '停止生成 / 关闭面板'],
-            ].map(([key, desc]) => (
-              <div class="settings-row">
-                <div class="settings-row-label">
-                  <div class="settings-row-desc">{desc}</div>
-                </div>
-                <span style="font-size:11px;color:var(--text-faint);background:var(--bg-muted);padding:3px 8px;border-radius:4px;border:1px solid var(--border-strong);font-family:monospace">{key}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">权限记忆</div>
-          <div class="settings-card">
-            <Show when={allowAlways().size === 0} fallback={
-              <For each={[...allowAlways()]}>
-                {(toolName) => (
-                  <div class="settings-row">
-                    <div class="settings-row-label">
-                      <div class="settings-row-name">{TOOL_LABELS[toolName] ?? toolName}</div>
-                      <div class="settings-row-desc">已"总是允许"此工具，跳过审批对话框</div>
-                    </div>
-                    <button
-                      class="btn btn-ghost"
-                      onClick={() => removeAllowAlways(toolName)}
-                      style="color:#f87171;border-color:rgba(239,68,68,0.3)"
-                    >撤销</button>
-                  </div>
-                )}
-              </For>
-            }>
-              <div class="settings-row">
-                <div class="settings-row-label">
-                  <div class="settings-row-desc">暂无"总是允许"的工具。在工具审批对话框点击"总是允许"后会显示在此。</div>
-                </div>
-              </div>
-            </Show>
-          </div>
-        </div>
-
-        <div class="settings-group">
-          <div class="settings-group-title">界面语言</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">语言 / Language</div>
-                <div class="settings-row-desc">切换界面语言（部分文字重启后生效）</div>
-              </div>
-              <div style="display:flex;gap:6px">
-                <button
-                  class="btn btn-ghost"
-                  style={locale() === 'zh-CN' ? 'border-color:var(--accent);color:var(--accent)' : ''}
-                  onClick={() => switchLocale('zh-CN')}
-                >
-                  中文
-                </button>
-                <button
-                  class="btn btn-ghost"
-                  style={locale() === 'en' ? 'border-color:var(--accent);color:var(--accent)' : ''}
-                  onClick={() => switchLocale('en')}
-                >
-                  English
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </>
-    )
-  }
+  // K11c-2: SettingsGeneral 已抽到 ./settings/SettingsGeneral.tsx
 
   // ─── Git Worktree 管理设置面板 ───────────────────────────────────────────
-  function SettingsWorktree() {
-    const [worktrees, setWorktrees] = createSignal<Array<{ path: string; branch: string; head: string; locked: boolean }>>([])
-    const [branches, setBranches] = createSignal<string[]>([])
-    const [loading, setLoading] = createSignal(false)
-    const [error, setError] = createSignal("")
-    const [isGitRepo, setIsGitRepo] = createSignal(true)
-    const [newBranch, setNewBranch] = createSignal("")
-    const [fromBranch, setFromBranch] = createSignal("")
-    const [creating, setCreating] = createSignal(false)
-
-    const ws = activeWorkspace()
-
-    onMount(async () => {
-      if (!ws) return
-      setLoading(true)
-      try {
-        const c = await getClient()
-        const [wt, br] = await Promise.all([
-          c.listWorktrees(ws.id),
-          c.listBranches(ws.id),
-        ])
-        const gitRepo = (wt as any).isGitRepo !== false
-        setIsGitRepo(gitRepo)
-        setWorktrees(wt.worktrees ?? [])
-        setBranches(br.branches ?? [])
-        if (br.branches?.length) setFromBranch(br.branches[0])
-        if ((wt as any).error) setError((wt as any).error)
-      } catch (e) {
-        setError(String((e as Error)?.message ?? e))
-      } finally {
-        setLoading(false)
-      }
-    })
-
-    async function addWorktree() {
-      if (!ws || !newBranch().trim()) return
-      setCreating(true)
-      setError("")
-      try {
-        const c = await getClient()
-        const res = await c.createWorktree(ws.id, {
-          branch: fromBranch(),
-          newBranch: newBranch().trim(),
-        })
-        if (res.ok) {
-          setNewBranch("")
-          const wt = await c.listWorktrees(ws.id)
-          setWorktrees(wt.worktrees ?? [])
-        } else {
-          setError(res.error ?? '创建失败')
-        }
-      } catch (e) {
-        setError(String((e as Error)?.message ?? e))
-      } finally {
-        setCreating(false)
-      }
-    }
-
-    async function removeWorktree(wtPath: string) {
-      if (!ws) return
-      const ok = await appConfirm(`确定要删除 Worktree？\n${wtPath}\n\n注意：只删除 worktree，不删除分支。`)
-      if (!ok) return
-      try {
-        const c = await getClient()
-        const res = await c.removeWorktree(ws.id, wtPath)
-        if (res.ok) {
-          const wt = await c.listWorktrees(ws.id)
-          setWorktrees(wt.worktrees ?? [])
-        } else {
-          setError(res.error ?? '删除失败')
-        }
-      } catch (e) {
-        setError(String((e as Error)?.message ?? e))
-      }
-    }
-
-    return (
-      <>
-        <div class="settings-title">Git Worktree 管理</div>
-        <Show when={!ws}>
-          <div class="settings-group">
-            <div style="color:var(--text-muted);padding:20px;text-align:center;font-size:13px">请先在左侧选择一个工作区</div>
-          </div>
-        </Show>
-        <Show when={!!ws && !isGitRepo()}>
-          <div class="settings-group">
-            <div style="color:var(--text-muted);padding:20px;text-align:center;font-size:13px">
-              <div style="font-size:24px;margin-bottom:8px">📁</div>
-              当前工作区不是 Git 仓库<br/>
-              <span style="font-size:11px">Worktree 管理仅适用于 Git 仓库</span>
-            </div>
-          </div>
-        </Show>
-        <Show when={!!ws && isGitRepo()}>
-          <Show when={error()}>
-            <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#f87171">{error()}</div>
-          </Show>
-          <div class="settings-group">
-            <div class="settings-group-title">当前 Worktrees</div>
-            <div class="settings-card">
-              <Show when={loading()}>
-                <div style="text-align:center;padding:20px;color:var(--text-muted)">
-                  <span class="spinner" style="width:16px;height:16px" />
-                </div>
-              </Show>
-              <Show when={!loading() && worktrees().length === 0}>
-                <div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">此仓库没有额外的 worktrees</div>
-              </Show>
-              <For each={worktrees()}>
-                {(wt) => (
-                  <div class="settings-row" style="align-items:flex-start;gap:8px">
-                    <div class="settings-row-label" style="flex:1;min-width:0">
-                      <div class="settings-row-name" style="font-family:monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                        {wt.branch || '（分离 HEAD）'}
-                      </div>
-                      <div class="settings-row-desc" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">
-                        {wt.path} · {wt.head}
-                      </div>
-                    </div>
-                    <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
-                      <Show when={wt.locked}>
-                        <span style="font-size:10px;color:var(--text-faint);background:var(--bg-muted);padding:1px 5px;border-radius:3px">锁定</span>
-                      </Show>
-                      <button
-                        class="btn btn-ghost"
-                        style="font-size:11px;padding:3px 8px"
-                        onClick={() => removeWorktree(wt.path)}
-                        disabled={wt.locked}
-                      >
-                        移除
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </For>
-            </div>
-          </div>
-
-          <div class="settings-group">
-            <div class="settings-group-title">创建新 Worktree</div>
-            <div class="settings-card">
-              <div class="settings-row">
-                <div class="settings-row-label">
-                  <div class="settings-row-name">新分支名</div>
-                  <div class="settings-row-desc">新 worktree 使用的分支名称</div>
-                </div>
-                <input
-                  class="settings-input"
-                  placeholder="feature/my-branch"
-                  value={newBranch()}
-                  onInput={(e) => setNewBranch(e.currentTarget.value)}
-                />
-              </div>
-              <div class="settings-row">
-                <div class="settings-row-label">
-                  <div class="settings-row-name">基于分支</div>
-                  <div class="settings-row-desc">从哪个分支创建</div>
-                </div>
-                <select
-                  class="settings-select"
-                  value={fromBranch()}
-                  onChange={(e) => setFromBranch(e.currentTarget.value)}
-                >
-                  <For each={branches()}>
-                    {(b) => <option value={b}>{b}</option>}
-                  </For>
-                </select>
-              </div>
-              <div class="settings-row" style="justify-content:flex-end">
-                <button
-                  class="btn btn-primary"
-                  onClick={addWorktree}
-                  disabled={!newBranch().trim() || creating()}
-                >
-                  <Show when={creating()} fallback="创建 Worktree">
-                    <span class="spinner" style="width:12px;height:12px;border-width:1.5px;border-color:rgba(255,255,255,0.3);border-top-color:#fff" />
-                    创建中…
-                  </Show>
-                </button>
-              </div>
-            </div>
-          </div>
-        </Show>
-      </>
-    )
-  }
+  // K11c-10: SettingsWorktree 已抽到 ./settings/SettingsWorktree.tsx
 
   // ─── MCP Server 管理设置面板 ──────────────────────────────────────────────
   /**
    * MCP Server 配置存储在 ~/.maxian/mcp-servers.json
    * 格式：[{ id, name, command, args, env, enabled }]
    */
-  interface McpServer {
-    id: string
-    name: string
-    command: string
-    args: string[]
-    env: Record<string, string>
-    enabled: boolean
-  }
-
-  const MCP_CONFIG_KEY = 'maxian_mcp_servers'
-
-  function loadMcpServers(): McpServer[] {
-    try {
-      const raw = localStorage.getItem(MCP_CONFIG_KEY)
-      if (!raw) return []
-      return JSON.parse(raw) as McpServer[]
-    } catch { return [] }
-  }
-
-  function saveMcpServers(servers: McpServer[]) {
-    localStorage.setItem(MCP_CONFIG_KEY, JSON.stringify(servers))
-  }
-
-  function SettingsMcp() {
-    const [mcpServers, setMcpServers] = createSignal<McpServer[]>(loadMcpServers())
-    const [showAddForm, setShowAddForm] = createSignal(false)
-    const [newName, setNewName] = createSignal("")
-    const [newCommand, setNewCommand] = createSignal("")
-    const [newArgs, setNewArgs] = createSignal("")
-    const [newEnv, setNewEnv] = createSignal("")
-
-    function toggleServer(id: string) {
-      const updated = mcpServers().map(s => s.id === id ? { ...s, enabled: !s.enabled } : s)
-      setMcpServers(updated)
-      saveMcpServers(updated)
-    }
-
-    function deleteServer(id: string) {
-      const updated = mcpServers().filter(s => s.id !== id)
-      setMcpServers(updated)
-      saveMcpServers(updated)
-    }
-
-    function addServer() {
-      const name = newName().trim()
-      const command = newCommand().trim()
-      if (!name || !command) return
-
-      // 解析 args（按空格分割，支持引号）
-      const args = newArgs().trim()
-        ? newArgs().trim().split(/\s+/)
-        : []
-
-      // 解析 env（KEY=VALUE 格式，每行一个）
-      const env: Record<string, string> = {}
-      for (const line of newEnv().split('\n')) {
-        const idx = line.indexOf('=')
-        if (idx > 0) {
-          env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
-        }
-      }
-
-      const server: McpServer = {
-        id: Math.random().toString(36).slice(2),
-        name,
-        command,
-        args,
-        env,
-        enabled: true,
-      }
-      const updated = [...mcpServers(), server]
-      setMcpServers(updated)
-      saveMcpServers(updated)
-      setNewName(""); setNewCommand(""); setNewArgs(""); setNewEnv("")
-      setShowAddForm(false)
-    }
-
-    return (
-      <>
-        <div class="settings-title">MCP Servers</div>
-        <div class="settings-group">
-          <div class="settings-group-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>已配置的 MCP 服务器</span>
-            <button class="btn btn-ghost" style="font-size:11px" onClick={() => setShowAddForm(v => !v)}>
-              {showAddForm() ? '取消' : '+ 添加'}
-            </button>
-          </div>
-          <div class="settings-card">
-            <Show when={mcpServers().length === 0 && !showAddForm()}>
-              <div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">
-                暂无 MCP 服务器配置<br/>
-                <span style="font-size:11px">MCP (Model Context Protocol) 允许 AI 访问外部工具和数据源</span>
-              </div>
-            </Show>
-
-            <For each={mcpServers()}>
-              {(srv) => (
-                <div class="settings-row" style="align-items:flex-start">
-                  <div class="settings-row-label" style="flex:1;min-width:0">
-                    <div class="settings-row-name">{srv.name}</div>
-                    <div class="settings-row-desc" style="font-family:monospace;font-size:11px">
-                      {srv.command} {srv.args.join(' ')}
-                    </div>
-                    <Show when={Object.keys(srv.env).length > 0}>
-                      <div style="font-size:10px;color:var(--text-faint);margin-top:2px">
-                        env: {Object.keys(srv.env).join(', ')}
-                      </div>
-                    </Show>
-                  </div>
-                  <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
-                    {/* 启用/禁用 toggle */}
-                    <button
-                      class="btn btn-ghost"
-                      style={`font-size:11px;${srv.enabled ? 'color:var(--accent)' : ''}`}
-                      onClick={() => toggleServer(srv.id)}
-                    >
-                      {srv.enabled ? '已启用' : '已禁用'}
-                    </button>
-                    <button
-                      class="btn btn-ghost"
-                      style="font-size:11px;color:var(--error)"
-                      onClick={() => deleteServer(srv.id)}
-                    >
-                      删除
-                    </button>
-                  </div>
-                </div>
-              )}
-            </For>
-
-            <Show when={showAddForm()}>
-              <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;display:flex;flex-direction:column;gap:10px">
-                <div style="font-size:12px;font-weight:600;color:var(--text-muted)">添加 MCP 服务器</div>
-                <div class="settings-row">
-                  <span class="settings-row-name" style="width:80px;flex-shrink:0">名称</span>
-                  <input class="settings-input" placeholder="My MCP Server" value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} />
-                </div>
-                <div class="settings-row">
-                  <span class="settings-row-name" style="width:80px;flex-shrink:0">命令</span>
-                  <input class="settings-input" placeholder="npx @modelcontextprotocol/server-filesystem" value={newCommand()} onInput={(e) => setNewCommand(e.currentTarget.value)} />
-                </div>
-                <div class="settings-row">
-                  <span class="settings-row-name" style="width:80px;flex-shrink:0">参数</span>
-                  <input class="settings-input" placeholder="/path/to/dir" value={newArgs()} onInput={(e) => setNewArgs(e.currentTarget.value)} />
-                </div>
-                <div class="settings-row" style="align-items:flex-start">
-                  <span class="settings-row-name" style="width:80px;flex-shrink:0;padding-top:4px">环境变量</span>
-                  <textarea
-                    class="settings-input"
-                    style="height:60px;resize:vertical;font-family:monospace;font-size:11px"
-                    placeholder={"API_KEY=your_key\nANOTHER=value"}
-                    value={newEnv()}
-                    onInput={(e) => setNewEnv(e.currentTarget.value)}
-                  />
-                </div>
-                <div style="display:flex;justify-content:flex-end">
-                  <button class="btn btn-primary" style="font-size:12px" onClick={addServer} disabled={!newName().trim() || !newCommand().trim()}>
-                    添加
-                  </button>
-                </div>
-              </div>
-            </Show>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">说明</div>
-          <div class="settings-card">
-            <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
-              <div class="settings-row-desc" style="line-height:1.7">
-                MCP (Model Context Protocol) 是 Anthropic 提供的标准协议，允许 AI 与外部工具和数据源交互。
-                配置的 MCP 服务器将在 AI 会话中自动可用。<br/>
-                <a href="https://modelcontextprotocol.io" target="_blank" style="color:var(--accent);text-decoration:none">了解更多 →</a>
-              </div>
-            </div>
-          </div>
-        </div>
-      </>
-    )
-  }
+  // K11c-9: SettingsMcp + McpServer 类型 + loadMcpServers/saveMcpServers 已抽到 ./settings/SettingsMcp.tsx
 
   // ─── SettingsKeybinds（自定义快捷键）─────────────────────────────────
-  function SettingsKeybinds() {
-    const [recording, setRecording] = createSignal<KeybindAction | null>(null)
-    const onKey = (e: KeyboardEvent) => {
-      const action = recording()
-      if (!action) return
-      e.preventDefault()
-      if (e.key === 'Escape') { setRecording(null); return }
-      if (!['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) {
-        setKeybind(action, eventToKeybind(e))
-        setRecording(null)
-      }
-    }
-    createEffect(() => {
-      if (recording()) {
-        window.addEventListener('keydown', onKey, true)
-        onCleanup(() => window.removeEventListener('keydown', onKey, true))
-      }
-    })
-    return (
-      <>
-        <div class="settings-title">键盘快捷键</div>
-        <div class="settings-group">
-          <div class="settings-group-title">绑定（点击录制新组合键，Esc 取消，macOS 的 mod = Cmd；其他 = Ctrl）</div>
-          <div class="settings-card">
-            <For each={KEYBIND_DEFAULTS}>
-              {(kb) => {
-                const current = () => getKeybind(kb.action)
-                const isCustom = () => customKeybinds()[kb.action] !== undefined
-                return (
-                  <div class="settings-row">
-                    <div class="settings-row-label">
-                      <div class="settings-row-name">{kb.label}</div>
-                      <div class="settings-row-desc">默认: <code>{kb.defaultKey}</code></div>
-                    </div>
-                    <div style="display:flex;gap:8px;align-items:center">
-                      <kbd class="keybind-keys" style="min-width:120px;text-align:center">
-                        {recording() === kb.action ? '正在录制… (Esc 取消)' : current()}
-                      </kbd>
-                      <button class="btn btn-ghost"
-                        onClick={() => setRecording(r => r === kb.action ? null : kb.action)}>
-                        {recording() === kb.action ? '取消' : '录制'}
-                      </button>
-                      <Show when={isCustom()}>
-                        <button class="btn btn-ghost" onClick={() => resetKeybind(kb.action)}>重置</button>
-                      </Show>
-                    </div>
-                  </div>
-                )
-              }}
-            </For>
-          </div>
-        </div>
-      </>
-    )
-  }
-
-  // ─── SettingsTemplates（会话模板）────────────────────────────────────
-  function SettingsTemplates() {
-    const [newName, setNewName] = createSignal('')
-    const [newContent, setNewContent] = createSignal('')
-    function saveNew() {
-      if (!newName().trim() || !newContent().trim()) return
-      addSessionTemplate({ name: newName().trim(), content: newContent().trim() })
-      setNewName(''); setNewContent('')
-      showToast({ message: '模板已保存', kind: 'success' })
-    }
-    async function useTemplate(t: SessionTemplate) {
-      await createSession()
-      setInput(t.content)
-      setShowSettings(false)
-      showToast({ message: `已应用模板「${t.name}」`, kind: 'success', duration: 2500 })
-    }
-    return (
-      <>
-        <div class="settings-title">会话模板</div>
-        <div class="settings-group">
-          <div class="settings-group-title">已保存的模板</div>
-          <div class="settings-card">
-            <Show when={sessionTemplates().length === 0}>
-              <div class="settings-row"><div class="settings-row-desc">暂无模板</div></div>
-            </Show>
-            <For each={sessionTemplates()}>
-              {(t) => (
-                <div class="settings-row">
-                  <div class="settings-row-label">
-                    <div class="settings-row-name">{t.name}</div>
-                    <div class="settings-row-desc" style="white-space:pre-wrap;max-width:500px">
-                      {t.content.slice(0, 160)}{t.content.length > 160 ? '…' : ''}
-                    </div>
-                  </div>
-                  <div style="display:flex;gap:6px">
-                    <button class="btn btn-primary" onClick={() => useTemplate(t)}>使用</button>
-                    <button class="btn btn-ghost" style="color:#f87171" onClick={() => removeSessionTemplate(t.name)}>删除</button>
-                  </div>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">新建模板</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div style="flex:1;display:flex;flex-direction:column;gap:6px">
-                <input class="login-input" placeholder="模板名称"
-                  value={newName()} onInput={(e) => setNewName(e.currentTarget.value)} />
-                <textarea class="login-input" placeholder="模板内容（prompt 文本）"
-                  style="min-height:120px;font-family:inherit"
-                  value={newContent()} onInput={(e) => setNewContent(e.currentTarget.value)} />
-                <button class="btn btn-primary" disabled={!newName().trim() || !newContent().trim()}
-                  onClick={saveNew}>保存模板</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </>
-    )
-  }
+  // K11c-3: SettingsKeybinds 已抽到 ./settings/SettingsKeybinds.tsx
+  // K11c-4: SettingsTemplates 已抽到 ./settings/SettingsTemplates.tsx
 
   // ─── SettingsUsage（Token 用量 dashboard）────────────────────────────
-  function SettingsUsage() {
-    const totalInput  = createMemo(() => sessions().reduce((sum, s) => sum + (s.inputTokens  ?? 0), 0))
-    const totalOutput = createMemo(() => sessions().reduce((sum, s) => sum + (s.outputTokens ?? 0), 0))
-    const byMode = createMemo(() => {
-      const stats: Record<string, { in: number; out: number; count: number }> = {}
-      for (const s of sessions()) {
-        const k = s.uiMode ?? 'code'
-        if (!stats[k]) stats[k] = { in: 0, out: 0, count: 0 }
-        stats[k].in  += s.inputTokens  ?? 0
-        stats[k].out += s.outputTokens ?? 0
-        stats[k].count++
-      }
-      return stats
-    })
-    const topSessions = createMemo(() =>
-      [...sessions()]
-        .sort((a, b) => ((b.inputTokens ?? 0) + (b.outputTokens ?? 0)) - ((a.inputTokens ?? 0) + (a.outputTokens ?? 0)))
-        .slice(0, 10)
-    )
-    return (
-      <>
-        <div class="settings-title">Token 用量</div>
-        <div class="settings-group">
-          <div class="settings-group-title">累计用量</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">输入 tokens</div>
-                <div class="settings-row-desc">所有会话累计（流入 LLM 的 token）</div>
-              </div>
-              <div style="font-size:24px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums">
-                {totalInput().toLocaleString()}
-              </div>
-            </div>
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">输出 tokens</div>
-                <div class="settings-row-desc">所有会话累计（LLM 生成的 token）</div>
-              </div>
-              <div style="font-size:24px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums">
-                {totalOutput().toLocaleString()}
-              </div>
-            </div>
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">合计</div>
-                <div class="settings-row-desc">input + output</div>
-              </div>
-              <div style="font-size:28px;font-weight:700;color:var(--text-base);font-variant-numeric:tabular-nums">
-                {(totalInput() + totalOutput()).toLocaleString()}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">按模式分布</div>
-          <div class="settings-card">
-            <For each={Object.entries(byMode())}>
-              {([mode, stats]) => (
-                <div class="settings-row">
-                  <div class="settings-row-label">
-                    <div class="settings-row-name">{mode === 'chat' ? 'Chat' : 'Code'} 模式</div>
-                    <div class="settings-row-desc">{stats.count} 个会话</div>
-                  </div>
-                  <div style="font-family:monospace;font-size:13px;color:var(--text-base)">
-                    {stats.in.toLocaleString()} in · {stats.out.toLocaleString()} out
-                  </div>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">Top 10 会话（按 token 消耗）</div>
-          <div class="settings-card">
-            <For each={topSessions()}>
-              {(s) => (
-                <div class="settings-row">
-                  <div class="settings-row-label">
-                    <div class="settings-row-name">{s.title || s.id.slice(0, 8)}</div>
-                    <div class="settings-row-desc">{new Date(s.updatedAt).toLocaleString('zh-CN')} · {s.messageCount} 条</div>
-                  </div>
-                  <div style="font-family:monospace;font-size:12px;color:var(--text-muted)">
-                    {((s.inputTokens ?? 0) + (s.outputTokens ?? 0)).toLocaleString()} tokens
-                  </div>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-      </>
-    )
-  }
+  // K11c-5: SettingsUsage 已抽到 ./settings/SettingsUsage.tsx
+  // K11c-6: SettingsErrors 已抽到 ./settings/SettingsErrors.tsx
 
-  // ─── SettingsErrors（错误日志）──────────────────────────────────────
-  function SettingsErrors() {
-    return (
-      <>
-        <div class="settings-title">错误日志</div>
-        <div class="settings-group">
-          <div class="settings-group-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>最近 50 条</span>
-            <Show when={errorLog().length > 0}>
-              <button class="btn btn-ghost" onClick={() => setErrorLog([])}>清空</button>
-            </Show>
-          </div>
-          <div class="settings-card">
-            <Show when={errorLog().length === 0}>
-              <div class="settings-row"><div class="settings-row-desc">暂无错误</div></div>
-            </Show>
-            <For each={errorLog()}>
-              {(err) => (
-                <div class="settings-row">
-                  <div class="settings-row-label" style="min-width:0">
-                    <div class="settings-row-name" style="color:#f87171">
-                      [{err.source}] {err.message.slice(0, 200)}
-                    </div>
-                    <div class="settings-row-desc">
-                      {new Date(err.ts).toLocaleString('zh-CN')}
-                      {err.sessionId ? ` · session: ${err.sessionId.slice(0, 8)}` : ''}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-      </>
-    )
-  }
-
-  // ─── 更新日志（每发一版往前 unshift）──────────────────────────────────
-  interface ChangelogEntry {
-    version: string
-    date:    string
-    changes: string[]
-  }
-  const CHANGELOG: ChangelogEntry[] = [
-    {
-      version: '0.2.15',
-      date: '2026-04-28',
-      changes: [
-        '🛡 修复长时间使用 / 跑大任务（如 2000 行函数转换、涉及 100 张表的存储过程改造）后界面闪退、提示"内存不足"的问题',
-        '⏱ 左下角新增内存 + CPU 实时显示，鼠标悬停可看 UI / 后台服务各自占用',
-        '🩹 修复用 DeepSeek（思考型模型）多轮对话偶发报错的问题，老会话也能继续聊不掉链子',
-        '🚀 关闭重开 / 切换会话后 AI 的思考过程完整保留，不再丢失',
-        '🌐 老会话切换不同模型（如从通义切到 DeepSeek）不再出错',
-        '🎯 AI 自动识别复杂任务（10+ 个独立单元 / 大文件涉及很多依赖 / 1500+ 行单文件重构）并拆解执行，不再硬塞导致超时或失败',
-        '✅ AI 说"做完了"之前必须自己跑过验证（编译 / 测试 / todos 全打勾），杜绝"嘴上完成实际没做"',
-        '🪝 新增工具钩子：在项目 .maxian/config.json 配置 "edit 后自动跑 tsc"，AI 改完代码立刻看到类型错并自己修',
-        '📝 读大文件优化：默认只读前 500 行 + 附文件结构大纲（每个 class / function 在哪一行），AI 按需精准二次读取，节省大量 token',
-        '🌏 长对话中 AI 不再突然切英文回复（中文锚定加固 + 每轮工具结果后重新提醒）',
-        '🛠 后台服务设置 2GB 内存上限，防长跑泄漏拖慢整个系统',
-        '✏ 任务清单全部跑完后自动收起（之前打勾仍一直显示）；发新任务时旧清单自动清掉',
-        '💭 修复展开思考气泡后，AI 一调用新工具就被自动折回去的问题',
-        '🛠 工具卡片"全部参数 / 已执行 N 个工具"等展开状态记得住，新消息进来不再被复位',
-        '🖱 修复鼠标悬停在消息或工具行上时，因 AI 流式输出导致界面反复闪烁',
-        '🔧 修复 AI 改完文件马上要再改时，被反复要求"先 read_file"的死循环',
-        '🛠 修复连续 patch 同一文件被误报"文件已被外部修改"',
-        '🪨 修复 AI 改大文件 / 大段代码替换时界面卡顿',
-        '⚙️ 大量内部稳定性、缓存命中与构建流程优化',
-      ],
-    },
-    {
-      version: '0.2.14',
-      date: '2026-04-27',
-      changes: [
-        '👤 用户消息显示头像（取你姓名/账号的首字），AI 消息显示"AI"圆形徽标',
-        '📅 消息时间戳显示完整年月日（YYYY-MM-DD HH:mm），固定在气泡右下不再挤换行',
-        '🎨 代码块强制 GitHub 深色主题（不论 UI 主题），高亮颜色清晰；语言名 + 复制按钮带边框明显可见，"已复制"绿色高亮反馈',
-        '✏ 编辑/多处编辑工具卡片改用红绿 diff 视图：删除行红底、新增行绿底，多处修改逐块罗列',
-        '⚡ bash / 命令工具运行时实时显示 stdout：终端深色背景 + 绿色呼吸灯 + 行数计数 + 自动滚到底',
-        '🛠 多个并行工具调用自动合并卡片（如同时读 5 个文件 → "已执行 5 个工具" 一行），点击展开',
-        '✋ 鼠标悬停消息显示药丸按钮：重新生成 / 从此分叉 / 删除（带 SVG 图标，不再是文字符号）',
-        '⬇ 浏览历史时右下角浮动"回到底部"按钮；⬆ 滚到顶部时才出现"加载更早消息"按钮',
-        '📜 历史拉到最后显示"— 已是最早的消息 —"提示',
-        '↕ 输入框顶部蓝色边线可拖拽调高，最高占窗口 1/3，最低 120px 保证按钮可见',
-        '📋 任务清单（Todos）切换会话不再丢失，每个会话独立保留',
-        '🧠 思考过程：流式输出时全部展开，完成后默认收起（仅一行 header），点击 chevron 手动展开/折叠',
-        '🪄 工具栏新增"展开全部思考"按钮，一键查看本会话所有思考详情',
-        '🎉 任务完成绿色横条带弹性渐入动画',
-        '✅ AI 任务总结直接以 assistant 气泡呈现（attempt_completion 不再藏在工具卡片折叠里）',
-        '🖼 多模态：消息附带图片自动在气泡内显示缩略图，点击新窗口打开原图',
-        '📝 markdown 增强：表格带边框 + 隔行斑马、引用块带左边线 + 灰背景、分割线主题色',
-        '🔍 设置面板的"隐藏 todos / 思考 / 内部工具"过滤开关现在真生效（之前只是空摆）',
-        '🚀 虚拟化：消息超 800 条只渲染最近 800 条，顶部"展开全部"按钮（防止超长会话卡顿）',
-        '⌨️ 键盘 j/k / ↑↓ 在消息间快速跳转（输入框外）',
-        '🔐 修改文件 / 运行命令等危险操作弹出审批对话框（含"本会话允许 / 总是允许"记忆）',
-        '🏠 IDE 与桌面端使用独立数据库（~/.maxian-ide vs ~/.maxian），可同时打开互不干扰',
-        '🔧 修复：AI 写正则用 (?i)/(?ims) 等内联标志报错（自动转 JS 兼容写法）',
-        '♻️ 探索类工具（搜索 / glob / grep 等）的死循环检测阈值放宽到 8 次，AI 正常重试不再被误杀',
-        '⚙️ 架构：桌面端、IDE、未来 Web 共用 @maxian/ui 同一份组件 + store + SSE 适配器，一处改三端生效',
-        '🧹 桌面端净删除 ~400 行老的消息渲染代码（旧 viewGroups 系统下线）',
-      ],
-    },
-    {
-      version: '0.2.13',
-      date: '2026-04-27',
-      changes: [
-        '🎨 桌面端聊天界面整体换新：用户消息右侧蓝色气泡、AI 回复左侧深色气泡，每条带时间戳，整体更清爽',
-        '🧠 思考过程重新设计：流式输出时全部展开，思考完毕自动收起，点击标题可手动展开 / 折叠',
-        '✅ AI 完成任务时显示绿色"任务完成"横条，最终总结直接以 AI 回复气泡呈现，不再藏在工具卡片里',
-        '🛠 多个并行工具调用自动合并成一张卡片（如同时读取 5 个文件 → 一行"已执行 5 个工具"），点击展开查看细节',
-        '✋ 鼠标悬停在消息上显示操作按钮：重新生成 / 从此分叉新会话 / 删除（药丸状下拉式按钮）',
-        '⬇ 浏览历史时聊天区右下角出现"回到底部"按钮，一键回最新消息',
-        '⬆ "加载更早消息"按钮只在你滚到顶部时才出现，不再常驻打扰',
-        '↕ 输入框高度可拖拽：把鼠标放到输入框顶部边线向上拖即可放大，最高占窗口 1/3',
-        '📋 任务清单切换会话不再丢失：每个会话的 todos 独立保留，切回去还在',
-        '🔐 修改文件 / 运行命令等危险操作现在统一弹出审批对话框（Code 模式也生效），可选"允许一次 / 本会话允许 / 总是允许"',
-        '🏠 IDE 与桌面端使用独立数据库（~/.maxian-ide vs ~/.maxian），同时打开两个客户端不会互相干扰',
-        '🔍 修复 AI 写正则用 (?i) 前缀时报错：自动转成 JS 兼容写法',
-        '♻️ 修复 AI 探索类工具（搜索 / glob 等）容易被"重复检测"误杀：阈值从 3 次放宽到 8 次',
-        '⚙️ 架构：桌面端、IDE、未来 Web 形态共用 @maxian/ui 同一份 UI 代码（共享 store + 组件 + SSE 适配器），一处改三端生效',
-        '🧹 删除桌面端约 400 行老的消息渲染代码（旧的 viewGroups 系统），整体代码量大幅精简',
-      ],
-    },
-    {
-      version: '0.2.12',
-      date: '2026-04-26',
-      changes: [
-        '🧹 设置面板新增"诊断与维护"区：一键清除当前会话工具失败记忆，让 AI 不再被旧错误干扰',
-        '📊 一键重新统计所有会话的 Token 用量，修复历史会话显示为 0 的问题',
-        '🛡 关闭桌面端时如果意外强杀，后台 sidecar 会自动检测并退出，不再残留占用端口',
-        '📦 Token 用量 ≥ 80% 出现橙色"压缩上下文"按钮，≥ 90% 变红色，一键释放配额',
-        '⚠️ 工具失败时显示完整的错误详情面板，可展开查看多行错误信息',
-        '🪟 窗口大小、位置、是否最大化下次启动后自动还原',
-        '🔥 修复：sidecar 报"require is not defined"导致部分工具全部失效',
-        '🔥 修复：读取过的文件再编辑时偶发死循环（"必须先 read"反复触发）',
-        '🔥 修复：dist / build / target 等目录下的源码文件被误判为二进制拒绝读取',
-        '🔥 修复：关于页面显示版本号写死 0.2.10，现在和实际版本同步',
-      ],
-    },
-    {
-      version: '0.2.11',
-      date: '2026-04-26',
-      changes: [
-        '✅ 修复：任务清单一直显示 X/Y 不能完成 — AI 调用结束工具前没把所有 todo 标记完成，看起来像还在跑',
-        '✅ AI 提前结束时显示橙色徽章："⚠ AI 提前结束，N 项未收尾"，未完成项用橙色斜体标出',
-        '✅ 任务清单新增"已取消"状态（灰色加删除线）',
-        '📁 修复：切换会话时右侧"文件变更"面板始终为空，现在会从历史拉取该会话的变更记录',
-        '📊 修复：设置面板里所有会话的 Token 用量都显示 0，现在每轮对话结束自动累加（仅对新会话生效）',
-      ],
-    },
-    {
-      version: '0.2.10',
-      date: '2026-04-24',
-      changes: [
-        '🛡 修复：AI 优化代码时会把你在其他 IDE 里的手改一并删掉',
-        '🛡 写文件工具新增"破坏性覆盖"检测：删除超过 10 行且超过新增行数 2 倍 → 拦截，并提示 AI 改用局部编辑',
-        '🛡 系统提示词新增硬规则：修改已存在文件一律用编辑工具，整文件重写仅限新建文件或用户明确要求',
-      ],
-    },
-    {
-      version: '0.2.9',
-      date: '2026-04-23',
-      changes: [
-        '📊 默认上下文窗口调回 100 万 Token（适配 Qwen3-coder-plus / Claude 1M 等大窗口模型）',
-        '📊 小窗口模型用户可设环境变量 MAXIAN_CONTEXT_WINDOW=128000 切到 128K',
-        '💡 Token 用量是模型实际计算的精确值（含整段对话历史 + system prompt），非估算',
-      ],
-    },
-    {
-      version: '0.2.8',
-      date: '2026-04-23',
-      changes: [
-        '📊 修复：上下文进度条显示满了但实际并没有触发压缩（进度条上限和压缩阈值不一致）',
-        '📊 现在进度条与压缩阈值统一：到 55% 触发轻度压缩，85% 触发重度压缩',
-        '📊 支持环境变量自定义阈值',
-      ],
-    },
-    {
-      version: '0.2.7',
-      date: '2026-04-23',
-      changes: [
-        '🧠 修复：AI 反复尝试同一失败操作时会误判为"文件损坏"并不停换工具绕过',
-        '🧠 拦截信息改用第二人称直接告知 AI："你已经用相同参数失败 3 次"，并附排查清单',
-        '🧠 完整原始错误（最近 3 次每次 500 字）传回给 AI，避免它凭签名前缀猜测原因',
-        '🧠 读文件工具首次失败时根据错误类型给针对性提示（路径不存在 / 权限不足 / 是目录 / 编码错误）',
-      ],
-    },
-    {
-      version: '0.2.6',
-      date: '2026-04-23',
-      changes: [
-        '🛑 修复：思考阶段点"停止"后 AI 仍继续输出',
-        '🛑 后端立即广播任务终止信号，前端立刻停发送状态、收尾流式消息、清限流提示',
-        '🛑 终止后 1.5 秒内的残留 SSE 事件全部丢弃，避免"已停止但消息还在涌出"',
-      ],
-    },
-    {
-      version: '0.2.5',
-      date: '2026-04-23',
-      changes: [
-        '🛑 修复：思考过程中点"停止"按钮无效，AI 仍继续输出',
-        '🛑 根因：原取消机制只在两块输出之间生效，遇到慢思考模型（R1 / QwQ）一卡几秒就感知不到',
-        '🛑 现在能直接中止正在进行的 HTTP 请求，立即生效',
-      ],
-    },
-    {
-      version: '0.2.4',
-      date: '2026-04-23',
-      changes: [
-        '📜 修复：往上翻聊天历史时，新消息会强制把页面滚回底部，打断阅读',
-        '📜 现在仅当你处于底部 80px 内时才自动滚到底，否则保持当前阅读位置',
-        '📜 切换会话或主动发新消息时重置自动滚底（符合预期）',
-      ],
-    },
-    {
-      version: '0.2.3',
-      date: '2026-04-22',
-      changes: [
-        '🔌 修复：关闭桌面端再启动连不上服务，需要手动 kill 后台进程',
-        '🔌 关窗口时自动 kill 后台 sidecar，端口立即释放',
-        '🔌 启动前自动探测：如果端口已有可用 sidecar 直接复用，不再重复启动',
-        '🔌 双重保险：异常退出和正常退出两条路径都会清理',
-      ],
-    },
-    {
-      version: '0.2.2',
-      date: '2026-04-22',
-      changes: [
-        '🛑 修复：点"结束"按钮后任务并不真停 — 内部只设了标志，主循环根本不检查',
-        '🛑 现在主循环在每轮迭代、每段流式输出、每次工具执行前都检查取消信号',
-        '🛑 取消时同时唤醒挂起的提问 / 计划 / 审批对话框，避免一直卡着等响应',
-      ],
-    },
-    {
-      version: '0.2.1',
-      date: '2026-04-22',
-      changes: [
-        '💰 系统提示词分静态 / 动态两段，让 DashScope / Qwen 的隐式前缀缓存能稳定命中',
-        '💰 长对话场景下 Token 成本预计降低 40%~60%',
-        '🗜 上下文压缩后的占位符更详细：保留工具名、序号、关键参数（路径 / 命令 / 模式）以及结果摘要',
-      ],
-    },
-    {
-      version: '0.2.0',
-      date: '2026-04-22',
-      changes: [
-        '🎯 编辑工具改用 9 种匹配策略级联（对标 OpenCode）：精确 / 行裁 / 块锚 / 空白容忍 / 缩进灵活 / 转义归一 / 边界裁剪 / 上下文感知 / 多匹配处理',
-        '📈 编辑成功率预估提升 2-3 倍 — AI 生成的 old_string 即使缩进 / 制表符 / 空行有差异也能匹配上',
-        '🛡 文件陈旧检测：读取时记录修改时间和大小，编辑前验证"必须读过 + 未被外部改过"',
-        '⚡ 工具执行三层调度：只读工具全并行；不同文件的写操作并行，同文件串行；命令执行全局串行',
-        '🤖 新增 explore 子 Agent 模式（精简提示词 + 只读工具集），适合纯探索类任务',
-      ],
-    },
-    {
-      version: '0.1.3',
-      date: '2026-04-22',
-      changes: [
-        '🪟 Windows / Linux 改用系统原生标题栏（修复双标题栏重叠）',
-        '🔓 修复打包后内网 HTTP 后端登录被 Tauri HTTP 白名单拦截',
-        '💬 登录错误显示真实原因（权限被拒 / 网络不通 / 账号密码错误），不再统一报错',
-        '📦 后台服务（sidecar）用 Bun 编译成 58MB 单文件，跨平台无需用户单独装 Node.js',
-        '🚀 自动构建支持 macOS（M 系/Intel）+ Windows + Linux 四平台',
-      ],
-    },
-    {
-      version: '0.1.1',
-      date: '2026-04-22',
-      changes: [
-        '🔗 聊天里 `文件.ext:42` 自动识别为可点击链接，点击直接定位到对应行',
-        '📥 Markdown 代码块新增"应用到文件"按钮：选目标路径、覆盖或追加、预览后一键写入',
-        '🔍 会话内 Cmd+F / Ctrl+F 搜索：实时计数 + Enter 下一个 / Shift+Enter 上一个',
-        '👀 预览面板检测外部修改：每 3 秒检查文件，被改了就显示黄色提示条（重载 / 忽略）',
-        '💡 AI 给出后续追问建议时，前端渲染成可点击按钮',
-        '▶️ bash / 命令工具卡片内嵌终端：实时刷新输出、绿色呼吸灯、自动滚底',
-        '🧹 自动剥离命令输出里的 ANSI 颜色码',
-        '🛰 智能识别开发服务器命令（npm dev / vite / next dev / tail -f / nodemon 等），3 秒空闲后转入后台运行不被杀',
-        '🔁 限流重试规则扩展：覆盖 429 / rate limit / 算法限流 等多种格式',
-        '💓 SSE 心跳保活（每 15 秒），防止长任务连接被代理 / 防火墙断开',
-        '🩺 任务卡死自动恢复：60 秒未收到任何事件时自动重新拉取消息快照',
-        '💾 修复历史会话的"思考过程"不显示',
-        '🖱 修复流式更新时滚动条被重置（消息引用复用，DOM 不重建）',
-      ],
-    },
-    {
-      version: '0.1.0',
-      date: '2026-04-22',
-      changes: [
-        '🎯 读文件工具增强：图片直接显示、PDF 提示、超长行截断',
-        '🔧 LSP 新增 4 个编辑动作：重命名 / 代码动作 / 格式化 / 整理 import',
-        '📋 编辑工具执行后返回 LSP 诊断摘要（错误 / 警告前 20 条），自动保留 Windows 行尾',
-        '🗜 上下文压缩时显示进度条，完成后系统消息提示',
-        '⚙️ 项目级配置文件 .maxian/config.json + 自定义 agent / command 命令',
-        '🔌 插件生命周期 hooks：工具执行前后、会话创建、消息发送、Agent 每轮',
-        '💬 消息操作：编辑重跑、重新生成、从消息分叉新会话、删除单条',
-        '📌 会话归档 / 置顶 + 独立归档视图',
-        '🎹 全局 ⌘P 命令面板：搜索会话 / 文件 / 符号 / 斜杠命令',
-        '🔍 符号搜索（LSP 优先 + 文件名兜底）',
-        '⌨️ 自定义快捷键：可录制按键 + 一键重置默认',
-        '📄 会话模板系统',
-        '📊 Token 用量看板 + 错误日志页',
-        '🖱 Vim 模式（基础 modal 编辑）',
-        '🏷 消息时间戳显示',
-        '📁 工具调用显示完整 diff，点击跳转到预览面板',
-      ],
-    },
-    {
-      version: '0.0.9',
-      date: '2026-04-21',
-      changes: [
-        '🧠 上下文自动压缩：超 55% 时按工具类型剪枝，超 85% 时让 LLM 总结整段历史',
-        '✂️ /compact 斜杠命令手动触发压缩',
-        '💾 工具调用 / 思考过程 / AI 回复全部存入数据库，切换会话能完整还原',
-        '📡 工具调用参数实时流式显示（生成中可看到 JSON 一字一字出来）',
-        '⚡ 工具并行执行（只读并行 / 写操作串行）',
-        '📖 自动加载 AGENTS.md / CLAUDE.md 到系统提示词',
-        '🌟 把 Skills 列表预先告诉 AI（让它知道有哪些技能可用）',
-        '🔁 死循环检测：连续 3 次相同参数就拦截',
-      ],
-    },
-    {
-      version: '0.0.8',
-      date: '2026-04-21',
-      changes: [
-        '🛠 新增 9 个工具：bash / grep / glob / ls / apply_patch / lsp / question / plan_exit / task（子 Agent）',
-        '🧩 插件系统：~/.maxian/plugins/*.js 自动加载',
-        '🔒 工具权限记忆：本会话允许 / 永久允许',
-        '💡 工具输出超 2000 行 / 50KB 自动截断写盘，避免 Token 爆炸',
-        '🎛 会话搜索、消息过滤器、快捷键速查面板（⌘/）',
-        '🎨 diff 视图支持 Split / Unified 切换',
-        '🔔 Toast 通知带操作按钮 + 数字滚动动画',
-      ],
-    },
-    {
-      version: '0.0.7',
-      date: '2026-04-21',
-      changes: [
-        '📄 文件预览面板：语法高亮 / Diff / 图片 / Markdown 多视图',
-        '🗂 工作区文件浏览器（层级树 + 搜索）',
-        '⭐ Skills 面板：自动扫描 .maxian/skills 和 .claude/skills',
-        '💓 心跳服务：每 60 秒上报在线状态',
-        '📝 AI 调用日志自动推送到后端',
-      ],
-    },
-    {
-      version: '0.0.6',
-      date: '2026-04-21',
-      changes: [
-        '🎬 OpenCode 风格功能对标首批：权限审批 / 文件变更面板 / 文件快照撤销 / 上下文条',
-        '🔀 Git Worktree 管理 + 分支切换',
-        '🖥 集成终端（多标签）',
-        '🔄 自动更新',
-        '🌍 中英文 + Plan 模式（只规划不执行）',
-        '⌘+ 全套快捷键',
-        '🖼 图片粘贴 / 拖拽作为多模态输入',
-      ],
-    },
-  ]
 
   // ─── SettingsPlugins：插件开发文档（P1-14）────────────────────────────────
   const PLUGIN_DEV_MD = `# 码弦（Maxian）插件开发指南
@@ -5086,238 +3261,9 @@ export default {
 \`read_file\`, \`write_to_file\`, \`edit_file\`, \`multiedit_file\`, \`list_files\`, \`search_files\`, \`grep_search\`, \`bash\`, \`todo_write\`, \`web_fetch\`, \`web_search\`, \`lsp\`, \`load_skill\`, \`update_todo_list\`, \`ask_followup_question\`, \`plan_exit\`
 `
 
-  function SettingsPlugins() {
-    const [pluginDir] = createSignal<string>('~/.maxian/plugins/')
-    async function openPluginDir() {
-      try {
-        const { Command } = await import('@tauri-apps/plugin-shell' as any)
-        const home = (await import('@tauri-apps/api/path' as any)).homeDir
-          ? await (await import('@tauri-apps/api/path' as any)).homeDir()
-          : ''
-        const target = `${home}/.maxian/plugins/`
-        // macOS open; Windows start; Linux xdg-open
-        const cmd = new Command('open', [target])
-        await cmd.execute()
-      } catch (e) {
-        showToast({ message: '打开目录失败：请手动定位 ~/.maxian/plugins/', kind: 'warn' })
-      }
-    }
-    async function copyDevDoc() {
-      try {
-        await navigator.clipboard.writeText(PLUGIN_DEV_MD)
-        showToast({ message: '插件开发文档已复制到剪贴板', kind: 'success', duration: 2000 })
-      } catch {
-        showToast({ message: '复制失败', kind: 'error' })
-      }
-    }
-    return (
-      <div class="settings-page">
-        <h3>插件开发</h3>
-        <div class="settings-section">
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-            <button class="btn btn-primary" onClick={openPluginDir}>📁 打开插件目录</button>
-            <button class="btn btn-ghost" onClick={copyDevDoc}>📋 复制完整文档</button>
-          </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
-            插件目录：<code style="background:var(--bg-subtle);padding:1px 5px;border-radius:3px">{pluginDir()}</code>
-          </div>
-        </div>
-        <div
-          class="md markdown-body"
-          style="font-size:13px;line-height:1.7;padding:12px 14px;background:var(--bg-subtle);border-radius:8px;max-height:68vh;overflow:auto"
-          innerHTML={renderMarkdown(PLUGIN_DEV_MD)}
-        />
-      </div>
-    )
-  }
+  // K11c-7: SettingsPlugins 已抽到 ./settings/SettingsPlugins.tsx
 
-  function SettingsAbout() {
-    const [updateStatus, setUpdateStatus] = createSignal<'idle' | 'checking' | 'available' | 'none' | 'installing' | 'error'>('idle')
-    const [updateMsg, setUpdateMsg] = createSignal("")
-
-    async function checkForUpdates() {
-      setUpdateStatus('checking')
-      setUpdateMsg("")
-      try {
-        if ((window as any).__TAURI_INTERNALS__) {
-          const { check } = await import('@tauri-apps/plugin-updater' as any)
-          const update = await check()
-          if (update?.available) {
-            setUpdateStatus('available')
-            setUpdateMsg(`发现新版本 ${update.version}：${update.body ?? ''}`)
-          } else {
-            setUpdateStatus('none')
-            setUpdateMsg("已是最新版本")
-          }
-        } else {
-          setUpdateStatus('none')
-          setUpdateMsg("浏览器环境不支持自动更新")
-        }
-      } catch (e) {
-        setUpdateStatus('error')
-        setUpdateMsg(String((e as Error)?.message ?? e))
-      }
-    }
-
-    async function installUpdate() {
-      setUpdateStatus('installing')
-      try {
-        const { check } = await import('@tauri-apps/plugin-updater' as any)
-        const update = await check()
-        if (update?.available) {
-          await update.downloadAndInstall()
-          // 安装完成后重启
-          const { relaunch } = await import('@tauri-apps/plugin-process' as any)
-          await relaunch()
-        }
-      } catch (e) {
-        setUpdateStatus('error')
-        setUpdateMsg(String((e as Error)?.message ?? e))
-      }
-    }
-
-    return (
-      <>
-        <div class="settings-title">关于</div>
-        <div style="display:flex;flex-direction:column;align-items:center;padding:32px 0 24px;gap:12px">
-          <img class="about-logo" src={logoUrl} alt="Maxian" />
-          <div style="font-size:20px;font-weight:700;color:var(--text-base)">码弦 Maxian</div>
-          <div style="font-size:13px;color:var(--text-muted)">智能 AI 编程助手</div>
-          <div style="font-size:12px;color:var(--text-faint)">版本 {__APP_VERSION__}</div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">软件更新</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">检查更新</div>
-                <div class="settings-row-desc">
-                  <Show when={updateMsg()}>
-                    <span style={updateStatus() === 'error' ? 'color:var(--error)' : updateStatus() === 'available' ? 'color:var(--accent)' : 'color:var(--text-muted)'}>
-                      {updateMsg()}
-                    </span>
-                  </Show>
-                  <Show when={!updateMsg()}>
-                    当前版本 {__APP_VERSION__}
-                  </Show>
-                </div>
-              </div>
-              <div style="display:flex;gap:6px">
-                <Show when={updateStatus() === 'available'}>
-                  <button class="btn btn-primary" style="font-size:11px" onClick={installUpdate}>
-                    立即更新
-                  </button>
-                </Show>
-                <button
-                  class="btn btn-ghost"
-                  style="font-size:11px"
-                  onClick={checkForUpdates}
-                  disabled={updateStatus() === 'checking' || updateStatus() === 'installing'}
-                >
-                  <Show when={updateStatus() === 'checking'} fallback="检查更新">
-                    <span class="spinner" style="width:10px;height:10px;border-width:1.5px" />
-                    检查中…
-                  </Show>
-                  <Show when={updateStatus() === 'installing'}>
-                    安装中…
-                  </Show>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">诊断与维护</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">重新计算所有会话 Token 用量</div>
-                <div class="settings-row-desc">从 history 内容按 char/4 估算回填 sessions 表，修复"会话列表 token 用量为 0"。误差 ±20%。</div>
-              </div>
-              <button
-                class="settings-btn"
-                onClick={async () => {
-                  try {
-                    const c = await getClient()
-                    const r = await c.recalculateAllSessionTokens(true)   // force=true 重算全部
-                    showToast({ message: `Token 重算完成：${r.touched} 个会话已更新`, kind: 'info', duration: 3000 })
-                    await refreshSessions()
-                  } catch (e) {
-                    showToast({ message: `Token 重算失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
-                  }
-                }}
-              >重算 Token</button>
-            </div>
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">清除当前会话的"工具失败记忆"</div>
-                <div class="settings-row-desc">删除当前会话历史里的所有工具错误条目（require is not defined / Binary File / 等），让 AI 不再被旧的"已修复"错误污染推理。</div>
-              </div>
-              <button
-                class="settings-btn"
-                disabled={!activeSessionId()}
-                onClick={async () => {
-                  const sid = activeSessionId()
-                  if (!sid) return
-                  try {
-                    const c = await getClient()
-                    const r = await c.pruneToolErrors(sid)
-                    if (r.ok) {
-                      showToast({ message: `已清除 ${r.pruned} 条错误记忆 (${r.before} → ${r.after} 条历史)`, kind: 'info', duration: 3500 })
-                    } else {
-                      showToast({ message: `清除失败：${r.error}`, kind: 'error', duration: 4000 })
-                    }
-                  } catch (e) {
-                    showToast({ message: `清除失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
-                  }
-                }}
-              >清除错误记忆</button>
-            </div>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">更新日志</div>
-          <div class="settings-card">
-            <For each={CHANGELOG}>
-              {(entry, i) => (
-                <div class="changelog-entry" classList={{ latest: i() === 0 }}>
-                  <div class="changelog-header">
-                    <span class="changelog-version">v{entry.version}</span>
-                    <Show when={i() === 0}>
-                      <span class="changelog-latest-badge">最新</span>
-                    </Show>
-                    <span class="changelog-date">{entry.date}</span>
-                  </div>
-                  <ul class="changelog-list">
-                    <For each={entry.changes}>
-                      {(c) => <li>{c}</li>}
-                    </For>
-                  </ul>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-        <div class="settings-group">
-          <div class="settings-group-title">开源信息</div>
-          <div class="settings-card">
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">构建于</div>
-                <div class="settings-row-desc">Tauri 2 · SolidJS · Hono · Zhongrui Cai</div>
-              </div>
-            </div>
-            <div class="settings-row">
-              <div class="settings-row-label">
-                <div class="settings-row-name">版权</div>
-                <div class="settings-row-desc">© 2025 天和智开 All rights reserved</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </>
-    )
-  }
+  // K11c-8: SettingsAbout 已抽到 ./settings/SettingsAbout.tsx
 
   // ─── Sidebar ──────────────────────────────────────────────────────────────
   function toggleGroupCollapse(wsId: string) {
@@ -5330,730 +3276,18 @@ export default {
   }
 
   // ─── 会话条目（chat/code 通用） ──────────────────────────────────────────────
-  function SessionItem(props: { s: SessionSummary }) {
-    const s = props.s
-    return (
-      <div
-        class="session-item"
-        classList={{ active: activeSessionId() === s.id && !showSettings() }}
-        onClick={() => { if (editingSessionId() !== s.id) selectSession(s.id) }}
-      >
-        {/* Status indicator */}
-        <div class="session-status">
-          <Show
-            when={s.status === "running"}
-            fallback={
-              <div
-                class="session-status-dot"
-                classList={{ error: s.status === "error", done: s.status === "done" }}
-              />
-            }
-          >
-            <div class="session-status-spinner" />
-          </Show>
-        </div>
-
-        {/* Title or rename input (双击标题直接改名) */}
-        <Show
-          when={editingSessionId() === s.id}
-          fallback={
-            <span
-              class="session-title"
-              onDblClick={(e) => startRenameSession(e, s)}
-            >{s.title || s.id.slice(0, 8)}</span>
-          }
-        >
-          <input
-            class="rename-input"
-            value={editingSessionTitle()}
-            onInput={(e) => setEditingSessionTitle(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              e.stopPropagation()
-              if (e.key === "Enter")  commitRenameSession(s.id)
-              if (e.key === "Escape") cancelRenameSession()
-            }}
-            onBlur={() => commitRenameSession(s.id)}
-            onClick={(e) => e.stopPropagation()}
-            ref={(el) => { setTimeout(() => { el?.focus(); el?.select() }, 10) }}
-          />
-        </Show>
-
-        {/* 置顶图标（始终显示，已置顶才亮） */}
-        <Show when={s.pinned}>
-          <span class="session-pin-badge" title="已置顶">📌</span>
-        </Show>
-        <Show when={s.archived}>
-          <span class="session-archive-badge" title="已归档">🗃</span>
-        </Show>
-
-        {/* Hover actions */}
-        <div class="session-item-actions">
-          <button
-            class="item-action-btn"
-            onClick={(e) => { e.stopPropagation(); togglePinSession(s.id, !s.pinned) }}
-            title={s.pinned ? "取消置顶" : "置顶"}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={s.pinned ? "var(--accent)" : "currentColor"} stroke-width="2">
-              <line x1="12" y1="17" x2="12" y2="22"/>
-              <path d="M5 17h14a2 2 0 0 0 1.84-2.75L17 7h-10L3.16 14.25A2 2 0 0 0 5 17z"/>
-            </svg>
-          </button>
-          <button
-            class="item-action-btn"
-            onClick={(e) => { e.stopPropagation(); toggleArchiveSession(s.id, !s.archived) }}
-            title={s.archived ? "取消归档" : "归档"}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="21 8 21 21 3 21 3 8"/>
-              <rect x="1" y="3" width="22" height="5"/>
-              <line x1="10" y1="12" x2="14" y2="12"/>
-            </svg>
-          </button>
-          <button
-            class="item-action-btn"
-            onClick={(e) => startRenameSession(e, s)}
-            title="重命名"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-            </svg>
-          </button>
-          <button
-            class="item-action-btn del"
-            onClick={(e) => deleteSession(e, s.id)}
-            title="删除"
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-              <path d="M10 11v6"/><path d="M14 11v6"/>
-              <path d="M9 6V4h6v2"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  function Sidebar() {
-    const user = currentUser()
-
-    // chat 模式下的平铺会话列表（置顶优先，按时间降序）+ 搜索 + 归档过滤
-    const chatSessions = createMemo(() => {
-      const q = sessionSearch().trim().toLowerCase()
-      return sessions()
-        .filter(s => (s.uiMode ?? 'code') === 'chat')
-        .filter(s => showArchived() ? !!s.archived : !s.archived)
-        .filter(s => !q || (s.title ?? '').toLowerCase().includes(q))
-        .sort((a, b) => {
-          if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
-          return b.updatedAt - a.updatedAt
-        })
-    })
-
-    return (
-      <aside class="sidebar">
-        {/* Header */}
-        <div class="sidebar-header">
-          {/* 分段模式切换 */}
-          <div class="mode-segmented">
-            <button
-              class="mode-seg-btn"
-              classList={{ active: globalMode() === 'chat' }}
-              onClick={() => setGlobalMode('chat')}
-              title="Chat — 智能对话"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-              </svg>
-              Chat
-            </button>
-            <button
-              class="mode-seg-btn"
-              classList={{ active: globalMode() === 'code' }}
-              onClick={() => setGlobalMode('code')}
-              title="Code — 智能编码 Agent"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                <polyline points="16 18 22 12 16 6"/>
-                <polyline points="8 6 2 12 8 18"/>
-              </svg>
-              Code
-            </button>
-          </div>
-
-          {/* 右侧操作按钮 */}
-          <div class="sidebar-actions">
-            <Show when={globalMode() === 'chat'}>
-              {/* Chat 模式：新建对话 */}
-              <button class="icon-btn" onClick={createSession} title="新建对话 (⌘N)">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                </svg>
-              </button>
-            </Show>
-            <Show when={globalMode() === 'code'}>
-              {/* Code 模式：添加项目 */}
-              <button class="icon-btn" onClick={pickFolder} title="添加项目">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  <line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>
-                </svg>
-              </button>
-            </Show>
-            {/* 任务批次入口（v0.2.16+）*/}
-            <button
-              class="icon-btn"
-              classList={{ active: showBatchPanel() }}
-              onClick={() => setShowBatchPanel(v => !v)}
-              title="任务批次（批量给项目派任务）"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="3" width="7" height="7"/>
-                <rect x="14" y="3" width="7" height="7"/>
-                <rect x="3" y="14" width="7" height="7"/>
-                <rect x="14" y="14" width="7" height="7"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        {/* 会话搜索 + 归档切换 */}
-        <div class="sidebar-search-wrap">
-          <svg class="sidebar-search-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-          </svg>
-          <input
-            class="sidebar-search-input"
-            placeholder={showArchived() ? "在归档里搜索…" : "搜索会话…"}
-            value={sessionSearch()}
-            onInput={(e) => setSessionSearch(e.currentTarget.value)}
-          />
-          <button
-            class="sidebar-archive-toggle"
-            classList={{ active: showArchived() }}
-            onClick={() => setShowArchived(v => !v)}
-            title={showArchived() ? "查看活跃会话" : "查看已归档"}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="21 8 21 21 3 21 3 8"/>
-              <rect x="1" y="3" width="22" height="5"/>
-              <line x1="10" y1="12" x2="14" y2="12"/>
-            </svg>
-          </button>
-          <Show when={sessionSearch()}>
-            <button
-              class="sidebar-search-clear"
-              onClick={() => setSessionSearch('')}
-              title="清除"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
-          </Show>
-        </div>
-
-        {/* ── Chat 模式：平铺会话列表 ── */}
-        <Show when={globalMode() === 'chat'}>
-          <div class="sidebar-sessions">
-            <Show when={chatSessions().length === 0}>
-              <div class="sessions-empty-hint">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="color:var(--text-faint)">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                </svg>
-                <span>点击 + 新建对话</span>
-              </div>
-            </Show>
-            <For each={chatSessions()}>
-              {(s) => <SessionItem s={s} />}
-            </For>
-          </div>
-        </Show>
-
-        {/* ── Code 模式：按工作区分组 ── */}
-        <Show when={globalMode() === 'code'}>
-          <div class="sidebar-sessions">
-            <Show when={workspaces().length === 0 && sessions().filter(s => (s.uiMode ?? 'code') === 'code').length === 0}>
-              <div class="sessions-empty-hint">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="color:var(--text-faint)">
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                </svg>
-                <span>点击右上角 + 添加项目</span>
-              </div>
-            </Show>
-
-            <For each={groupedSessions()}>
-              {(group) => {
-                const wsId = group.workspace?.id ?? group.workspacePath
-                const isCollapsed = () => collapsedGroups().has(wsId)
-                return (
-                  <div class="session-group">
-                    {/* Workspace group header */}
-                    <div
-                      class="session-group-header"
-                      onClick={() => toggleGroupCollapse(wsId)}
-                      title={group.workspacePath}
-                    >
-                      {/* Collapse arrow */}
-                      <svg
-                        class="group-collapse-arrow"
-                        classList={{ collapsed: isCollapsed() }}
-                        width="10" height="10" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="2.5"
-                      >
-                        <polyline points="6 9 12 15 18 9"/>
-                      </svg>
-
-                      {/* Name or rename input */}
-                      <Show
-                        when={editingWorkspaceId() === group.workspace?.id}
-                        fallback={
-                          <span class="session-group-name">
-                            {group.workspace?.name ?? shortPath(group.workspacePath)}
-                          </span>
-                        }
-                      >
-                        <input
-                          class="rename-input"
-                          value={editingWorkspaceName()}
-                          onInput={(e) => setEditingWorkspaceName(e.currentTarget.value)}
-                          onKeyDown={(e) => {
-                            e.stopPropagation()
-                            if (e.key === "Enter")  commitRenameWorkspace(group.workspace!.id)
-                            if (e.key === "Escape") cancelRenameWorkspace()
-                          }}
-                          onBlur={() => commitRenameWorkspace(group.workspace!.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          ref={(el) => { setTimeout(() => { el?.focus(); el?.select() }, 10) }}
-                        />
-                      </Show>
-
-                      {/* Hover actions: new session + rename */}
-                      <Show when={group.workspace && editingWorkspaceId() !== group.workspace.id}>
-                        <div class="session-group-actions">
-                          <button
-                            class="group-action-btn"
-                            onClick={(e) => { e.stopPropagation(); createSessionInWorkspace(e, group.workspace!) }}
-                            title="新建会话"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                            </svg>
-                          </button>
-                          <button
-                            class="group-action-btn"
-                            onClick={(e) => { e.stopPropagation(); startRenameWorkspace(e, group.workspace!) }}
-                            title="重命名项目"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                            </svg>
-                          </button>
-                          <button
-                            class="group-action-btn del"
-                            onClick={(e) => deleteWorkspace(e, group.workspace!)}
-                            title="移除项目"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                              <polyline points="3 6 5 6 21 6"/>
-                              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-                              <path d="M10 11v6"/><path d="M14 11v6"/>
-                              <path d="M9 6V4h6v2"/>
-                            </svg>
-                          </button>
-                        </div>
-                      </Show>
-                    </div>
-
-                    {/* Sessions in this group (hidden when collapsed) */}
-                    <Show when={!isCollapsed()}>
-                      <For each={group.sessions}>
-                        {(s) => <SessionItem s={s} />}
-                      </For>
-                      <Show when={group.sessions.length === 0 && group.workspace}>
-                        <div class="session-group-empty">暂无会话</div>
-                      </Show>
-                    </Show>
-                  </div>
-                )
-              }}
-            </For>
-          </div>
-        </Show>
-
-        {/* Bottom: User (collapsible) */}
-        <div class="sidebar-user">
-          <Show when={user}>
-            <div
-              class="sidebar-user-collapsed"
-              classList={{ expanded: userExpanded() }}
-              onClick={() => setUserExpanded(v => !v)}
-            >
-              <div class="sidebar-user-avatar">{userInitials(user!)}</div>
-              <span class="sidebar-user-name-min">{user!.nickName || user!.userName}</span>
-              <svg
-                class="sidebar-chevron"
-                classList={{ up: userExpanded() }}
-                width="12" height="12" viewBox="0 0 24 24"
-                fill="none" stroke="currentColor" stroke-width="2.5"
-              >
-                <polyline points="18 15 12 9 6 15"/>
-              </svg>
-            </div>
-
-            <Show when={userExpanded()}>
-              <div class="sidebar-user-expanded">
-                <div class="sidebar-user-details">
-                  <div class="sidebar-user-avatar large">{userInitials(user!)}</div>
-                  <div class="sidebar-user-text">
-                    <div class="sidebar-user-fullname">{user!.nickName || user!.userName}</div>
-                    <div class="sidebar-user-email">{user!.email || user!.userName}</div>
-                  </div>
-                </div>
-                <div class="sidebar-user-actions">
-                  <button
-                    class="sidebar-action-btn"
-                    classList={{ active: showSettings() }}
-                    onClick={() => { setShowSettings(true); setSettingsTab("appearance"); setUserExpanded(false) }}
-                  >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <circle cx="12" cy="12" r="3"/>
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                    </svg>
-                    设置
-                  </button>
-                  <button class="sidebar-action-btn danger" onClick={handleLogout}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                      <polyline points="16 17 21 12 16 7"/>
-                      <line x1="21" y1="12" x2="9" y2="12"/>
-                    </svg>
-                    退出登录
-                  </button>
-                </div>
-              </div>
-            </Show>
-          </Show>
-        </div>
-      </aside>
-    )
-  }
+  // K11c-cont: SessionItem + Sidebar 已抽到 ./sidebar/
 
   // ─── ApprovalDialog ───────────────────────────────────────────────────────
   // 共享自 @maxian/ui 的纯 UI 组件，外部传入 request + onDecide 即可。
-  function ApprovalDialog() {
-    return (
-      <SharedApprovalDialog
-        request={approvalRequest()}
-        getToolLabel={(n) => TOOL_LABELS[n] ?? n}
-        onDecide={(d) => {
-          if (!d.approved) handleApprove(false)
-          else handleApprove(true, d.remember)
-        }}
-      />
-    )
-  }
+  // ApprovalDialog 直接 inline SharedApprovalDialog（K10-A 已抽，无需本地包装函数）
+  // K11c-cont: QuestionDialog / PlanExitDialog / ApplyToFileDialog 已抽到 ./dialogs/
 
-  // ─── QuestionDialog（Agent 调用 question 工具时弹出） ──────────────────
-  function QuestionDialog() {
-    const req = questionRequest()
-    if (!req) return null
-    const toggleOption = (o: string) => {
-      setQuestionSelected(prev => {
-        if (req.multi) {
-          return prev.includes(o) ? prev.filter(x => x !== o) : [...prev, o]
-        }
-        return prev.includes(o) ? [] : [o]
-      })
-    }
-    return (
-      <div class="approval-overlay">
-        <div class="approval-dialog" style="max-width:560px;width:90vw">
-          <div class="approval-header">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
-              <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span class="approval-title">AI 请求澄清</span>
-          </div>
-          <div class="approval-body">
-            <div style="white-space:pre-wrap;line-height:1.6;color:var(--text-base);font-size:13.5px;margin-bottom:12px">
-              {req.question}
-            </div>
-            <Show when={req.options.length > 0}>
-              <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
-                <For each={req.options}>
-                  {(o) => {
-                    const checked = () => questionSelected().includes(o)
-                    return (
-                      <label style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;background:var(--bg-subtle)"
-                        classList={{ 'question-option-checked': checked() }}>
-                        <input
-                          type={req.multi ? 'checkbox' : 'radio'}
-                          checked={checked()}
-                          onChange={() => toggleOption(o)}
-                          name="qq-opt"
-                        />
-                        <span style="flex:1;font-size:12.5px">{o}</span>
-                      </label>
-                    )
-                  }}
-                </For>
-              </div>
-            </Show>
-            <textarea
-              style="width:100%;min-height:60px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-subtle);font-size:12.5px;color:var(--text-base);outline:none;font-family:var(--font-sans);resize:vertical"
-              placeholder={req.options.length > 0 ? '可选：补充说明…' : '回答…'}
-              value={questionAnswer()}
-              onInput={(e) => setQuestionAnswer(e.currentTarget.value)}
-            />
-          </div>
-          <div class="approval-footer">
-            <button class="approval-btn deny" onClick={() => handleAnswerQuestion(true)}>取消</button>
-            <button
-              class="approval-btn allow"
-              disabled={questionAnswer().trim().length === 0 && questionSelected().length === 0}
-              onClick={() => handleAnswerQuestion(false)}
-            >提交</button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ─── PlanExitDialog（Agent 调用 plan_exit 工具时弹出） ───────────────
-  function PlanExitDialog() {
-    const req = planExitRequest()
-    if (!req) return null
-    return (
-      <div class="approval-overlay">
-        <div class="approval-dialog" style="max-width:640px;width:90vw;max-height:80vh;display:flex;flex-direction:column">
-          <div class="approval-header">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
-              <polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-            </svg>
-            <span class="approval-title">AI 计划已就绪 — 是否切换到 Build 模式执行？</span>
-          </div>
-          <div class="approval-body" style="overflow-y:auto;flex:1">
-            <div style="font-size:13px;color:var(--text-base);line-height:1.6;margin-bottom:12px">
-              <strong>摘要</strong>
-              <div style="margin-top:4px;padding:8px 10px;background:var(--bg-subtle);border-radius:6px;white-space:pre-wrap">
-                {req.summary}
-              </div>
-            </div>
-            <Show when={req.steps}>
-              <div style="font-size:12.5px;color:var(--text-base);line-height:1.6">
-                <strong>详细步骤</strong>
-                <div class="md" innerHTML={renderMarkdown(req.steps)} style="margin-top:6px;padding:10px;background:var(--bg-subtle);border-radius:6px" />
-              </div>
-            </Show>
-            <div style="margin-top:12px">
-              <label style="font-size:12px;color:var(--text-muted)">若不同意，请填写反馈让 AI 重新规划：</label>
-              <textarea
-                style="width:100%;min-height:50px;padding:8px 10px;margin-top:4px;border:1px solid var(--border);border-radius:6px;background:var(--bg-base);font-size:12.5px;color:var(--text-base);outline:none;font-family:var(--font-sans);resize:vertical"
-                placeholder="反馈（可选）…"
-                value={planExitFeedback()}
-                onInput={(e) => setPlanExitFeedback(e.currentTarget.value)}
-              />
-            </div>
-          </div>
-          <div class="approval-footer">
-            <button class="approval-btn deny" onClick={() => handlePlanExit(false)}>拒绝并反馈</button>
-            <button class="approval-btn allow" onClick={() => handlePlanExit(true)}>开始执行</button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ─── ApplyToFileDialog（P0-2: 把 AI 代码块写入指定文件） ──────────────────
-  function ApplyToFileDialog() {
-    const dlg = applyDialog()
-    if (!dlg.open) return null
-    return (
-      <div class="approval-overlay" onClick={(e) => {
-        if (e.target === e.currentTarget) setApplyDialog({ open: false, code: '', lang: undefined, target: '', mode: 'overwrite', loading: false })
-      }}>
-        <div class="approval-dialog" style="max-width:600px;width:90vw;max-height:80vh;display:flex;flex-direction:column">
-          <div class="approval-header">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-              <line x1="12" y1="18" x2="12" y2="12"/>
-              <line x1="9" y1="15" x2="15" y2="15"/>
-            </svg>
-            <span class="approval-title">应用代码到文件</span>
-            <Show when={dlg.lang}>
-              <span style="font-size:11px;color:var(--text-muted);margin-left:8px">({dlg.lang})</span>
-            </Show>
-          </div>
-          <div class="approval-body" style="overflow-y:auto;flex:1">
-            <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">目标文件（相对路径）</div>
-            <input
-              type="text"
-              style="width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-base);font-size:12.5px;color:var(--text-base);outline:none;font-family:ui-monospace,Menlo,monospace"
-              value={dlg.target}
-              placeholder="例如：src/components/Button.tsx"
-              onInput={(e) => setApplyDialog(d => ({ ...d, target: e.currentTarget.value }))}
-            />
-            <div style="display:flex;gap:10px;margin-top:10px;font-size:12px;color:var(--text-base)">
-              <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
-                <input
-                  type="radio"
-                  name="apply-mode"
-                  checked={dlg.mode === 'overwrite'}
-                  onChange={() => setApplyDialog(d => ({ ...d, mode: 'overwrite' }))}
-                /> 覆盖写入
-              </label>
-              <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
-                <input
-                  type="radio"
-                  name="apply-mode"
-                  checked={dlg.mode === 'append'}
-                  onChange={() => setApplyDialog(d => ({ ...d, mode: 'append' }))}
-                /> 追加到末尾
-              </label>
-            </div>
-            <div style="margin-top:10px">
-              <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">代码预览（{dlg.code.split('\n').length} 行，{dlg.code.length} 字符）</div>
-              <pre style="max-height:260px;overflow:auto;padding:10px;background:var(--bg-subtle);border-radius:6px;font-size:11.5px;line-height:1.45;font-family:ui-monospace,Menlo,monospace;color:var(--text-base);white-space:pre;border:1px solid var(--border-subtle)">{dlg.code}</pre>
-            </div>
-            <Show when={dlg.error}>
-              <div style="margin-top:8px;padding:6px 10px;background:rgba(255,80,80,0.12);color:#ffb0b0;border-radius:4px;font-size:12px">
-                {dlg.error}
-              </div>
-            </Show>
-          </div>
-          <div class="approval-footer">
-            <button
-              class="approval-btn deny"
-              disabled={dlg.loading}
-              onClick={() => setApplyDialog({ open: false, code: '', lang: undefined, target: '', mode: 'overwrite', loading: false })}
-            >取消</button>
-            <button
-              class="approval-btn allow"
-              disabled={dlg.loading || !dlg.target.trim()}
-              onClick={() => void confirmApplyToFile()}
-            >{dlg.loading ? '写入中…' : '写入文件'}</button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ─── FileTreePanel ────────────────────────────────────────────────────────
-  function FileTreePanel() {
-    const files = () => Array.from(changedFiles().values())
-    return (
-      <div class="file-tree-panel">
-        <div class="file-tree-header">
-          <span class="file-tree-title">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            文件变更 ({files().length})
-          </span>
-          <button class="icon-btn" onClick={() => setShowFileTree(false)} title="关闭">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div class="file-tree-body">
-          <Show
-            when={files().length > 0}
-            fallback={<div class="file-tree-empty">本次会话暂无文件变更</div>}
-          >
-            <For each={files()}>
-              {(entry) => {
-                const filename = entry.path.split('/').pop() ?? entry.path
-                const shortPathVal = entry.path.length > 50
-                  ? '…' + entry.path.slice(-47)
-                  : entry.path
-                return (
-                  <div class="file-tree-item" onClick={() => openPreview(entry.path, { viewMode: 'diff' })} style="cursor:pointer">
-                    <span class={`file-status-badge file-status-${entry.action}`}>
-                      {entry.action === 'created' ? 'A' : entry.action === 'deleted' ? 'D' : 'M'}
-                    </span>
-                    <div class="file-tree-item-info">
-                      <span class="file-tree-filename">{filename}</span>
-                      <span class="file-tree-path" title={entry.path}>{shortPathVal}</span>
-                    </div>
-                    {/* 在外部编辑器打开 */}
-                    <button
-                      class="file-open-btn"
-                      onClick={(e) => { e.stopPropagation(); openInEditor(entry.path) }}
-                      title="在编辑器中打开"
-                    >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                        <polyline points="15 3 21 3 21 9"/>
-                        <line x1="10" y1="14" x2="21" y2="3"/>
-                      </svg>
-                    </button>
-                    <Show when={entry.action !== 'deleted'}>
-                      <button
-                        class="file-revert-btn"
-                        onClick={(e) => { e.stopPropagation(); revertFile(entry.path) }}
-                        title="撤销此文件的修改"
-                      >
-                        ↩
-                      </button>
-                    </Show>
-                  </div>
-                )
-              }}
-            </For>
-          </Show>
-        </div>
-      </div>
-    )
-  }
+  // K10e: FileTreePanel 已抽到 @maxian/ui 改名 SharedFileChangesPanel（更准确：是变更文件列表，非目录树）
+  // 渲染处见 main 区右侧侧边栏（约第 8487 行）。
 
   // ─── 工作区浏览器面板（列出所有工作区文件，点击打开预览）──────────────
   // 层级文件树节点
-  interface FileTreeNode {
-    name:     string
-    path:     string               // 相对工作区的完整路径
-    isDir:    boolean
-    children: FileTreeNode[]
-  }
-
-  function buildFileTree(paths: string[]): FileTreeNode {
-    const root: FileTreeNode = { name: '', path: '', isDir: true, children: [] }
-    for (const fullPath of paths) {
-      const parts = fullPath.split('/').filter(Boolean)
-      let cur = root
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i]
-        const isLast = i === parts.length - 1
-        let child = cur.children.find(c => c.name === part)
-        if (!child) {
-          child = {
-            name:     part,
-            path:     parts.slice(0, i + 1).join('/'),
-            isDir:    !isLast,
-            children: [],
-          }
-          cur.children.push(child)
-        }
-        cur = child
-      }
-    }
-    // 排序：目录优先，同类按字母
-    const sortRec = (n: FileTreeNode) => {
-      n.children.sort((a, b) => {
-        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-        return a.name.localeCompare(b.name)
-      })
-      n.children.forEach(sortRec)
-    }
-    sortRec(root)
-    return root
-  }
-
   // 展开的目录路径
   const [expandedDirs, setExpandedDirs] = createSignal<Set<string>>(new Set())
   function toggleDir(path: string) {
@@ -6065,161 +3299,7 @@ export default {
     })
   }
 
-  function WorkspaceExplorerPanel() {
-    const q = () => explorerSearch().trim().toLowerCase()
-    const allFiles = () => wsFileCache()?.files ?? []
-
-    // 搜索模式 vs 树模式
-    const isSearching = () => q().length > 0
-    const searchResults = () => {
-      if (!isSearching()) return []
-      return allFiles()
-        .filter(f => f.toLowerCase().includes(q()))
-        .slice(0, 300)
-    }
-    const tree = createMemo(() => buildFileTree(allFiles()))
-
-    // 渲染节点（递归）
-    function renderNode(node: FileTreeNode, depth: number): any {
-      if (!node.isDir) {
-        const changed = changedFiles().get(node.path)?.action
-        return (
-          <div
-            class="file-tree-item"
-            onClick={() => openPreview(node.path)}
-            style={`cursor:pointer;padding-left:${8 + depth * 14}px`}
-            title={node.path}
-          >
-            <Show when={changed} fallback={
-              <span class="explorer-file-icon">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                </svg>
-              </span>
-            }>
-              <span class={`file-status-badge file-status-${changed}`}>
-                {changed === 'created' ? 'A' : changed === 'deleted' ? 'D' : 'M'}
-              </span>
-            </Show>
-            <span class="file-tree-filename">{node.name}</span>
-          </div>
-        )
-      }
-      const open = () => expandedDirs().has(node.path)
-      return (
-        <>
-          <div
-            class="file-tree-item file-tree-dir"
-            onClick={() => toggleDir(node.path)}
-            style={`cursor:pointer;padding-left:${8 + depth * 14}px`}
-            title={node.path}
-          >
-            <svg class="file-tree-arrow" classList={{ open: open() }} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <polyline points="9 18 15 12 9 6"/>
-            </svg>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent);flex-shrink:0">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            <span class="file-tree-filename">{node.name}</span>
-            <span class="file-tree-dir-count">{node.children.length}</span>
-          </div>
-          <Show when={open()}>
-            <For each={node.children}>
-              {(child) => renderNode(child, depth + 1)}
-            </For>
-          </Show>
-        </>
-      )
-    }
-
-    return (
-      <div class="file-tree-panel explorer-panel">
-        <div class="file-tree-header">
-          <span class="file-tree-title">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-            工作区文件 ({allFiles().length})
-          </span>
-          <button class="icon-btn" onClick={() => setShowExplorer(false)} title="关闭">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div class="explorer-search-wrap">
-          <input
-            class="explorer-search"
-            placeholder="搜索文件…"
-            value={explorerSearch()}
-            onInput={(e) => setExplorerSearch(e.currentTarget.value)}
-          />
-        </div>
-        <div class="file-tree-body">
-          <Show when={wsFileCacheLoading()}>
-            <div class="file-tree-empty">加载中…</div>
-          </Show>
-
-          {/* 搜索模式：扁平列表 */}
-          <Show when={!wsFileCacheLoading() && isSearching()}>
-            <Show when={searchResults().length === 0}>
-              <div class="file-tree-empty">无匹配文件</div>
-            </Show>
-            <For each={searchResults()}>
-              {(filePath) => {
-                const filename = filePath.split('/').pop() ?? filePath
-                const dir = filePath.slice(0, filePath.length - filename.length).replace(/\/$/, '')
-                const changed = changedFiles().get(filePath)?.action
-                return (
-                  <div
-                    class="file-tree-item"
-                    onClick={() => openPreview(filePath)}
-                    style="cursor:pointer"
-                    title={filePath}
-                  >
-                    <Show when={changed} fallback={
-                      <span class="explorer-file-icon">
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                          <polyline points="14 2 14 8 20 8"/>
-                        </svg>
-                      </span>
-                    }>
-                      <span class={`file-status-badge file-status-${changed}`}>
-                        {changed === 'created' ? 'A' : changed === 'deleted' ? 'D' : 'M'}
-                      </span>
-                    </Show>
-                    <div class="file-tree-item-info">
-                      <span class="file-tree-filename">{filename}</span>
-                      <Show when={dir}>
-                        <span class="file-tree-path">{dir}</span>
-                      </Show>
-                    </div>
-                  </div>
-                )
-              }}
-            </For>
-            <Show when={searchResults().length === 300}>
-              <div class="file-tree-empty" style="font-size:11px;padding:8px 12px">
-                仅显示前 300 条，请用搜索进一步过滤
-              </div>
-            </Show>
-          </Show>
-
-          {/* 树模式（默认） */}
-          <Show when={!wsFileCacheLoading() && !isSearching()}>
-            <Show when={allFiles().length === 0}>
-              <div class="file-tree-empty">工作区为空</div>
-            </Show>
-            <For each={tree().children}>
-              {(node) => renderNode(node, 0)}
-            </For>
-          </Show>
-        </div>
-      </div>
-    )
-  }
+  // K11c-cont: WorkspaceExplorerPanel 已抽到 ./panels/WorkspaceExplorerPanel
 
   // ─── Skills 面板 ─────────────────────────────────────────────────────────
   async function loadSkills() {
@@ -6246,1560 +3326,75 @@ export default {
     }
   })
 
-  function SkillsPanel() {
-    const sourceLabel = (s: string) =>
-      s === 'workspace-maxian' ? '项目 .maxian' :
-      s === 'workspace-claude' ? '项目 .claude' :
-      s === 'user-maxian'      ? '用户 ~/.maxian' :
-      s === 'user-claude'      ? '用户 ~/.claude' : s
-
-    return (
-      <div class="file-tree-panel skills-panel">
-        <div class="file-tree-header">
-          <span class="file-tree-title">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 2l2.5 7.5H22l-6 4.5 2.5 7.5L12 17l-6.5 4.5L8 14 2 9.5h7.5z"/>
-            </svg>
-            Skills ({skillsList().length})
-          </span>
-          <div style="display:flex;gap:4px;align-items:center">
-            <button class="icon-btn" onClick={() => void loadSkills()} title="刷新">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="23 4 23 10 17 10"/>
-                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-              </svg>
-            </button>
-            <button class="icon-btn" onClick={() => setShowSkillsPanel(false)} title="关闭">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-        <div class="file-tree-body">
-          <Show when={skillsLoading()}>
-            <div class="file-tree-empty">扫描中…</div>
-          </Show>
-          <Show when={!skillsLoading() && skillsList().length === 0}>
-            <div class="skills-empty">
-              <div style="margin-bottom:10px;color:var(--text-muted)">未找到任何技能文档</div>
-              <div style="font-size:11px;color:var(--text-faint);line-height:1.7;text-align:left;padding:0 4px">
-                在以下任一目录中创建 <code>.md</code> 文件：
-                <ul style="padding-left:18px;margin:6px 0">
-                  <For each={skillsSearchedDirs()}>
-                    {(d) => (
-                      <li style={`color:${d.exists ? 'var(--text-base)' : 'var(--text-faint)'}`}>
-                        <code style="font-size:10px">{d.path}</code>
-                        <Show when={d.exists}><span style="color:#22c55e;margin-left:4px">✓</span></Show>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-                每个 md 文件顶部建议使用 YAML frontmatter：
-                <pre style="background:var(--bg-subtle);padding:6px;border-radius:4px;margin-top:4px;font-size:10px">---{'\n'}name: my-skill{'\n'}description: 简短描述{'\n'}---{'\n'}
-# Skill Content…</pre>
-              </div>
-            </div>
-          </Show>
-          <For each={skillsList()}>
-            {(skill) => (
-              <div
-                class="file-tree-item skill-item"
-                onClick={() => openPreview(skill.path)}
-                style="cursor:pointer;align-items:flex-start;padding:8px 12px"
-                title={skill.path}
-              >
-                <span class="skill-icon">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M12 2l2.5 7.5H22l-6 4.5 2.5 7.5L12 17l-6.5 4.5L8 14 2 9.5h7.5z"/>
-                  </svg>
-                </span>
-                <div class="file-tree-item-info" style="gap:3px">
-                  <span class="skill-name">{skill.name}</span>
-                  <Show when={skill.description}>
-                    <span class="skill-desc">{skill.description}</span>
-                  </Show>
-                  <span class="skill-source">{sourceLabel(skill.source)}</span>
-                </div>
-              </div>
-            )}
-          </For>
-        </div>
-      </div>
-    )
-  }
+  // K11c-cont: SkillsPanel 已抽到 ./panels/SkillsPanel
 
   // ─── 文件预览面板（右侧滑入，多标签）────────────────────────────────────
-  // 辅助：LCS diff 算法（保留原有逻辑）
-  type _DiffLine = { type: 'del' | 'add' | 'ctx'; text: string }
-
-  function computeUnifiedDiff(orig: string, curr: string): _DiffLine[] {
-    const origLines = orig.split('\n')
-    const currLines = curr.split('\n')
-    const result: _DiffLine[] = []
-    const maxLines = 800
-    const ao = origLines.slice(0, maxLines)
-    const bo = currLines.slice(0, maxLines)
-
-    const m = ao.length, n = bo.length
-    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
-    for (let i = 1; i <= m; i++)
-      for (let j = 1; j <= n; j++)
-        dp[i][j] = ao[i-1] === bo[j-1] ? dp[i-1][j-1] + 1 : Math.max(dp[i-1][j], dp[i][j-1])
-
-    // 迭代回溯，避免深递归 stack overflow
-    let i = m, j = n
-    const stack: _DiffLine[] = []
-    while (i > 0 || j > 0) {
-      if (i > 0 && j > 0 && ao[i-1] === bo[j-1]) {
-        stack.push({ type: 'ctx', text: ao[i-1] }); i--; j--
-      } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
-        stack.push({ type: 'add', text: bo[j-1] }); j--
-      } else {
-        stack.push({ type: 'del', text: ao[i-1] }); i--
-      }
-    }
-    for (let k = stack.length - 1; k >= 0; k--) result.push(stack[k])
-
-    if (origLines.length > maxLines || currLines.length > maxLines) {
-      result.push({ type: 'ctx', text: `… (仅显示前 ${maxLines} 行)` })
-    }
-    return result
-  }
-
-  /** 根据扩展名判定 highlight.js 语言（返回空则自动检测） */
-  function hljsLangFromPath(p: string): string | undefined {
-    const ext = p.split('.').pop()?.toLowerCase() ?? ''
-    const map: Record<string, string> = {
-      ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
-      mjs: 'javascript', cjs: 'javascript',
-      py: 'python', rs: 'rust', go: 'go', java: 'java', kt: 'kotlin',
-      c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', hpp: 'cpp', cxx: 'cpp',
-      cs: 'csharp', swift: 'swift', rb: 'ruby', php: 'php', scala: 'scala',
-      sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
-      json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini',
-      xml: 'xml', html: 'xml', htm: 'xml', svg: 'xml',
-      css: 'css', scss: 'scss', less: 'less',
-      sql: 'sql', dockerfile: 'dockerfile',
-      vue: 'xml', svelte: 'xml',
-    }
-    return map[ext]
-  }
-
-  /** 文件预览面板 */
-  function FilePreviewPanel() {
-    const tabs = () => previewTabs()
-    const active = () => tabs().find(t => t.path === activePreviewPath())
-
-    // 拖动调整宽度
-    let isDragging = false
-    const onDragStart = (e: MouseEvent) => {
-      e.preventDefault()
-      isDragging = true
-      const startX = e.clientX
-      const startW = previewWidth()
-      const onMove = (ev: MouseEvent) => {
-        if (!isDragging) return
-        const dx = startX - ev.clientX
-        const next = Math.max(320, Math.min(1200, startW + dx))
-        setPreviewWidth(next)
-      }
-      const onUp = () => {
-        isDragging = false
-        window.removeEventListener('mousemove', onMove)
-        window.removeEventListener('mouseup', onUp)
-      }
-      window.addEventListener('mousemove', onMove)
-      window.addEventListener('mouseup', onUp)
-    }
-
-    return (
-      <div class="preview-panel" style={{ width: `${previewWidth()}px` }}>
-        <div class="preview-panel-resizer" onMouseDown={onDragStart} />
-
-        {/* 标签栏 — 支持拖拽重排（P2-18） */}
-        <div class="preview-tabs">
-          <For each={tabs()}>
-            {(tab, idx) => (
-              <div
-                class="preview-tab"
-                classList={{ active: tab.path === activePreviewPath() }}
-                onClick={() => setActivePreviewPath(tab.path)}
-                title={tab.path}
-                draggable={true}
-                onDragStart={(e) => {
-                  e.dataTransfer?.setData('text/x-tab-idx', String(idx()))
-                  e.dataTransfer!.effectAllowed = 'move'
-                  ;(e.currentTarget as HTMLElement).classList.add('dragging')
-                }}
-                onDragEnd={(e) => {
-                  ;(e.currentTarget as HTMLElement).classList.remove('dragging')
-                  document.querySelectorAll('.preview-tab.drag-over').forEach(el => el.classList.remove('drag-over'))
-                }}
-                onDragOver={(e) => {
-                  e.preventDefault()
-                  e.dataTransfer!.dropEffect = 'move'
-                  ;(e.currentTarget as HTMLElement).classList.add('drag-over')
-                }}
-                onDragLeave={(e) => {
-                  ;(e.currentTarget as HTMLElement).classList.remove('drag-over')
-                }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  ;(e.currentTarget as HTMLElement).classList.remove('drag-over')
-                  const from = Number(e.dataTransfer?.getData('text/x-tab-idx'))
-                  const to = idx()
-                  if (Number.isNaN(from) || from === to) return
-                  setPreviewTabs(prev => {
-                    const next = [...prev]
-                    const [moved] = next.splice(from, 1)
-                    next.splice(to, 0, moved)
-                    return next
-                  })
-                }}
-              >
-                <Show when={tab.changed}>
-                  <span class={`preview-tab-badge badge-${tab.changed}`}>
-                    {tab.changed === 'created' ? 'A' : tab.changed === 'deleted' ? 'D' : 'M'}
-                  </span>
-                </Show>
-                <span class="preview-tab-title">{tab.title}</span>
-                <button
-                  class="preview-tab-close"
-                  onClick={(e) => { e.stopPropagation(); closePreviewTab(tab.path) }}
-                  title="关闭"
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                  </svg>
-                </button>
-              </div>
-            )}
-          </For>
-          <div class="preview-tabs-spacer" />
-          <button
-            class="icon-btn preview-close-all"
-            title="关闭所有标签"
-            onClick={() => { setPreviewTabs([]); setActivePreviewPath(null) }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-
-        {/* 活动标签工具栏 */}
-        <Show when={active()}>
-          {(a) => (
-            <div class="preview-toolbar">
-              <div class="preview-toolbar-path" title={a().path}>{a().path}</div>
-              <div class="preview-toolbar-actions">
-                {/* Markdown: 源码 / 预览 切换 */}
-                <Show when={a().kind === 'markdown'}>
-                  <div class="preview-segmented">
-                    <button
-                      classList={{ active: a().viewMode === 'rendered' }}
-                      onClick={() => setTabViewMode(a().path, 'rendered')}
-                    >预览</button>
-                    <button
-                      classList={{ active: a().viewMode === 'source' }}
-                      onClick={() => setTabViewMode(a().path, 'source')}
-                    >源码</button>
-                  </div>
-                </Show>
-                {/* 变更文件：源码 / Diff 切换 */}
-                <Show when={a().changed && a().kind !== 'image' && a().kind !== 'binary'}>
-                  <div class="preview-segmented">
-                    <button
-                      classList={{ active: a().viewMode === 'diff' }}
-                      onClick={() => setTabViewMode(a().path, 'diff')}
-                    >Diff</button>
-                    <button
-                      classList={{ active: a().viewMode === 'source' }}
-                      onClick={() => setTabViewMode(a().path, 'source')}
-                    >源码</button>
-                  </div>
-                </Show>
-                {/* Diff 视图子模式：Unified / Split */}
-                <Show when={a().viewMode === 'diff' && a().changed}>
-                  <div class="preview-segmented">
-                    <button
-                      classList={{ active: diffViewMode() === 'unified' }}
-                      onClick={() => setDiffViewMode('unified')}
-                      title="单栏统一视图"
-                    >Unified</button>
-                    <button
-                      classList={{ active: diffViewMode() === 'split' }}
-                      onClick={() => setDiffViewMode('split')}
-                      title="左右分栏对照"
-                    >Split</button>
-                  </div>
-                </Show>
-                {/* 外部编辑器 */}
-                <button
-                  class="icon-btn"
-                  title="在编辑器中打开"
-                  onClick={() => openInEditor(a().path)}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                    <polyline points="15 3 21 3 21 9"/>
-                    <line x1="10" y1="14" x2="21" y2="3"/>
-                  </svg>
-                </button>
-                {/* 撤销（仅变更文件） */}
-                <Show when={a().changed && a().changed !== 'deleted'}>
-                  <button
-                    class="approval-btn allow"
-                    style="font-size:11px;padding:3px 10px"
-                    onClick={() => revertFile(a().path)}
-                  >↩ 撤销</button>
-                </Show>
-              </div>
-            </div>
-          )}
-        </Show>
-
-        {/* 外部变更提示（P0-4） */}
-        <Show when={active()?.extChangedAt}>
-          <div class="preview-extchange-banner">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span style="flex:1">该文件已被外部修改（本面板内容可能已过期）</span>
-            <button onClick={() => { const p = activePreviewPath(); if (p) void reloadPreview(p) }}>重新加载</button>
-            <button onClick={() => {
-              const p = activePreviewPath()
-              if (!p) return
-              setPreviewTabs(prev => prev.map(t => t.path === p ? { ...t, extChangedAt: undefined } : t))
-            }}>忽略</button>
-          </div>
-        </Show>
-
-        {/* 内容区 */}
-        <div class="preview-body">
-          <Show when={active()} keyed fallback={
-            <div class="preview-empty">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14 2 14 8 20 8"/>
-              </svg>
-              <div>未选择文件</div>
-            </div>
-          }>
-            {(tab) => {
-              if (tab.loading) return <div class="preview-loading">加载中…</div>
-              if (tab.error && !tab.content) {
-                return <div class="preview-error">{tab.error}</div>
-              }
-
-              // 二进制
-              if (tab.kind === 'binary') {
-                return (
-                  <div class="preview-binary">
-                    <div class="preview-binary-title">{tab.title}</div>
-                    <div class="preview-binary-desc">
-                      二进制文件（{(tab.size / 1024).toFixed(1)} KB · {tab.mimeType}）
-                    </div>
-                  </div>
-                )
-              }
-
-              // 图片
-              if (tab.kind === 'image') {
-                const src = `data:${tab.mimeType};base64,${tab.content}`
-                return (
-                  <div class="preview-image-wrap">
-                    <img class="preview-image" src={src} alt={tab.path} />
-                    <div class="preview-image-info">
-                      {tab.mimeType} · {(tab.size / 1024).toFixed(1)} KB
-                    </div>
-                  </div>
-                )
-              }
-
-              // 音频
-              if (tab.kind === 'audio') {
-                const src = `data:${tab.mimeType};base64,${tab.content}`
-                return (
-                  <div class="preview-media-wrap">
-                    <audio src={src} controls style="width:100%" />
-                  </div>
-                )
-              }
-
-              // 视频
-              if (tab.kind === 'video') {
-                const src = `data:${tab.mimeType};base64,${tab.content}`
-                return (
-                  <div class="preview-media-wrap">
-                    <video src={src} controls style="max-width:100%;max-height:80vh" />
-                  </div>
-                )
-              }
-
-              // Diff 视图
-              if (tab.viewMode === 'diff') {
-                if (tab.diffLoading) return <div class="preview-loading">加载 diff…</div>
-                if (tab.diffOriginal === undefined) return <div class="preview-loading">加载 diff…</div>
-                if (tab.diffOriginal === null) {
-                  // 新建文件
-                  const lines = (tab.diffCurrent ?? '').split('\n')
-                  return (
-                    <div class="diff-table">
-                      <div class="diff-legend">
-                        <span class="diff-legend-add">+ 新建文件 ({lines.length} 行)</span>
-                      </div>
-                      <div class="diff-lines">
-                        {lines.slice(0, 500).map((line, i) => (
-                          <div class="diff-line diff-line-add">
-                            <span class="diff-ln">{i + 1}</span>
-                            <span class="diff-sign">+</span>
-                            <code class="diff-text">{line}</code>
-                          </div>
-                        ))}
-                        {lines.length > 500 && (
-                          <div class="diff-line diff-line-ctx">
-                            <span class="diff-ln">…</span><span class="diff-sign"> </span>
-                            <code class="diff-text">… 还有 {lines.length - 500} 行</code>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )
-                }
-                const diffLines = computeUnifiedDiff(tab.diffOriginal, tab.diffCurrent ?? '')
-                const hasChanges = diffLines.some(l => l.type !== 'ctx')
-                if (!hasChanges) return <div class="diff-no-change">文件内容未发生变化</div>
-                const CONTEXT = 3
-                const show = diffLines.map((_l, i) => {
-                  const start = Math.max(0, i - CONTEXT)
-                  const end = Math.min(diffLines.length - 1, i + CONTEXT)
-                  return diffLines.slice(start, end + 1).some(x => x.type !== 'ctx')
-                })
-
-                // ── Split 视图：左右分栏对照 ──
-                if (diffViewMode() === 'split') {
-                  // 成对还原为左右行（null 表示空行）
-                  const leftCol:  Array<{ no: number; text: string; type: 'ctx'|'del' } | null> = []
-                  const rightCol: Array<{ no: number; text: string; type: 'ctx'|'add' } | null> = []
-                  let leftNo = 0, rightNo = 0
-                  let i = 0
-                  while (i < diffLines.length) {
-                    if (diffLines[i].type === 'ctx') {
-                      leftNo++; rightNo++
-                      leftCol.push({  no: leftNo,  text: diffLines[i].text, type: 'ctx' })
-                      rightCol.push({ no: rightNo, text: diffLines[i].text, type: 'ctx' })
-                      i++
-                    } else {
-                      // 收集连续 del/add 块
-                      const dels: Array<{ no: number; text: string }> = []
-                      const adds: Array<{ no: number; text: string }> = []
-                      while (i < diffLines.length && diffLines[i].type === 'del') {
-                        leftNo++
-                        dels.push({ no: leftNo, text: diffLines[i].text }); i++
-                      }
-                      while (i < diffLines.length && diffLines[i].type === 'add') {
-                        rightNo++
-                        adds.push({ no: rightNo, text: diffLines[i].text }); i++
-                      }
-                      const pairLen = Math.max(dels.length, adds.length)
-                      for (let k = 0; k < pairLen; k++) {
-                        leftCol.push(dels[k]  ? { no: dels[k].no,  text: dels[k].text,  type: 'del' } : null)
-                        rightCol.push(adds[k] ? { no: adds[k].no, text: adds[k].text, type: 'add' } : null)
-                      }
-                    }
-                  }
-                  return (
-                    <div class="diff-table">
-                      <div class="diff-legend">
-                        <span class="diff-legend-del">− 原始</span>
-                        <span class="diff-legend-add">+ 当前</span>
-                      </div>
-                      <div class="diff-split">
-                        <div class="diff-split-col">
-                          <For each={leftCol}>
-                            {(row) => row ? (
-                              <div class={`diff-line diff-line-${row.type}`}>
-                                <span class="diff-ln">{row.no}</span>
-                                <span class="diff-sign">{row.type === 'del' ? '−' : ' '}</span>
-                                <code class="diff-text">{row.text}</code>
-                              </div>
-                            ) : (
-                              <div class="diff-line diff-line-empty">&nbsp;</div>
-                            )}
-                          </For>
-                        </div>
-                        <div class="diff-split-col">
-                          <For each={rightCol}>
-                            {(row) => row ? (
-                              <div class={`diff-line diff-line-${row.type}`}>
-                                <span class="diff-ln">{row.no}</span>
-                                <span class="diff-sign">{row.type === 'add' ? '+' : ' '}</span>
-                                <code class="diff-text">{row.text}</code>
-                              </div>
-                            ) : (
-                              <div class="diff-line diff-line-empty">&nbsp;</div>
-                            )}
-                          </For>
-                        </div>
-                      </div>
-                    </div>
-                  )
-                }
-
-                // Unified 视图（默认）
-                return (
-                  <div class="diff-table">
-                    <div class="diff-legend">
-                      <span class="diff-legend-del">− 删除</span>
-                      <span class="diff-legend-add">+ 新增</span>
-                    </div>
-                    <div class="diff-lines">
-                      <For each={diffLines}>
-                        {(line, idx) => (
-                          <Show when={show[idx()]}>
-                            <div class={`diff-line diff-line-${line.type}`}>
-                              <span class="diff-sign">{line.type === 'del' ? '−' : line.type === 'add' ? '+' : ' '}</span>
-                              <code class="diff-text">{line.text}</code>
-                            </div>
-                          </Show>
-                        )}
-                      </For>
-                    </div>
-                  </div>
-                )
-              }
-
-              // Markdown 渲染模式（使用应用统一的 renderMarkdown，带 DOMPurify 清洗）
-              if (tab.kind === 'markdown' && tab.viewMode === 'rendered') {
-                const html = renderMarkdown(tab.content)
-                return (
-                  <div class="preview-markdown-rendered markdown-body" innerHTML={html} />
-                )
-              }
-
-              // 文本源码（含 markdown 源码）
-              const lang = hljsLangFromPath(tab.path)
-              let highlighted: string
-              try {
-                highlighted = lang
-                  ? hljs.highlight(tab.content, { language: lang, ignoreIllegals: true }).value
-                  : hljs.highlightAuto(tab.content).value
-              } catch {
-                highlighted = escapeHtml(tab.content)
-              }
-              const lineCount = tab.content.split('\n').length
-              const lineNums = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n')
-              return (
-                <div class="preview-code-wrap">
-                  <pre class="preview-code-lineno">{lineNums}</pre>
-                  <pre class="preview-code"><code class="hljs" innerHTML={highlighted} /></pre>
-                </div>
-              )
-            }}
-          </Show>
-        </div>
-      </div>
-    )
-  }
-
-  function escapeHtml(s: string): string {
-    return s.replace(/[&<>"']/g, c => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    }[c] as string))
-  }
+  // K10f: LCS diff 算法 + 渲染已抽到 @maxian/ui 的 SharedDiffViewer / computeUnifiedDiff。
+  // K11c-cont: FilePreviewPanel + hljsLangFromPath + escapeHtml 已抽到 ./panels/FilePreviewPanel
 
   // ─── TokenUsageBar（带动画数字）────────────────────────────────────────
-  function TokenUsageBar() {
-    const pct = () => Math.min(100, (tokenUsed() / tokenLimit()) * 100)
-    const color = () => pct() < 50 ? '#22c55e' : pct() < 80 ? '#f59e0b' : '#ef4444'
-    const [compacting, setCompacting] = createSignal(false)
-    const onCompact = async () => {
-      const sid = activeSessionId()
-      if (!sid || compacting() || sending()) return
-      try {
-        setCompacting(true)
-        const c = await getClient()
-        const r = await c.compactSession(sid)
-        const freed = (r as any)?.tokensFreed ?? (r as any)?.freed ?? 0
-        showToast({
-          message: freed > 0 ? `✅ 上下文已压缩，释放约 ${Number(freed).toLocaleString()} tokens` : `✅ 上下文已压缩`,
-          kind: 'info',
-          duration: 3000,
-        })
-      } catch (e) {
-        showToast({ message: `压缩失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
-      } finally {
-        setCompacting(false)
-      }
-    }
-    return (
-      <Show when={tokenUsed() > 0}>
-        <div class="token-usage-row">
-          <div class="token-usage-bar" title={`已使用 ${tokenUsed().toLocaleString()} / ${tokenLimit().toLocaleString()} tokens (${pct().toFixed(1)}%)`}>
-            <div class="token-usage-fill" style={{ width: `${pct()}%`, background: color(), transition: 'width 400ms ease-out, background 300ms' }} />
-          </div>
-          <Show when={pct() >= 80}>
-            <button
-              class="token-compact-btn"
-              classList={{ critical: pct() >= 90 }}
-              disabled={compacting() || !activeSessionId()}
-              onClick={onCompact}
-              title="主动压缩当前会话上下文，释放 token 配额（保留关键工具结果，省略中间步骤摘要）"
-            >
-              {compacting() ? '压缩中…' : '📦 压缩上下文'}
-            </button>
-          </Show>
-        </div>
-      </Show>
-    )
-  }
+  // K10c: TokenUsageBar 已抽到 @maxian/ui，作为 SharedTokenUsageBar 使用。
+  // 渲染处见 composer 上方（约第 8399 行）—— 通过 props 传入 tokens 数据 + 压缩回调。
 
   // ─── O7: 工具错误展示（默认折叠，点击展开） ────────────────────────────
-  function ToolErrorPanel(props: { result: string }) {
-    const [open, setOpen] = createSignal(false)
-    const SUMMARY_LEN = 160
-    const isLong = () => props.result.length > SUMMARY_LEN
-    // 错误摘要：取第一个非空行（通常是 "Error: xxx" 主错误信息）
-    const summary = () => {
-      const firstLine = props.result.split('\n').find(l => l.trim().length > 0) ?? ''
-      return firstLine.length > SUMMARY_LEN ? firstLine.slice(0, SUMMARY_LEN) + '…' : firstLine
-    }
-    return (
-      <div class="tool-error-panel" onClick={(e) => e.stopPropagation()}>
-        <div class="tool-error-summary">
-          <span class="tool-error-icon">❌</span>
-          <span class="tool-error-text">{open() ? '错误详情' : summary()}</span>
-          <Show when={isLong() || props.result.includes('\n')}>
-            <button
-              class="tool-error-toggle"
-              onClick={() => setOpen(v => !v)}
-              title={open() ? '折叠' : '展开完整错误'}
-            >
-              {open() ? '收起 ▴' : '展开 ▾'}
-            </button>
-          </Show>
-        </div>
-        <Show when={open()}>
-          <pre class="tool-error-body">{props.result}</pre>
-        </Show>
-      </div>
-    )
-  }
+  // K11c-cont: ToolErrorPanel 已抽到 ./panels/ToolErrorPanel
 
   // ─── TodoDock（P0-1）: 在 composer 上方显示当前 todos 进度 ─────────────
-  function TodoDock() {
-    const total = () => todos().length
-    const completed = () => todos().filter(t => t.status === 'completed').length
-    const cancelled = () => todos().filter(t => t.status === 'cancelled').length
-    const inProgress = () => todos().find(t => t.status === 'in_progress')
-    const pct = () => total() === 0 ? 0 : Math.round(((completed() + cancelled()) / total()) * 100)
-    // AI 提前结束未收尾的项目数
-    const leftoverCount = () => todos().filter(t => t.status === 'in_progress' || t.status === 'pending').length
-    return (
-      <div class="todo-dock" classList={{ 'todo-dock-leftover': todosLeftover() }}>
-        <div class="todo-dock-header" onClick={() => setTodoDockCollapsed(v => !v)}>
-          <svg class="todo-dock-arrow" classList={{ open: !todoDockCollapsed() }} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent)">
-            <polyline points="9 11 12 14 22 4"/>
-            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-          </svg>
-          <span class="todo-dock-title">任务清单</span>
-          <span class="todo-dock-counter">
-            <AnimatedNumber value={completed()} duration={400} /> / {total()}
-          </span>
-          <div class="todo-dock-progress">
-            <div class="todo-dock-progress-fill" style={{ width: `${pct()}%` }} />
-          </div>
-          <Show when={todosLeftover() && leftoverCount() > 0}>
-            <span class="todo-dock-leftover-badge" title="AI 在调用 attempt_completion 前未把这些 todo 收尾。任务已结束，但这些项目可能未真正完成。">
-              ⚠ AI 提前结束，{leftoverCount()} 项未收尾
-            </span>
-          </Show>
-          <Show when={inProgress() && todoDockCollapsed() && !todosLeftover()}>
-            <span class="todo-dock-current" title={inProgress()!.content}>
-              · {inProgress()!.content}
-            </span>
-          </Show>
-        </div>
-        <Show when={!todoDockCollapsed()}>
-          <div class="todo-dock-list">
-            <For each={todos()}>
-              {(t) => (
-                <div class={`todo-item todo-${t.status}`} classList={{ 'todo-leftover': todosLeftover() && (t.status === 'in_progress' || t.status === 'pending') }}>
-                  <span class="todo-checkbox">
-                    <Show when={t.status === 'completed'}>
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
-                    </Show>
-                    <Show when={t.status === 'cancelled'}>
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                    </Show>
-                    <Show when={t.status === 'in_progress' && !todosLeftover()}>
-                      <span class="todo-spinner" />
-                    </Show>
-                    <Show when={(t.status === 'in_progress' || t.status === 'pending') && todosLeftover()}>
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="opacity:0.55"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                    </Show>
-                  </span>
-                  <span class="todo-content">{t.content}</span>
-                </div>
-              )}
-            </For>
-          </div>
-        </Show>
-      </div>
-    )
-  }
+  // K11c-cont: TodoDock 已抽到 ./panels/TodoDock
 
   // ─── FollowupDock（P0-2）: 建议追问 + 队列 ───────────────────────────────
-  function FollowupDock() {
-    const hasQueue = () => followupQueue().length > 0
-    return (
-      <div class="followup-dock">
-        <div class="followup-dock-header" onClick={() => setFollowupCollapsed(v => !v)}>
-          <svg class="todo-dock-arrow" classList={{ open: !followupCollapsed() }} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent)">
-            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
-          </svg>
-          <span class="followup-dock-title">
-            建议 & 队列
-            <Show when={followupSuggestions().length > 0}>
-              <span class="followup-count">建议 {followupSuggestions().length}</span>
-            </Show>
-            <Show when={hasQueue()}>
-              <span class="followup-count followup-count-queued">已排队 {followupQueue().length}</span>
-            </Show>
-          </span>
-        </div>
-        <Show when={!followupCollapsed()}>
-          <div class="followup-body">
-            <Show when={followupSuggestions().length > 0}>
-              <div class="followup-section-title">AI 建议追问</div>
-              <div class="followup-suggestions">
-                <For each={followupSuggestions()}>
-                  {(s) => (
-                    <div class="followup-suggestion">
-                      <span class="followup-text" onClick={() => setInput(s)}>{s}</span>
-                      <div class="followup-actions">
-                        <button class="followup-btn" onClick={() => setInput(s)} title="填入输入框">编辑</button>
-                        <button class="followup-btn followup-btn-primary" onClick={() => {
-                          setFollowupQueue(prev => [...prev, s])
-                          setFollowupSuggestions(prev => prev.filter(x => x !== s))
-                        }} title="加入队列">入队</button>
-                      </div>
-                    </div>
-                  )}
-                </For>
-              </div>
-            </Show>
-            <Show when={hasQueue()}>
-              <div class="followup-section-title">待发送队列</div>
-              <div class="followup-queue">
-                <For each={followupQueue()}>
-                  {(q, i) => (
-                    <div class="followup-queue-item">
-                      <span class="followup-queue-idx">{i() + 1}</span>
-                      <span class="followup-text">{q}</span>
-                      <div class="followup-actions">
-                        <button class="followup-btn" onClick={() => {
-                          setInput(q)
-                          setFollowupQueue(prev => prev.filter((_, idx) => idx !== i()))
-                        }}>取出</button>
-                        <button class="followup-btn followup-btn-danger" onClick={() => {
-                          setFollowupQueue(prev => prev.filter((_, idx) => idx !== i()))
-                        }}>删除</button>
-                      </div>
-                    </div>
-                  )}
-                </For>
-                <div class="followup-queue-actions">
-                  <button class="followup-btn followup-btn-primary" onClick={async () => {
-                    // 依次发送队列
-                    const queue = followupQueue()
-                    setFollowupQueue([])
-                    for (const q of queue) {
-                      if (sending()) break  // 若中途收到新消息，停止
-                      setInput(q)
-                      await send()
-                      // 等待 AI 回完（简单轮询）
-                      while (sending()) await new Promise(r => setTimeout(r, 500))
-                    }
-                  }} disabled={sending()}>依次发送</button>
-                  <button class="followup-btn" onClick={() => setFollowupQueue([])}>清空</button>
-                </div>
-              </div>
-            </Show>
-          </div>
-        </Show>
-      </div>
-    )
-  }
+  // K11c-cont: FollowupDock 已抽到 ./panels/FollowupDock
 
   // ─── ContextPanel（P1-10）: 显示当前会话已附加的上下文 ──────────────────
-  function ContextPanel() {
-    return (
-      <div class="file-tree-panel context-panel">
-        <div class="file-tree-header">
-          <span class="file-tree-title">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M20 7h-3V4a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/>
-            </svg>
-            会话上下文
-          </span>
-          <button class="icon-btn" onClick={() => setShowContextPanel(false)} title="关闭">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div class="file-tree-body">
-          {/* 文件引用 */}
-          <Show when={contextFiles().length > 0}>
-            <div class="context-section-title">@ 文件引用 ({contextFiles().length})</div>
-            <For each={contextFiles()}>
-              {(f) => (
-                <div class="file-tree-item" onClick={() => openPreview(f)} style="cursor:pointer" title={f}>
-                  <span class="explorer-file-icon">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                      <polyline points="14 2 14 8 20 8"/>
-                    </svg>
-                  </span>
-                  <span class="file-tree-filename">{f.split('/').pop()}</span>
-                  <span class="file-tree-path" style="margin-left:auto;font-size:10px">{f}</span>
-                </div>
-              )}
-            </For>
-          </Show>
+  // K11c-cont: ContextPanel 已抽到 ./panels/ContextPanel
 
-          {/* 当前输入框附加图片（未发送） */}
-          <Show when={attachedImages().length > 0}>
-            <div class="context-section-title">待发送图片 ({attachedImages().length})</div>
-            <div style="padding:4px 12px;display:flex;flex-wrap:wrap;gap:6px">
-              <For each={attachedImages()}>
-                {(img) => (
-                  <div style="position:relative">
-                    <img src={img.dataUrl} style="width:60px;height:60px;object-fit:cover;border-radius:4px;border:1px solid var(--border)" alt={img.name} />
-                    <button
-                      style="position:absolute;top:-4px;right:-4px;width:16px;height:16px;border-radius:50%;background:#ef4444;color:#fff;border:none;font-size:10px;cursor:pointer;line-height:1"
-                      onClick={() => removeImage(img.id)}
-                    >×</button>
-                  </div>
-                )}
-              </For>
-            </div>
-          </Show>
+  // K11c-cont: RevertDock / CompactingBanner / RateLimitBanner 已抽到 ./panels/
 
-          {/* 已变更文件（会话内） */}
-          <Show when={changedFiles().size > 0}>
-            <div class="context-section-title">已修改文件 ({changedFiles().size})</div>
-            <For each={[...changedFiles().values()]}>
-              {(entry) => (
-                <div class="file-tree-item" onClick={() => openPreview(entry.path, { viewMode: 'diff' })} style="cursor:pointer" title={entry.path}>
-                  <span class={`file-status-badge file-status-${entry.action}`}>
-                    {entry.action === 'created' ? 'A' : entry.action === 'deleted' ? 'D' : 'M'}
-                  </span>
-                  <span class="file-tree-filename">{entry.path.split('/').pop()}</span>
-                </div>
-              )}
-            </For>
-          </Show>
+  // K11a: ToastHost 已抽到 ./components/ToastHost.tsx
 
-          <Show when={contextFiles().length === 0 && attachedImages().length === 0 && changedFiles().size === 0}>
-            <div class="file-tree-empty">
-              <div style="margin-bottom:10px">暂无附加上下文</div>
-              <div style="font-size:11px;color:var(--text-faint);padding:0 12px;line-height:1.6">
-                · 在输入框输入 <code style="background:var(--bg-subtle);padding:1px 4px;border-radius:3px">@</code> 引用工作区文件<br/>
-                · 拖拽或粘贴图片到输入框<br/>
-                · AI 修改的文件会自动追踪
-              </div>
-            </div>
-          </Show>
-        </div>
-      </div>
-    )
-  }
+  // K11a: GlobalCommandPalette (⌘P) 已抽到 ./components/GlobalCommandPalette.tsx
 
-  // ─── RevertDock（P1-11）: 显示最近用户消息，一键回退到某条 ──────────────
-  function RevertDock() {
-    // 只显示 user 消息（回退点）
-    const userMsgs = () => messages().filter(m => m.role === 'user').slice(-5).reverse()
-    return (
-      <div class="revert-dock">
-        <div class="revert-dock-header">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent)">
-            <polyline points="1 4 1 10 7 10"/>
-            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
-          </svg>
-          <span class="revert-dock-title">回退对话</span>
-          <span class="revert-dock-hint">选择要回退到的用户消息（该消息及其后将被删除）</span>
-          <button class="icon-btn" onClick={() => setShowRevertDock(false)}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-        <div class="revert-dock-list">
-          <Show when={userMsgs().length === 0}>
-            <div class="revert-dock-empty">暂无用户消息</div>
-          </Show>
-          <For each={userMsgs()}>
-            {(m, i) => (
-              <div class="revert-dock-item">
-                <span class="revert-dock-idx">#{userMsgs().length - i()}</span>
-                <span class="revert-dock-msg" title={m.content}>{m.content.slice(0, 120)}{m.content.length > 120 ? '…' : ''}</span>
-                <button class="approval-btn deny" style="padding:4px 12px;font-size:12px" onClick={() => revertToMessage(m.id)}>
-                  回退到这里
-                </button>
-              </div>
-            )}
-          </For>
-        </div>
-      </div>
-    )
-  }
-
-  // ─── CompactingBanner（压缩进行中 banner，带耗时计数）──────────────────
-  function CompactingBanner() {
-    const [now, setNow] = createSignal(Date.now())
-    createEffect(() => {
-      if (!compactingState()) return
-      const timer = setInterval(() => setNow(Date.now()), 200)
-      onCleanup(() => clearInterval(timer))
-    })
-    const elapsed = () => {
-      const s = compactingState()
-      if (!s) return '0.0'
-      return ((now() - s.startedAt) / 1000).toFixed(1)
-    }
-    const state = () => compactingState()!
-    return (
-      <div class="rate-limit-banner" style="background:color-mix(in srgb, var(--accent) 10%, transparent);border-color:color-mix(in srgb, var(--accent) 30%, transparent);color:var(--accent)">
-        <span class="todo-spinner" style="border-top-color:var(--accent)" />
-        <span class="rate-limit-msg">
-          正在压缩上下文（{state().willLevel2 ? 'LLM 总结' : '按类型剪枝'}，当前 {state().tokensCurrent.toLocaleString()} tokens）…
-        </span>
-        <span class="rate-limit-countdown">{elapsed()}s</span>
-      </div>
-    )
-  }
-
-  // ─── RateLimitBanner（P0-6）: 限流倒计时 ─────────────────────────────────
-  function RateLimitBanner() {
-    const [now, setNow] = createSignal(Date.now())
-    createEffect(() => {
-      if (!rateLimit().active) return
-      const timer = setInterval(() => setNow(Date.now()), 1000)
-      onCleanup(() => clearInterval(timer))
-    })
-    const secondsLeft = () => Math.max(0, Math.ceil((rateLimit().resetAt - now()) / 1000))
-    return (
-      <Show when={rateLimit().active}>
-        <div class="rate-limit-banner">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"/>
-            <polyline points="12 6 12 12 16 14"/>
-          </svg>
-          <span class="rate-limit-msg">{rateLimit().message}</span>
-          <span class="rate-limit-countdown">
-            <Show when={secondsLeft() > 0} fallback="正在重试…">
-              剩余 <AnimatedNumber value={secondsLeft()} duration={200} /> 秒
-            </Show>
-          </span>
-          <span class="rate-limit-attempt">第 {rateLimit().attempt} 次尝试</span>
-          <button class="rate-limit-cancel" onClick={() => {
-            setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
-            void cancel()
-          }}>取消</button>
-        </div>
-      </Show>
-    )
-  }
-
-  // ─── ToastHost（全局 toast，支持 action 按钮）──────────────────────────
-  function ToastHost() {
-    return (
-      <div class="toast-host">
-        <For each={toasts()}>
-          {(t) => (
-            <div class={`toast toast-${t.kind}`}>
-              <div class="toast-icon">
-                {t.kind === 'success' && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                )}
-                {t.kind === 'error' && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
-                  </svg>
-                )}
-                {t.kind === 'warn' && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-                  </svg>
-                )}
-                {t.kind === 'info' && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                )}
-              </div>
-              <div class="toast-msg">{t.message}</div>
-              <Show when={t.action}>
-                <button
-                  class="toast-action"
-                  onClick={() => { t.action!.onClick(); dismissToast(t.id) }}
-                >
-                  {t.action!.label}
-                </button>
-              </Show>
-              <button class="toast-close" onClick={() => dismissToast(t.id)} title="关闭">
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
-            </div>
-          )}
-        </For>
-      </div>
-    )
-  }
-
-  // ─── CommandPalette（⌘P 全局搜索：会话 / 文件 / 符号 / 命令）────────────
-  function CommandPalette() {
-    const items = () => cmdPaletteItems()
-    return (
-      <div class="keybind-overlay" onClick={() => setShowCmdPalette(false)}>
-        <div class="keybind-modal" onClick={(e) => e.stopPropagation()} style="width:640px">
-          <div class="keybind-header">
-            <span class="keybind-title">⌘P · 全局搜索</span>
-            <button class="icon-btn" onClick={() => setShowCmdPalette(false)} title="关闭 (Esc)">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
-          </div>
-          <input
-            class="keybind-search"
-            placeholder="搜索会话、文件、符号、命令…"
-            value={cmdPaletteQuery()}
-            onInput={(e) => setCmdPaletteQuery(e.currentTarget.value)}
-            autofocus
-            onKeyDown={(e) => {
-              const list = items()
-              if (e.key === 'ArrowDown') { e.preventDefault(); setCmdPaletteIdx(i => Math.min(i + 1, list.length - 1)) }
-              else if (e.key === 'ArrowUp') { e.preventDefault(); setCmdPaletteIdx(i => Math.max(i - 1, 0)) }
-              else if (e.key === 'Enter') {
-                e.preventDefault()
-                const sel = list[cmdPaletteIdx()]
-                if (sel) void sel.onSelect()
-              }
-              else if (e.key === 'Escape') { e.preventDefault(); setShowCmdPalette(false) }
-            }}
-          />
-          <div class="keybind-body">
-            <Show when={cmdPaletteLoading()}>
-              <div class="keybind-empty" style="padding:10px">搜索中…</div>
-            </Show>
-            <Show when={!cmdPaletteLoading() && items().length === 0}>
-              <div class="keybind-empty">无匹配</div>
-            </Show>
-            <For each={items()}>
-              {(item, idx) => {
-                const icon = item.type === 'session' ? '💬'
-                  : item.type === 'file'    ? '📄'
-                  : item.type === 'symbol'  ? '🔣'
-                  : '⚡'
-                return (
-                  <div
-                    class="cmd-palette-item"
-                    classList={{ active: idx() === cmdPaletteIdx() }}
-                    onMouseEnter={() => setCmdPaletteIdx(idx())}
-                    onClick={() => item.onSelect()}
-                  >
-                    <span class="cmd-palette-icon">{icon}</span>
-                    <div class="cmd-palette-text">
-                      <div class="cmd-palette-label">{item.label}</div>
-                      <Show when={item.desc}>
-                        <div class="cmd-palette-desc">{item.desc}</div>
-                      </Show>
-                    </div>
-                  </div>
-                )
-              }}
-            </For>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ─── KeybindHelpModal（⌘/ 触发，可搜索的快捷键速查）─────────────────────
-  const KEYBINDS: Array<{ keys: string; desc: string; category: string }> = [
-    { keys: '⌘N',      desc: '新建会话',           category: '会话' },
-    { keys: '⌘W',      desc: '关闭当前会话',        category: '会话' },
-    { keys: '⌘[',      desc: '上一个会话',          category: '会话' },
-    { keys: '⌘]',      desc: '下一个会话',          category: '会话' },
-    { keys: '⌘K',      desc: '打开命令面板（/）',   category: '会话' },
-    { keys: '⌘Enter',  desc: '发送消息',            category: '输入' },
-    { keys: 'Esc',     desc: '中断 AI 生成',        category: '输入' },
-    { keys: '↑/↓',     desc: '输入框空时翻历史',    category: '输入' },
-    { keys: '@',       desc: '文件引用',            category: '输入' },
-    { keys: '/',       desc: '斜杠命令',            category: '输入' },
-    { keys: '⌘`',      desc: '切换终端',            category: '面板' },
-    { keys: '⌘,',      desc: '打开设置',            category: '面板' },
-    { keys: '⌘/',      desc: '显示快捷键速查',      category: '面板' },
-    { keys: 'j / k',   desc: '上下消息导航',        category: '消息' },
-    { keys: '↑/↓',     desc: '消息列表聚焦时上下移动', category: '消息' },
-    { keys: 'Enter',   desc: '展开/折叠当前消息',   category: '消息' },
-  ]
-  function KeybindHelpModal() {
-    const q = () => keybindSearch().trim().toLowerCase()
-    const filtered = () => q()
-      ? KEYBINDS.filter(k => k.keys.toLowerCase().includes(q()) || k.desc.toLowerCase().includes(q()) || k.category.toLowerCase().includes(q()))
-      : KEYBINDS
-    const grouped = () => {
-      const m = new Map<string, typeof KEYBINDS>()
-      for (const k of filtered()) {
-        if (!m.has(k.category)) m.set(k.category, [])
-        m.get(k.category)!.push(k)
-      }
-      return Array.from(m.entries())
-    }
-    return (
-      <div class="keybind-overlay" onClick={() => setShowKeybindHelp(false)}>
-        <div class="keybind-modal" onClick={(e) => e.stopPropagation()}>
-          <div class="keybind-header">
-            <span class="keybind-title">键盘快捷键</span>
-            <button class="icon-btn" onClick={() => setShowKeybindHelp(false)} title="关闭 (Esc)">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
-          </div>
-          <input
-            class="keybind-search"
-            placeholder="搜索快捷键或功能…"
-            value={keybindSearch()}
-            onInput={(e) => setKeybindSearch(e.currentTarget.value)}
-            autofocus
-          />
-          <div class="keybind-body">
-            <For each={grouped()}>
-              {([category, items]) => (
-                <div class="keybind-group">
-                  <div class="keybind-group-title">{category}</div>
-                  <For each={items}>
-                    {(k) => (
-                      <div class="keybind-row">
-                        <span class="keybind-desc">{k.desc}</span>
-                        <kbd class="keybind-keys">{k.keys}</kbd>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              )}
-            </For>
-            <Show when={filtered().length === 0}>
-              <div class="keybind-empty">无匹配</div>
-            </Show>
-          </div>
-        </div>
-      </div>
-    )
-  }
+  // K11a: KeybindHelpModal (⌘/) 已抽到 ./components/KeybindHelpModal.tsx
 
   // ─── AnimatedNumber: 平滑数字过渡（P2-20） ───────────────────────────────
-  function AnimatedNumber(props: { value: number; duration?: number }) {
-    const [display, setDisplay] = createSignal(props.value)
-    createEffect(() => {
-      const target = props.value
-      const start = display()
-      if (start === target) return
-      const dur = props.duration ?? 500
-      const t0 = performance.now()
-      let rafId = 0
-      const tick = (now: number) => {
-        const p = Math.min(1, (now - t0) / dur)
-        const eased = 1 - Math.pow(1 - p, 3)  // easeOutCubic
-        setDisplay(Math.round(start + (target - start) * eased))
-        if (p < 1) rafId = requestAnimationFrame(tick)
-      }
-      rafId = requestAnimationFrame(tick)
-      onCleanup(() => cancelAnimationFrame(rafId))
-    })
-    return <>{display().toLocaleString()}</>
-  }
+  // K11c-cont: AnimatedNumber 已抽到 ./components/AnimatedNumber
 
   // ─── SlashCommandPalette ──────────────────────────────────────────────────
-  function SlashCommandPalette() {
-    const pos = paletteRect()
-    return (
-      <Show when={showSlash() && filteredSlash().length > 0}>
-        <div
-          class="slash-palette"
-          style={`position:fixed;bottom:${pos.bottom}px;left:${pos.left}px;width:${pos.width}px;z-index:9999`}
-        >
-          <For each={filteredSlash()}>
-            {(cmd, idx) => (
-              <div
-                class="slash-item"
-                classList={{ active: slashIdx() === idx() }}
-                onMouseEnter={() => setSlashIdx(idx())}
-                onMouseDown={(e) => { e.preventDefault(); execSlashCommand(cmd.name) }}
-              >
-                <span class="slash-icon">{cmd.icon}</span>
-                <div class="slash-item-text">
-                  <span class="slash-cmd-name">/{cmd.name}</span>
-                  <span class="slash-cmd-desc">{cmd.desc}</span>
-                </div>
-              </div>
-            )}
-          </For>
-        </div>
-      </Show>
-    )
-  }
+  // K10d: SlashCommandPalette + FileMentionDropdown 已抽到 @maxian/ui
+  // 作为 SharedCommandPalette / SharedMentionDropdown 使用。渲染处见外层 fragment（约 7820 行附近）。
 
-  // ─── FileMentionDropdown ──────────────────────────────────────────────────
-  function FileMentionDropdown() {
-    return (
-      <Show when={showMention()}>
-        <div
-          class="slash-palette mention-palette"
-          style={`position:fixed;bottom:${paletteRect().bottom}px;left:${paletteRect().left}px;width:${paletteRect().width}px;z-index:9999`}
-        >
-          {/* 加载中状态 */}
-          <Show when={wsFileCacheLoading() && mentionFiles().length === 0}>
-            <div class="slash-item mention-loading">
-              <svg class="mention-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-              </svg>
-              <span style="color:var(--text-faint);font-size:12px">正在加载文件列表…</span>
-            </div>
-          </Show>
-          {/* 无结果 */}
-          <Show when={!wsFileCacheLoading() && mentionFiles().length === 0}>
-            <div class="slash-item mention-empty">
-              <span style="color:var(--text-faint);font-size:12px">未找到匹配文件</span>
-            </div>
-          </Show>
-          {/* 文件列表 */}
-          <Show when={mentionFiles().length > 0}>
-            <div class="mention-header">
-              <span>{activeWorkspace()?.name ?? '工作区'}</span>
-              <span class="mention-count">{wsFileCache()?.files.length ?? 0} 个文件</span>
-            </div>
-            <div class="mention-list">
-              <For each={mentionFiles()}>
-                {(file, idx) => {
-                  const parts = file.split('/')
-                  const filename = parts.pop() ?? file
-                  const dir = parts.length > 0 ? parts.join('/') : ''
-                  // 高亮匹配部分
-                  const q = mentionQuery().toLowerCase()
-                  const hiName = () => {
-                    if (!q) return filename
-                    const i = filename.toLowerCase().indexOf(q)
-                    if (i < 0) return filename
-                    return `${filename.slice(0, i)}<mark>${filename.slice(i, i + q.length)}</mark>${filename.slice(i + q.length)}`
-                  }
-                  return (
-                    <div
-                      class="slash-item"
-                      classList={{ active: mentionIdx() === idx() }}
-                      onMouseEnter={() => setMentionIdx(idx())}
-                      onMouseDown={(e) => { e.preventDefault(); insertMention(file) }}
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="1.8" style="flex-shrink:0">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                        <polyline points="14 2 14 8 20 8"/>
-                      </svg>
-                      <div class="slash-item-text">
-                        <span class="slash-cmd-name" innerHTML={hiName()} />
-                        <span class="slash-cmd-desc">{dir ? `/${dir}` : '/'}</span>
-                      </div>
-                    </div>
-                  )
-                }}
-              </For>
-            </div>
-          </Show>
-        </div>
-      </Show>
-    )
-  }
-
-  // ─── ModeSelector ────────────────────────────────────────────────────────
-  const MODE_OPTIONS: { id: ComposerMode; label: string; desc: string; color: string; paths: string[] }[] = [
-    {
-      id: 'ask',
-      label: '询问权限',
-      desc: '工具调用时请求许可',
-      color: '#a78bfa',
-      paths: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"],
-    },
-    {
-      id: 'code',
-      label: '接受编辑',
-      desc: '自动接受文件修改（默认）',
-      color: '#34d399',
-      paths: ["M13 2 3 14h9l-1 8 10-12h-9l1-8z"],
-    },
-    {
-      id: 'plan',
-      label: '计划模式',
-      desc: 'AI 只规划，不执行操作',
-      color: '#fbbf24',
-      paths: ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M16 13H8", "M16 17H8", "M10 9H8"],
-    },
-    {
-      id: 'bypass',
-      label: '跳过权限',
-      desc: '跳过所有工具权限确认',
-      color: '#f87171',
-      paths: ["M5 12h14", "M12 5l7 7-7 7"],
-    },
-  ]
-
-  function ModeSvgIcon(props: { paths: string[]; color: string; size?: number }) {
-    const sz = props.size ?? 14
-    return (
-      <svg width={sz} height={sz} viewBox="0 0 24 24" fill="none" stroke={props.color} stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">
-        {props.paths.map(p => <path d={p} />)}
-      </svg>
-    )
-  }
-
-  function ModeSelector() {
-    const currentOpt = () => MODE_OPTIONS.find(o => o.id === composerMode()) ?? MODE_OPTIONS[1]
-    return (
-      <div class="mode-selector-wrap">
-        <button
-          class="mode-selector-btn"
-          classList={{ open: showModeDropdown() }}
-          onClick={(e) => {
-            e.stopPropagation()
-            setShowModeDropdown(v => !v)
-          }}
-          title="选择操作模式"
-        >
-          <ModeSvgIcon paths={currentOpt().paths} color={currentOpt().color} size={12} />
-          <span class="mode-selector-label">{currentOpt().label}</span>
-          <svg class="mode-selector-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="6 9 12 15 18 9"/>
-          </svg>
-        </button>
-        <Show when={showModeDropdown()}>
-          <div class="mode-selector-popup">
-            <For each={MODE_OPTIONS}>
-              {(opt, idx) => (
-                <button
-                  class="mode-option-item"
-                  classList={{ active: composerMode() === opt.id }}
-                  onClick={async (e) => {
-                    e.stopPropagation()
-                    const prevMode = composerMode()
-                    if (prevMode === opt.id) { setShowModeDropdown(false); return }
-                    setComposerMode(opt.id)
-                    setShowModeDropdown(false)
-                    const sid = activeSessionId()
-                    if (sid) {
-                      try {
-                        const c = await getClient()
-                        await c.updateSessionMode(sid, opt.id)
-                      } catch { /* 忽略 */ }
-                    }
-                    // 仅在真正切换模式时才插入提示消息
-                    if (opt.id === 'plan') {
-                      setMessages(prev => [...prev, {
-                        id: String(++msgId), role: "system",
-                        createdAt: Date.now(),
-                        content: "📋 已进入计划模式：AI 只规划，不执行文件操作"
-                      }])
-                    } else if (prevMode === 'plan') {
-                      setMessages(prev => [...prev, {
-                        id: String(++msgId), role: "system",
-                        createdAt: Date.now(),
-                        content: "⚡ 已退出计划模式"
-                      }])
-                    }
-                  }}
-                >
-                  <span class="mode-option-num">{idx() + 1}</span>
-                  <ModeSvgIcon paths={opt.paths} color={opt.color} size={13} />
-                  <div class="mode-option-text">
-                    <span class="mode-option-label">{opt.label}</span>
-                    <span class="mode-option-desc">{opt.desc}</span>
-                  </div>
-                  <Show when={composerMode() === opt.id}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" style="flex-shrink:0;margin-left:auto">
-                      <polyline points="20 6 9 17 4 12"/>
-                    </svg>
-                  </Show>
-                </button>
-              )}
-            </For>
-          </div>
-        </Show>
-      </div>
-    )
-  }
-
-  // ─── GitStatusBar ─────────────────────────────────────────────────────────
-  let gitBranchBtnRef: HTMLButtonElement | undefined
-
-  async function loadBranchPicker() {
-    const ws = activeWorkspace()
-    if (!ws) return
-    setBranchPickerLoading(true)
-    try {
-      const c = await getClient()
-      const br = await c.listBranches(ws.id)
-      setBranchPickerBranches(br.branches ?? [])
-    } catch { /* 忽略 */ } finally {
-      setBranchPickerLoading(false)
+  // K11a: ModeSelector / MODE_OPTIONS / ModeSvgIcon / ComposerMode 类型 已抽到
+  // ./components/ModeSelector.tsx；下面渲染处通过 props 注入状态。
+  // composerMode 切换的副作用（updateSessionMode + 注入提示消息）由 onSelectMode 回调封装。
+  const onSelectComposerMode = async (mode: ComposerMode, prevMode: ComposerMode) => {
+    setComposerMode(mode)
+    const sid = activeSessionId()
+    if (sid) {
+      try {
+        const c = await getClient()
+        await c.updateSessionMode(sid, mode)
+      } catch { /* 忽略 */ }
+    }
+    if (mode === 'plan') {
+      setMessages(prev => [...prev, {
+        id: String(++msgId), role: "system",
+        createdAt: Date.now(),
+        content: "📋 已进入计划模式：AI 只规划，不执行文件操作",
+      }])
+    } else if (prevMode === 'plan') {
+      setMessages(prev => [...prev, {
+        id: String(++msgId), role: "system",
+        createdAt: Date.now(),
+        content: "⚡ 已退出计划模式",
+      }])
     }
   }
 
-  function openBranchPicker(e: MouseEvent) {
-    e.stopPropagation()
-    if (showBranchPicker()) { setShowBranchPicker(false); return }
-    // 计算弹窗位置
-    const btn = gitBranchBtnRef
-    if (btn) {
-      const rect = btn.getBoundingClientRect()
-      setBranchPickerRect({ bottom: window.innerHeight - rect.top + 6, left: rect.left })
-    }
-    setBranchPickerSearch("")
-    setShowBranchPicker(true)
-    void loadBranchPicker()
-  }
-
-  async function switchBranch(branch: string) {
-    const ws = activeWorkspace()
-    if (!ws || branch === currentBranch()) { setShowBranchPicker(false); return }
-    setShowBranchPicker(false)
-    try {
-      const c = await getClient()
-      const r = await c.checkoutBranch(ws.id, branch)
-      if (r.ok) {
-        setCurrentBranch(branch)
-      } else {
-        alert(`切换分支失败：${r.error ?? '未知错误'}`)
-      }
-    } catch (e) {
-      alert(`切换分支失败：${(e as Error).message}`)
-    }
-  }
-
-  function GitStatusBar() {
-    return (
-      <Show when={activeWorkspace()}>
-        <div class="git-status-bar">
-          <div class="git-status-left">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text-faint);flex-shrink:0">
-              <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
-            </svg>
-            <Show when={currentBranch() !== null} fallback={
-              <span class="git-status-text">非 Git 仓库</span>
-            }>
-              <button
-                ref={gitBranchBtnRef}
-                class="git-status-branch-btn"
-                onClick={openBranchPicker}
-                title="切换分支"
-              >
-                {currentBranch()}
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                  <polyline points="6 9 12 15 18 9"/>
-                </svg>
-              </button>
-            </Show>
-          </div>
-          {/* 进程资源监控（左下角）：2s 轮询，显示 webview + sidecar 内存/CPU */}
-          <ProcStats />
-        </div>
-        {/* 分支选择弹窗 — fixed 定位避免被 overflow 裁剪 */}
-        <Show when={showBranchPicker() && currentBranch() !== null}>
-          <div
-            class="branch-picker-popup"
-            style={`position:fixed;bottom:${branchPickerRect().bottom}px;left:${branchPickerRect().left}px;z-index:9999`}
-          >
-            <div class="branch-picker-header">
-              <input
-                class="branch-picker-search"
-                placeholder="搜索分支…"
-                value={branchPickerSearch()}
-                onInput={(e) => setBranchPickerSearch(e.currentTarget.value)}
-                autofocus
-              />
-            </div>
-            <div class="branch-picker-list">
-              <Show when={branchPickerLoading()}>
-                <div class="branch-picker-loading">
-                  <span class="spinner" style="width:12px;height:12px;border-width:1.5px" />
-                </div>
-              </Show>
-              <Show when={!branchPickerLoading()}>
-                <For each={branchPickerBranches().filter(b => {
-                  const q = branchPickerSearch().toLowerCase()
-                  return !q || b.toLowerCase().includes(q)
-                })}>
-                  {(b) => (
-                    <button
-                      class="branch-picker-item"
-                      classList={{ current: b === currentBranch() }}
-                      onClick={() => switchBranch(b)}
-                    >
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;color:var(--text-faint)">
-                        <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
-                      </svg>
-                      <span class="branch-picker-name">{b}</span>
-                      <Show when={b === currentBranch()}>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--accent);flex-shrink:0;margin-left:auto">
-                          <polyline points="20 6 9 17 4 12"/>
-                        </svg>
-                      </Show>
-                    </button>
-                  )}
-                </For>
-                <Show when={branchPickerBranches().filter(b => {
-                  const q = branchPickerSearch().toLowerCase()
-                  return !q || b.toLowerCase().includes(q)
-                }).length === 0}>
-                  <div style="padding:10px 12px;font-size:11px;color:var(--text-faint)">无匹配分支</div>
-                </Show>
-              </Show>
-            </div>
-            <div class="branch-picker-footer">
-              <button
-                class="branch-picker-create-btn"
-                onClick={() => {
-                  setShowBranchPicker(false)
-                  setShowSettings(true)
-                  setSettingsTab("worktree")
-                }}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                  <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                </svg>
-                创建并检出新分支…
-              </button>
-            </div>
-          </div>
-        </Show>
-      </Show>
-    )
-  }
+  // K11a: GitStatusBar 已抽到 ./components/GitStatusBar.tsx
+  // K11b: branch picker 操作回调来自 useGitBranchPicker，下面取别名给外部 JSX 用
+  const loadBranchPicker  = _branchPicker.loadBranchPicker
+  const openBranchPicker  = _branchPicker.openBranchPicker
+  const switchBranch      = _branchPicker.switchBranch
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -7811,76 +3406,29 @@ export default {
 
       {/* Login */}
       <Show when={appStatus() === "login"}>
-        <div class="login-screen">
-          <div class="login-card">
-            <div class="login-hero">
-              <img class="login-avatar" src={logoUrl} alt="Maxian" />
-              <div class="login-brand">码弦</div>
-              <div class="login-sub">智能 AI 编程助手</div>
-            </div>
-            <div class="login-form">
-              <Show when={loginError()}>
-                <div class="login-error">{loginError()}</div>
-              </Show>
-              <div class="login-field">
-                <label class="login-label">服务器地址</label>
-                <input class="login-input" type="url" placeholder="例如: http://10.205.81.162/api"
-                  value={loginApiUrl()} onInput={(e) => setLoginApiUrl(e.currentTarget.value)}
-                  disabled={loginLoading()} />
-              </div>
-              <div class="login-field">
-                <label class="login-label">用户名</label>
-                <input class="login-input" type="text" placeholder="请输入用户名" autocomplete="username"
-                  value={loginUsername()} onInput={(e) => setLoginUsername(e.currentTarget.value)}
-                  disabled={loginLoading()} />
-              </div>
-              <div class="login-field">
-                <label class="login-label">密码</label>
-                <input class="login-input" type="password" placeholder="请输入密码" autocomplete="current-password"
-                  value={loginPassword()} onInput={(e) => setLoginPassword(e.currentTarget.value)}
-                  disabled={loginLoading()}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleLogin() }} />
-              </div>
-              <label class="login-remember">
-                <input type="checkbox" checked={loginRemember()}
-                  onChange={(e) => setLoginRemember(e.currentTarget.checked)} disabled={loginLoading()} />
-                记住登录状态
-              </label>
-              <button class="login-btn" onClick={handleLogin}
-                disabled={loginLoading() || !loginUsername().trim() || !loginPassword()}>
-                <Show when={loginLoading()} fallback="登录">
-                  <span class="spinner" style="width:14px;height:14px;border-width:1.5px;border-color:rgba(255,255,255,0.3);border-top-color:#fff" />
-                  登录中…
-                </Show>
-              </button>
-            </div>
-            <div class="login-footer">首次登录？请联系管理员获取账号</div>
-          </div>
-        </div>
+        <LoginView
+          logoUrl={logoUrl}
+          apiUrl={loginApiUrl} setApiUrl={setLoginApiUrl}
+          username={loginUsername} setUsername={setLoginUsername}
+          password={loginPassword} setPassword={setLoginPassword}
+          remember={loginRemember} setRemember={setLoginRemember}
+          error={loginError} loading={loginLoading}
+          onSubmit={handleLogin}
+        />
       </Show>
 
       {/* Booting */}
       <Show when={appStatus() === "booting"}>
-        <div class="boot-screen">
-          <img class="boot-logo" src={logoUrl} alt="Maxian" />
-          <div class="spinner" />
-          <span>正在连接 Maxian Server…</span>
-        </div>
+        <BootingScreen logoUrl={logoUrl} />
       </Show>
 
       {/* Error */}
       <Show when={appStatus() === "error"}>
-        <div class="boot-screen">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="1.5">
-            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          <span style="font-weight:600;color:var(--text-base)">启动失败</span>
-          <pre>{bootError()}</pre>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-ghost" onClick={handleLogout}>重新登录</button>
-            <button class="btn btn-primary" onClick={() => bootWithCredentials(loadSavedCredentials()!)}>重试</button>
-          </div>
-        </div>
+        <BootErrorScreen
+          error={bootError}
+          onLogout={handleLogout}
+          onRetry={() => bootWithCredentials(loadSavedCredentials()!)}
+        />
       </Show>
 
       {/* Ready */}
@@ -7891,12 +3439,77 @@ export default {
           <span class="window-title-text" data-tauri-drag-region>码弦 Maxian</span>
         </div>
 
-        {/* Slash 命令面板 & @ 文件提及 — fixed 定位，渲染在最外层避免 z-index 问题 */}
-        <SlashCommandPalette />
-        <FileMentionDropdown />
+        {/* Slash 命令面板 & @ 文件提及（K10d：抽到 @maxian/ui）
+            fixed 定位，渲染在最外层避免 z-index 问题 */}
+        <SharedCommandPalette
+          visible={showSlash()}
+          rect={paletteRect()}
+          commands={filteredSlash()}
+          activeIdx={slashIdx()}
+          onHover={(idx) => setSlashIdx(idx)}
+          onSelect={(name) => execSlashCommand(name)}
+        />
+        <SharedMentionDropdown
+          visible={showMention()}
+          rect={paletteRect()}
+          files={mentionFiles()}
+          activeIdx={mentionIdx()}
+          query={mentionQuery()}
+          workspaceName={activeWorkspace()?.name}
+          totalFiles={wsFileCache()?.files.length ?? 0}
+          loading={wsFileCacheLoading()}
+          onHover={(idx) => setMentionIdx(idx)}
+          onSelect={(file) => insertMention(file)}
+        />
 
         <div class="app-shell" data-mode={globalMode()}>
-          <Sidebar />
+          <Show when={!showBatchPanel()}>
+            <Sidebar
+              currentUser={currentUser}
+              globalMode={globalMode}
+              showBatchPanel={showBatchPanel}
+              showSettings={showSettings}
+              userExpanded={userExpanded}
+              setUserExpanded={(v) => setUserExpanded(v as any)}
+              setShowSettings={(v) => setShowSettings(v)}
+              setSettingsTab={(t) => setSettingsTab(t)}
+              leaveBatchPanelToMode={leaveBatchPanelToMode}
+              setShowBatchPanel={(v) => setShowBatchPanel(v)}
+              handleLogout={handleLogout}
+              sessions={sessions}
+              workspaces={workspaces}
+              groupedSessions={groupedSessions}
+              sessionSearch={sessionSearch}
+              setSessionSearch={(v) => setSessionSearch(v)}
+              showArchived={showArchived}
+              setShowArchived={(v) => setShowArchived(v as any)}
+              collapsedGroups={collapsedGroups}
+              toggleGroupCollapse={toggleGroupCollapse}
+              activeSessionId={activeSessionId}
+              editingSessionId={editingSessionId}
+              editingSessionTitle={editingSessionTitle}
+              setEditingSessionTitle={(v) => setEditingSessionTitle(v)}
+              selectSession={(id) => void selectSession(id)}
+              startRenameSession={startRenameSession}
+              commitRenameSession={(id) => void commitRenameSession(id)}
+              cancelRenameSession={cancelRenameSession}
+              togglePinSession={(id, p) => void togglePinSession(id, p)}
+              toggleArchiveSession={(id, a) => void toggleArchiveSession(id, a)}
+              deleteSession={(e, id) => void deleteSession(e, id)}
+              createSession={() => void createSession()}
+              pickFolder={() => void pickFolder()}
+              editingWorkspaceId={editingWorkspaceId}
+              editingWorkspaceName={editingWorkspaceName}
+              setEditingWorkspaceName={(v) => setEditingWorkspaceName(v)}
+              createSessionInWorkspace={(e, ws) => void createSessionInWorkspace(e, ws)}
+              startRenameWorkspace={startRenameWorkspace}
+              commitRenameWorkspace={(id) => void commitRenameWorkspace(id)}
+              cancelRenameWorkspace={cancelRenameWorkspace}
+              deleteWorkspace={(e, ws) => void deleteWorkspace(e, ws)}
+              userInitials={userInitials}
+              shortPath={shortPath}
+            />
+          </Show>
 
           {/* 自动更新提示 Toast */}
           <Show when={updateAvailable()}>
@@ -7914,122 +3527,198 @@ export default {
           </Show>
 
           {/* 工具审批对话框（阻塞式） */}
-          <Show when={approvalRequest()}>
-            <ApprovalDialog />
-          </Show>
+          <SharedApprovalDialog
+            request={approvalRequest()}
+            getToolLabel={(n) => TOOL_LABELS[n] ?? n}
+            onDecide={(d) => {
+              if (d.approved) void handleApprove(true, d.remember)
+              else void handleApprove(false)
+            }}
+          />
           {/* Agent 提问对话框 */}
-          <Show when={questionRequest()}>
-            <QuestionDialog />
-          </Show>
+          <QuestionDialog
+            request={questionRequest}
+            answer={questionAnswer}
+            selected={questionSelected}
+            setAnswer={setQuestionAnswer}
+            toggleOption={(o) => {
+              const req = questionRequest()
+              if (!req) return
+              if (req.multi) {
+                setQuestionSelected(prev => prev.includes(o) ? prev.filter(x => x !== o) : [...prev, o])
+              } else {
+                setQuestionSelected([o])
+              }
+            }}
+            onSubmit={() => void handleAnswerQuestion(false)}
+            onCancel={() => void handleAnswerQuestion(true)}
+          />
           {/* Plan Exit 对话框 */}
-          <Show when={planExitRequest()}>
-            <PlanExitDialog />
-          </Show>
+          <PlanExitDialog
+            request={planExitRequest}
+            feedback={planExitFeedback}
+            setFeedback={setPlanExitFeedback}
+            renderMarkdown={renderMarkdown}
+            onApprove={() => void handlePlanExit(true)}
+            onReject={() => void handlePlanExit(false)}
+          />
           {/* 应用代码到文件对话框（P0-2） */}
-          <Show when={applyDialog().open}>
-            <ApplyToFileDialog />
-          </Show>
+          <ApplyToFileDialog
+            state={applyDialog}
+            setState={(updater) => setApplyDialog(updater)}
+            close={() => setApplyDialog({ open: false, code: '', lang: undefined, target: '', mode: 'overwrite', loading: false })}
+            onConfirm={() => void confirmApplyToFile()}
+          />
 
 
           {/* Settings view */}
           <Show when={showSettings()}>
             <div class="settings-shell">
-              <nav class="settings-nav">
-                <button class="settings-nav-back" onClick={() => setShowSettings(false)}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="15 18 9 12 15 6"/>
-                  </svg>
-                  返回应用
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "general" }} onClick={() => setSettingsTab("general")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <circle cx="12" cy="12" r="3"/>
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                  </svg>
-                  常规
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "appearance" }} onClick={() => setSettingsTab("appearance")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
-                  </svg>
-                  外观
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "worktree" }} onClick={() => setSettingsTab("worktree")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
-                  </svg>
-                  Git Worktree
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "mcp" }} onClick={() => setSettingsTab("mcp")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-                  </svg>
-                  MCP Servers
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "keybinds" }} onClick={() => setSettingsTab("keybinds")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8"/><line x1="10" y1="8" x2="10" y2="8"/><line x1="14" y1="8" x2="14" y2="8"/><line x1="18" y1="8" x2="18" y2="8"/><line x1="8" y1="16" x2="16" y2="16"/>
-                  </svg>
-                  快捷键
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "templates" }} onClick={() => setSettingsTab("templates")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
-                  </svg>
-                  会话模板
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "usage" }} onClick={() => setSettingsTab("usage")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
-                  </svg>
-                  Token 用量
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "errors" }} onClick={() => setSettingsTab("errors")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-                  </svg>
-                  错误日志
-                  <Show when={errorLog().length > 0}>
-                    <span class="file-badge">{errorLog().length}</span>
-                  </Show>
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "plugins" }} onClick={() => setSettingsTab("plugins")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-                  </svg>
-                  插件开发
-                </button>
-                <button class="settings-nav-item" classList={{ active: settingsTab() === "about" }} onClick={() => setSettingsTab("about")}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                  关于
-                </button>
-              </nav>
+              <SettingsNav
+                tab={settingsTab as () => SettingsTab}
+                setTab={(t) => setSettingsTab(t)}
+                onClose={() => setShowSettings(false)}
+                errorCount={() => errorLog().length}
+              />
               <div class="settings-content">
-                <Show when={settingsTab() === "general"}><SettingsGeneral /></Show>
-                <Show when={settingsTab() === "appearance"}><SettingsAppearance /></Show>
-                <Show when={settingsTab() === "worktree"}><SettingsWorktree /></Show>
-                <Show when={settingsTab() === "mcp"}><SettingsMcp /></Show>
-                <Show when={settingsTab() === "keybinds"}><SettingsKeybinds /></Show>
-                <Show when={settingsTab() === "templates"}><SettingsTemplates /></Show>
-                <Show when={settingsTab() === "usage"}><SettingsUsage /></Show>
-                <Show when={settingsTab() === "errors"}><SettingsErrors /></Show>
-                <Show when={settingsTab() === "plugins"}><SettingsPlugins /></Show>
-                <Show when={settingsTab() === "about"}><SettingsAbout /></Show>
+                <Show when={settingsTab() === "general"}>
+                  <SettingsGeneral
+                    currentUser={currentUser}
+                    loginApiUrl={loginApiUrl}
+                    allowAlways={allowAlways}
+                    locale={locale}
+                    toolLabels={TOOL_LABELS}
+                    handleLogout={handleLogout}
+                    removeAllowAlways={removeAllowAlways}
+                    switchLocale={switchLocale}
+                  />
+                </Show>
+                <Show when={settingsTab() === "appearance"}>
+                  <SettingsAppearance
+                    vimEnabled={vimEnabled}
+                    theme={theme}
+                    fontFamily={fontFamily}
+                    fontSize={fontSize}
+                    fontFamilies={FONT_FAMILIES}
+                    toggleVim={toggleVim}
+                    setTheme={setTheme}
+                    setFontFamily={setFontFamily}
+                    setFontSize={setFontSize}
+                  />
+                </Show>
+                <Show when={settingsTab() === "worktree"}>
+                  <SettingsWorktree
+                    activeWorkspace={activeWorkspace}
+                    getClient={getClient}
+                    appConfirm={appConfirm}
+                  />
+                </Show>
+                <Show when={settingsTab() === "mcp"}>
+                  <SettingsMcp
+                    getClient={getClient as any}
+                    showToast={showToast}
+                  />
+                </Show>
+                <Show when={settingsTab() === "keybinds"}>
+                  <SettingsKeybinds
+                    keybindDefaults={KEYBIND_DEFAULTS}
+                    customKeybinds={customKeybinds}
+                    getKeybind={getKeybind}
+                    setKeybind={setKeybind}
+                    resetKeybind={resetKeybind}
+                    eventToKeybind={eventToKeybind}
+                  />
+                </Show>
+                <Show when={settingsTab() === "templates"}>
+                  <SettingsTemplates
+                    sessionTemplates={sessionTemplates}
+                    addSessionTemplate={addSessionTemplate}
+                    removeSessionTemplate={removeSessionTemplate}
+                    showToast={showToast}
+                    createSession={createSession}
+                    setInput={setInput}
+                    setShowSettings={setShowSettings}
+                  />
+                </Show>
+                <Show when={settingsTab() === "usage"}>
+                  <SettingsUsage sessions={sessions} />
+                </Show>
+                <Show when={settingsTab() === "errors"}>
+                  <SettingsErrors errorLog={errorLog} setErrorLog={setErrorLog} />
+                </Show>
+                <Show when={settingsTab() === "plugins"}>
+                  <SettingsPlugins
+                    pluginDevMarkdown={PLUGIN_DEV_MD}
+                    renderMarkdown={renderMarkdown}
+                    showToast={showToast}
+                  />
+                </Show>
+                <Show when={settingsTab() === "about"}>
+                  <SettingsAbout
+                    logoUrl={logoUrl}
+                    appVersion={__APP_VERSION__}
+                    activeSessionId={activeSessionId}
+                    getClient={getClient}
+                    showToast={showToast}
+                    refreshSessions={refreshSessions}
+                  />
+                </Show>
               </div>
             </div>
           </Show>
 
-          {/* Batch panel：v0.2.16+ 覆盖在 main 区域，独占视图 */}
+          {/* Batch panel：v0.2.16+ 全屏独占视图（自带顶部三段式切换） */}
           <Show when={!showSettings() && showBatchPanel() && batchClient()}>
-            <main class="main">
-              <BatchPanel client={batchClient()!} workspaces={workspaces()} />
+            <main class="main main-batch-fullwidth">
+              <BatchPanel
+                client={batchClient()!}
+                workspaces={workspaces()}
+                currentMode={globalMode()}
+                onSwitchToChat={() => leaveBatchPanelToMode('chat')}
+                onSwitchToCode={() => leaveBatchPanelToMode('code')}
+                onJumpToSession={async (sessionId, workspaceId) => {
+                  // 看日志 = "临时打开任务会话"，不应污染用户最近会话。
+                  // 记下跳前的 activeSessionId，用户点 Chat/Code 段切换时恢复。
+                  // selectSession 之前先读，避免被清掉。
+                  const existingReturn = _jumpReturnSessionId()
+                  const prevSession = activeSessionId()
+                  // 关闭批次面板 → 切到 code 视图（agent 任务都是 code 模式）→ 选中该 session
+                  setShowBatchPanel(false)
+                  setGlobalMode('code')
+                  // 先尝试直接切工作区（避免 selectSession 找不到 session 时 workspace 不同步）
+                  const ws = workspaces().find(w => w.id === workspaceId)
+                  if (ws) setActiveWorkspace(ws)
+                  // 批次创建的 session 可能还不在本地缓存里，先 refresh
+                  await refreshSessions()
+                  await selectSession(sessionId)  // 内部会清掉 _jumpReturnSessionId
+                  // 在 selectSession 之 *后* 写入回退目标。
+                  // 多次连续点"看日志"时优先保留最初的回退目标，而不是上一次的任务会话；
+                  // 用户手动选过会话才会让 existingReturn 为空，那时再用 prevSession。
+                  if (existingReturn) {
+                    _setJumpReturnSessionId(existingReturn)
+                  } else if (prevSession && prevSession !== sessionId) {
+                    _setJumpReturnSessionId(prevSession)
+                  }
+                }}
+              />
             </main>
           </Show>
 
-          {/* Chat view */}
-          <Show when={!showSettings() && !showBatchPanel()}>
+          {/* Chat view
+             *
+             * ⚠️ 关键：用 CSS display 控制可见性，**不**用 <Show> 包裹卸载 DOM。
+             * 因为这里包含集成终端面板（SharedTerminalPanel），里面挂载着 xterm.js 实例。
+             * xterm 把渲染状态绑死在它的 DOM container 上 —— 一旦容器被卸载（<Show>
+             * 切假分支会卸载子树），重新挂载后 xterm 不会自动重连到新 DOM，导致
+             * 切换到 settings 再回来后终端整片空白且无法操作。
+             *
+             * 用 display:none 时 DOM 始终在树里，xterm 仅"不可见"，
+             * 切回来恢复后即可继续工作（已在 PTY tab 间复用同样手法）。
+             *
+             * 包裹一层 div 是因为 chat-view 内部除了 <main>，还有右侧 explorer/preview
+             * 等兄弟节点，需一起隐藏；外层 <Show>（line ~5552）已被这个 div 替代。
+             */}
+          <div class="chat-view-wrap" style={(!showSettings() && !showBatchPanel()) ? 'display:contents' : 'display:none'}>
             <main class="main">
               {/* Chat header — mode badge + new session */}
               <div class="chat-header">
@@ -8174,6 +3863,49 @@ export default {
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <path d="M12 2l2.5 7.5H22l-6 4.5 2.5 7.5L12 17l-6.5 4.5L8 14 2 9.5h7.5z"/>
                     </svg>
+                  </button>
+                  {/* B3: AI 记忆面板 */}
+                  <button
+                    class="icon-btn"
+                    classList={{ active: showMemoryPanel() }}
+                    onClick={() => setShowMemoryPanel(v => !v)}
+                    title="AI 记忆（跨会话偏好/约定）"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M9 12l2 2 4-4"/>
+                      <path d="M21 12c.552 0 1.005-.45.95-1A10 10 0 0 0 12 2c-5.523 0-10 4.477-10 10 0 5.523 4.477 10 10 10a10 10 0 0 0 9-5.95c.05-.55-.398-1-.95-1z"/>
+                    </svg>
+                  </button>
+                  {/* B4: 项目知识库面板 */}
+                  <button
+                    class="icon-btn"
+                    classList={{ active: showCodebasePanel() }}
+                    onClick={() => setShowCodebasePanel(v => !v)}
+                    title="项目知识库（架构 / 模块 / API 索引）"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="16 18 22 12 16 6"/>
+                      <polyline points="8 6 2 12 8 18"/>
+                    </svg>
+                  </button>
+                  {/* B1: 子代理任务编排面板 */}
+                  <button
+                    class="icon-btn"
+                    classList={{ active: showSubagentPanel() }}
+                    onClick={() => setShowSubagentPanel(v => !v)}
+                    title="子代理任务编排（task() 派出的并行子代理）"
+                    style="position:relative"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <rect x="2" y="3" width="20" height="14" rx="2"/>
+                      <line x1="8" y1="21" x2="16" y2="21"/>
+                      <line x1="12" y1="17" x2="12" y2="21"/>
+                    </svg>
+                    <Show when={subagentRecords().filter(r => r.status === 'running').length > 0}>
+                      <span class="file-badge" style="background:#3b82f6;color:#fff">
+                        {subagentRecords().filter(r => r.status === 'running').length}
+                      </span>
+                    </Show>
                   </button>
                   {/* 变更记录按钮（有变更时显示角标），点击在右侧打开 */}
                   <button
@@ -8388,7 +4120,24 @@ export default {
                 </div>
 
                 {/* Git 状态栏 */}
-                <GitStatusBar />
+                <GitStatusBar
+                  hasWorkspace={() => !!activeWorkspace()}
+                  currentBranch={currentBranch}
+                  showBranchPicker={showBranchPicker}
+                  branchPickerBranches={branchPickerBranches}
+                  branchPickerLoading={branchPickerLoading}
+                  branchPickerSearch={branchPickerSearch}
+                  setBranchPickerSearch={setBranchPickerSearch}
+                  branchPickerRect={branchPickerRect}
+                  onOpenPicker={openBranchPicker}
+                  onSwitchBranch={switchBranch}
+                  onCreateBranch={() => {
+                    setShowBranchPicker(false)
+                    setShowSettings(true)
+                    setSettingsTab("worktree")
+                  }}
+                  rightSlot={<ProcStats />}
+                />
 
                 <div
                   ref={composerWrapRef}
@@ -8396,20 +4145,48 @@ export default {
                   onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
                   onDrop={handleDrop}
                 >
-                  {/* Token 用量条 */}
-                  <TokenUsageBar />
+                  {/* Token 用量条（K10c：抽到 @maxian/ui 的 SharedTokenUsageBar） */}
+                  <SharedTokenUsageBar
+                    tokenUsed={tokenUsed()}
+                    tokenLimit={tokenLimit()}
+                    compactDisabled={sending() || !activeSessionId()}
+                    onCompact={async () => {
+                      const sid = activeSessionId()
+                      if (!sid) return
+                      try {
+                        const c = await getClient()
+                        const r = await c.compactSession(sid)
+                        const freed = (r as any)?.tokensFreed ?? (r as any)?.freed ?? 0
+                        showToast({
+                          message: freed > 0 ? `✅ 上下文已压缩，释放约 ${Number(freed).toLocaleString()} tokens` : `✅ 上下文已压缩`,
+                          kind: 'info',
+                          duration: 3000,
+                        })
+                      } catch (e) {
+                        showToast({ message: `压缩失败：${(e as Error).message}`, kind: 'error', duration: 4000 })
+                      }
+                    }}
+                  />
 
                   {/* 上下文压缩进行中 banner */}
-                  <Show when={compactingState()}>
-                    <CompactingBanner />
-                  </Show>
+                  <CompactingBanner state={compactingState} />
 
                   {/* Rate-limit 重试提示（P0-6） */}
-                  <RateLimitBanner />
+                  <RateLimitBanner
+                    state={rateLimit}
+                    onCancel={() => {
+                      setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
+                      void cancel()
+                    }}
+                  />
 
                   {/* Session revert dock（P1-11） */}
                   <Show when={showRevertDock()}>
-                    <RevertDock />
+                    <RevertDock
+                      messages={messages}
+                      onClose={() => setShowRevertDock(false)}
+                      onRevertTo={(id) => void revertToMessage(id)}
+                    />
                   </Show>
 
                   {/* Todo 跟踪面板（P0-1）
@@ -8420,12 +4197,27 @@ export default {
                     todosLeftover() ||
                     todos().some(t => t.status === 'in_progress' || t.status === 'pending')
                   )}>
-                    <TodoDock />
+                    <TodoDock
+                      todos={todos}
+                      leftover={todosLeftover}
+                      collapsed={todoDockCollapsed}
+                      setCollapsed={(v) => setTodoDockCollapsed(v as any)}
+                    />
                   </Show>
 
                   {/* Followup 建议队列（P0-2） */}
                   <Show when={followupSuggestions().length > 0 || followupQueue().length > 0}>
-                    <FollowupDock />
+                    <FollowupDock
+                      suggestions={followupSuggestions}
+                      queue={followupQueue}
+                      collapsed={followupCollapsed}
+                      sending={sending}
+                      setCollapsed={(v) => setFollowupCollapsed(v as any)}
+                      setInput={(s) => setInput(s)}
+                      setQueue={(updater) => setFollowupQueue(updater)}
+                      setSuggestions={(updater) => setFollowupSuggestions(updater)}
+                      send={() => send()}
+                    />
                   </Show>
 
                   {/* Slash / @ 面板通过 fixed 定位渲染（已在 body 级别，无需特殊包装） */}
@@ -8482,7 +4274,12 @@ export default {
                       <div style="display:flex;gap:6px;align-items:center">
                         {/* 模式选择器：仅 Code 模式显示 */}
                         <Show when={globalMode() === 'code'}>
-                          <ModeSelector />
+                          <ModeSelector
+                            currentMode={composerMode}
+                            showDropdown={showModeDropdown}
+                            setShowDropdown={setShowModeDropdown}
+                            onSelectMode={onSelectComposerMode}
+                          />
                         </Show>
                         {/* 图片上传按钮 */}
                         <label class="attach-image-btn" title="附加图片 (也可直接粘贴)">
@@ -8543,47 +4340,240 @@ export default {
                 </div>
               </Show>
 
-              {/* 集成终端面板：用 CSS display 控制可见性，避免 DOM 卸载导致 xterm canvas 丢失 */}
+              {/* 集成终端面板（K10b：抽到 @maxian/ui 的 SharedTerminalPanel）
+                  用 CSS display 控制可见性，避免 DOM 卸载导致 xterm canvas 丢失 */}
               <div style={showTerminal() ? '' : 'display:none'}>
-                <TerminalPanel />
+                <SharedTerminalPanel
+                  allTabs={terminalTabs()}
+                  sessionTabs={terminalTabs().filter(t => t.sessionId === (activeSessionId() ?? '__global__'))}
+                  activeTermId={activeTermId()}
+                  collapsed={terminalCollapsed()}
+                  height={terminalHeight()}
+                  onResizeStart={onTerminalResizeStart}
+                  onSwitchTab={switchTerminalTab}
+                  onCloseTab={closeTerminalTab}
+                  onAddTab={addTerminalTab}
+                  onToggleCollapse={() => setTerminalCollapsed(v => !v)}
+                  onClose={() => {
+                    // 仅关闭当前会话的终端
+                    const sess = terminalTabs().filter(t => t.sessionId === (activeSessionId() ?? '__global__'))
+                    for (const tab of sess) closeTerminalTab(tab.id, new MouseEvent('click'))
+                    setShowTerminal(false)
+                  }}
+                />
               </div>
             </main>
             {/* 工作区文件浏览器（右侧） */}
             <Show when={showExplorer()}>
-              <WorkspaceExplorerPanel />
+              <WorkspaceExplorerPanel
+                files={() => wsFileCache()?.files ?? []}
+                loading={wsFileCacheLoading}
+                changedFiles={changedFiles}
+                expandedDirs={expandedDirs}
+                search={explorerSearch}
+                setSearch={setExplorerSearch}
+                toggleDir={toggleDir}
+                onClose={() => setShowExplorer(false)}
+                onOpenPreview={(p) => void openPreview(p)}
+              />
             </Show>
             {/* Skills 面板（右侧） */}
             <Show when={showSkillsPanel()}>
-              <SkillsPanel />
+              <SkillsPanel
+                skills={skillsList}
+                searchedDirs={skillsSearchedDirs}
+                loading={skillsLoading}
+                onClose={() => setShowSkillsPanel(false)}
+                onReload={loadSkills}
+                onOpenPreview={(p) => void openPreview(p)}
+              />
             </Show>
             {/* 会话上下文面板（右侧，P1-10） */}
             <Show when={showContextPanel()}>
-              <ContextPanel />
+              <ContextPanel
+                contextFiles={contextFiles}
+                attachedImages={attachedImages}
+                changedFiles={changedFiles}
+                onClose={() => setShowContextPanel(false)}
+                onOpenPreview={(p, opts) => void openPreview(p, opts as any)}
+                onRemoveImage={(id) => removeImage(id)}
+              />
             </Show>
-            {/* 变更记录面板（右侧侧边栏） */}
+            {/* B1: 子代理任务编排面板（右侧） */}
+            <SubagentDashboard
+              visible={showSubagentPanel}
+              records={subagentRecords}
+              loading={subagentLoading}
+              statusFilter={subagentStatusFilter}
+              setStatusFilter={(s) => setSubagentStatusFilter(s)}
+              activeSessionId={() => activeSessionId() ?? null}
+              sessionTitle={(sid) => sessions().find(s => s.id === sid)?.title ?? ''}
+              onClose={() => setShowSubagentPanel(false)}
+              onRefresh={loadSubagents}
+              onCancel={async (taskId) => {
+                try {
+                  const c = await getClient()
+                  await c.cancelSubagent(taskId)
+                  showToast({ message: '已发送取消信号', kind: 'info', duration: 2500 })
+                  await loadSubagents()
+                } catch (e) {
+                  pushError('subagent', `取消失败：${(e as Error).message}`)
+                }
+              }}
+              onOpenSession={(sessionId) => {
+                void selectSession(sessionId)
+                setShowSubagentPanel(false)   // 跳转后自动关面板
+              }}
+            />
+            {/* B4: 项目知识库面板（右侧，架构/模块/API） */}
+            <CodebaseIndexPanel
+              visible={showCodebasePanel}
+              snapshot={codebaseSnapshot}
+              loading={codebaseLoading}
+              progress={codebaseProgress}
+              tab={codebaseTab}
+              setTab={(t) => setCodebaseTab(t)}
+              searchQuery={codebaseSearchQuery}
+              setSearchQuery={(q) => setCodebaseSearchQuery(q)}
+              searchHits={codebaseSearchHits}
+              searchLoading={codebaseSearchLoading}
+              onClose={() => setShowCodebasePanel(false)}
+              onRefresh={refreshCodebaseIndexUI}
+              onSearch={searchCodebaseUI}
+              onOpenFile={(p, line) => void openPreview(p, line ? { viewMode: 'source', line } : { viewMode: 'source' })}
+              renderMarkdown={renderMarkdown}
+            />
+            {/* B3: AI 记忆面板（右侧，跨会话偏好/约定） */}
+            <MemoryPanel
+              visible={showMemoryPanel}
+              records={memoryRecords}
+              loading={memoryLoading}
+              scopeFilter={memoryScopeFilter}
+              setScopeFilter={(s) => setMemoryScopeFilter(s)}
+              categoryFilter={memoryCategoryFilter}
+              setCategoryFilter={(c) => setMemoryCategoryFilter(c)}
+              searchQuery={memorySearchQuery}
+              setSearchQuery={(q) => setMemorySearchQuery(q)}
+              onClose={() => setShowMemoryPanel(false)}
+              onRefresh={loadMemories}
+              onSearch={searchMemoriesUI}
+              onToggleStarred={async (id, starred) => {
+                try {
+                  const c = await getClient()
+                  await c.setMemoryStarred(id, starred)
+                  await loadMemories()
+                } catch (e) {
+                  pushError('memory', `标星失败：${(e as Error).message}`)
+                }
+              }}
+              onEdit={async (id, content, category) => {
+                try {
+                  const c = await getClient()
+                  await c.updateMemory(id, { content, category })
+                  await loadMemories()
+                } catch (e) {
+                  pushError('memory', `编辑失败：${(e as Error).message}`)
+                }
+              }}
+              onDelete={async (id) => {
+                try {
+                  const c = await getClient()
+                  await c.deleteMemory(id)
+                  await loadMemories()
+                } catch (e) {
+                  pushError('memory', `删除失败：${(e as Error).message}`)
+                }
+              }}
+              onCreate={async (input) => {
+                try {
+                  const c = await getClient()
+                  await c.createMemory({
+                    scope:       input.scope,
+                    workspaceId: input.scope === 'workspace' ? activeWorkspace()?.id : undefined,
+                    sessionId:   input.scope === 'session'   ? (activeSessionId() ?? undefined) : undefined,
+                    category:    input.category,
+                    content:     input.content,
+                    source:      'manual',
+                  })
+                  await loadMemories()
+                  showToast({ message: '已添加记忆', kind: 'success', duration: 2000 })
+                } catch (e) {
+                  pushError('memory', `添加失败：${(e as Error).message}`)
+                }
+              }}
+              onClear={async (scope) => {
+                try {
+                  const c = await getClient()
+                  const filter: { scope?: import('@maxian/sdk').MemoryScope; workspaceId?: string; sessionId?: string } = {}
+                  if (scope !== 'all') filter.scope = scope
+                  if (scope === 'workspace') filter.workspaceId = activeWorkspace()?.id
+                  if (scope === 'session') filter.sessionId = activeSessionId() ?? undefined
+                  const r = await c.clearMemories(Object.keys(filter).length > 0 ? filter : undefined)
+                  await loadMemories()
+                  showToast({ message: `已清空 ${r.removed} 条`, kind: 'success', duration: 2500 })
+                } catch (e) {
+                  pushError('memory', `清空失败：${(e as Error).message}`)
+                }
+              }}
+            />
+            {/* 变更记录面板（K10e：抽到 @maxian/ui 的 SharedFileChangesPanel） */}
             <Show when={showFileTree()}>
-              <FileTreePanel />
+              <SharedFileChangesPanel
+                files={Array.from(changedFiles().values())}
+                onClose={() => setShowFileTree(false)}
+                onOpenPreview={(p, opts) => openPreview(p, opts as any)}
+                onOpenInEditor={(p) => openInEditor(p)}
+                onRevert={(p) => revertFile(p)}
+              />
             </Show>
             {/* 文件预览面板（右侧滑入，多标签） */}
             <Show when={previewTabs().length > 0}>
-              <FilePreviewPanel />
+              <FilePreviewPanel
+                tabs={previewTabs}
+                activePath={activePreviewPath}
+                width={previewWidth}
+                diffViewMode={diffViewMode}
+                renderMarkdown={renderMarkdown}
+                setActivePath={(p) => setActivePreviewPath(p)}
+                setWidth={(w) => setPreviewWidth(w)}
+                setTabs={(updater) => setPreviewTabs(updater)}
+                setDiffViewMode={(m) => setDiffViewMode(m)}
+                closeTab={(p) => closePreviewTab(p)}
+                setTabViewMode={(p, m) => setTabViewMode(p, m)}
+                openInEditor={(p) => void openInEditor(p)}
+                revertFile={(p) => void revertFile(p)}
+                reloadPreview={(p) => void reloadPreview(p)}
+                clearAllTabs={() => { setPreviewTabs([]); setActivePreviewPath(null) }}
+              />
             </Show>
-          </Show>
+          </div>
         </div>
       </Show>
 
       {/* 键盘快捷键速查面板（⌘/） */}
       <Show when={showKeybindHelp()}>
-        <KeybindHelpModal />
+        <KeybindHelpModal
+          search={keybindSearch}
+          setSearch={setKeybindSearch}
+          onClose={() => setShowKeybindHelp(false)}
+        />
       </Show>
 
       {/* 全局命令面板（⌘P） */}
       <Show when={showCmdPalette()}>
-        <CommandPalette />
+        <GlobalCommandPalette
+          query={cmdPaletteQuery}
+          setQuery={setCmdPaletteQuery}
+          items={cmdPaletteItems}
+          idx={cmdPaletteIdx}
+          setIdx={setCmdPaletteIdx}
+          loading={cmdPaletteLoading}
+          onClose={() => setShowCmdPalette(false)}
+        />
       </Show>
 
       {/* 全局 Toast 宿主 */}
-      <ToastHost />
+      <ToastHost toasts={toasts} onDismiss={dismissToast} />
     </>
   )
 }

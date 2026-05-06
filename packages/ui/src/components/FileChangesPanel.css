@@ -1,0 +1,180 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   FileChangesPanel — K10e 抽离自 desktop styles.css
+   注：宿主可能也基于 .file-tree-panel 扩展（WorkspaceExplorerPanel / SkillsPanel），
+   故只迁移 FileChangesPanel 实际使用的样式，避开冲突。
+═══════════════════════════════════════════════════════════════════════════ */
+
+.file-tree-panel {
+	width: 280px;
+	min-width: 240px;
+	max-width: 320px;
+	background: var(--bg-subtle);
+	border-right: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	flex-shrink: 0;
+	overflow: hidden;
+}
+
+.file-tree-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 12px;
+	border-bottom: 1px solid var(--border);
+	flex-shrink: 0;
+}
+
+.file-tree-title {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.file-tree-body {
+	flex: 1;
+	overflow-y: auto;
+	padding: 6px 0;
+}
+
+.file-tree-empty {
+	padding: 24px 12px;
+	font-size: 12px;
+	color: var(--text-faint);
+	text-align: center;
+}
+
+.file-tree-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 12px;
+	cursor: default;
+	border-radius: 4px;
+	margin: 0 4px;
+	transition: background 100ms;
+}
+
+.file-tree-item:hover {
+	background: var(--bg-hover);
+}
+
+.file-status-badge {
+	font-size: 10px;
+	font-weight: 700;
+	width: 16px;
+	height: 16px;
+	border-radius: 3px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.file-status-modified {
+	background: rgba(251, 191, 36, 0.15);
+	color: #f59e0b;
+}
+
+.file-status-created {
+	background: rgba(34, 197, 94, 0.15);
+	color: #22c55e;
+}
+
+.file-status-deleted {
+	background: rgba(239, 68, 68, 0.15);
+	color: #ef4444;
+}
+
+.file-tree-item-info {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.file-tree-filename {
+	font-size: 12px;
+	color: var(--text-base);
+	font-weight: 500;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.file-tree-path {
+	font-size: 10px;
+	color: var(--text-faint);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.file-revert-btn {
+	background: none;
+	border: 1px solid var(--border-strong);
+	color: var(--text-muted);
+	font-size: 12px;
+	padding: 2px 6px;
+	border-radius: 4px;
+	cursor: pointer;
+	flex-shrink: 0;
+	opacity: 0;
+	transition: opacity 100ms, background 100ms;
+}
+
+.file-tree-item:hover .file-revert-btn {
+	opacity: 1;
+}
+
+.file-revert-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-base);
+}
+
+.file-open-btn {
+	background: none;
+	border: none;
+	color: var(--text-faint);
+	padding: 2px 4px;
+	border-radius: 4px;
+	cursor: pointer;
+	flex-shrink: 0;
+	opacity: 0;
+	transition: opacity 100ms, background 100ms, color 100ms;
+	display: flex;
+	align-items: center;
+}
+
+.file-tree-item:hover .file-open-btn {
+	opacity: 1;
+}
+
+.file-open-btn:hover {
+	background: var(--bg-hover);
+	color: var(--accent);
+}
+
+/* icon-btn 通常是宿主提供的，但若没有给个最小 fallback */
+.file-tree-header .icon-btn {
+	background: none;
+	border: none;
+	color: var(--text-faint);
+	cursor: pointer;
+	padding: 4px;
+	border-radius: 4px;
+	display: flex;
+	align-items: center;
+	transition: background 100ms, color 100ms;
+}
+
+.file-tree-header .icon-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-base);
+}

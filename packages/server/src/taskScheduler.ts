@@ -220,6 +220,50 @@ export class TaskScheduler {
 		await this.checkBatchCompletion(task.batchId);
 	}
 
+	/**
+	 * 替换 draft 批次内全部任务（仅 status='draft' 时允许）。
+	 * 用途：编辑模式保存时，把整个 tasks 列表全替换。
+	 */
+	async replaceTasks(batchId: string, tasks: CreateBatchInput['tasks']): Promise<void> {
+		const db = getDb();
+		const batch = this.loadBatch(batchId);
+		if (!batch) throw new Error(`Batch ${batchId} not found`);
+		if (batch.status !== 'draft') {
+			throw new Error(`仅草稿状态可替换任务（当前 ${batch.status}）`);
+		}
+		const txn = db.transaction(() => {
+			// 删旧任务
+			db.prepare(`DELETE FROM batch_tasks WHERE batch_id = ?`).run(batchId);
+			// 插新任务
+			const insert = db.prepare(`INSERT INTO batch_tasks
+				(id, batch_id, workspace_id, title, prompt, mode, template,
+				 position, depends_on, status, created_at, on_failure, max_retry)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+			const now = Date.now();
+			tasks.forEach((t, idx) => {
+				insert.run(
+					randomUUID(),
+					batchId,
+					t.workspaceId,
+					t.title,
+					t.prompt,
+					t.mode ?? 'code',
+					t.template ?? null,
+					idx,
+					t.dependsOn && t.dependsOn.length > 0 ? JSON.stringify(t.dependsOn) : null,
+					'queued',
+					now,
+					t.onFailure ?? null,
+					t.maxRetry ?? 3,
+				);
+			});
+			// 更新 batch.total_tasks
+			db.prepare(`UPDATE task_batches SET total_tasks = ?, updated_at = ? WHERE id = ?`)
+				.run(tasks.length, now, batchId);
+		});
+		txn();
+	}
+
 	/** 重排：传入新顺序的 taskIds 数组 */
 	async reorderTasks(batchId: string, taskIds: string[]): Promise<void> {
 		const db = getDb();

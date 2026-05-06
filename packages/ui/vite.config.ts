@@ -1,14 +1,22 @@
 /*---------------------------------------------------------------------------------------------
  *  vite.config.ts — @maxian/ui library build
  *
- *  策略：用 vite library mode + vite-plugin-solid，产出**单一 ESM bundle**：
- *    dist/index.js          — 主入口（solid-js 已 inline，可直接被任何 ESM 宿主消费）
+ *  策略：用 vite library mode + vite-plugin-solid，产出 ESM bundle：
+ *    dist/index.js          — 主入口（solid-js 作为 peer external，由宿主提供 singleton）
  *
- *  为什么 inline solid-js：
- *    vscode renderer 不解析 bare specifier（"solid-js"），必须把整个 runtime 打进 bundle。
+ *  关键决策：solid-js / solid-js/web / solid-js/store 必须 external。
  *
- *  Desktop 端虽然有自己的 solid-js 副本，但 inline 的副本只增加 ~7KB，且能确保版本一致，
- *  避免 desktop 与 IDE 端 solid 实例不一致引起的 reactive 上下文冲突。
+ *  为什么 NOT inline solid-js：
+ *    Solid 的响应式系统依赖**模块级单例状态**（Owner / Listener / Updates 等）。
+ *    如果 inline，dist 里会带一份 Solid runtime；宿主（desktop/IDE）也有自己的 Solid runtime。
+ *    两套 runtime 互不感知 → 宿主创建的 signal 在组件内 `<For>` 读不到更新，
+ *    导致 setSignal 后 UI 完全不响应（已在 desktop 端复现：终端 tab 永远渲染 0 个）。
+ *
+ *  对各形态的影响：
+ *    - Desktop（Vite）：node_modules/.pnpm/solid-js 单例 → 直接外部解析，OK。
+ *    - VS Code renderer / 码弦IDE：不解析 bare specifier 的环境，需要在该宿主侧打包时
+ *      用 importmap 或 alias 把 'solid-js' 指向打好的 vendor chunk，由宿主负责提供 runtime；
+ *      不能在本包 inline。
  *--------------------------------------------------------------------------------------------*/
 
 import { defineConfig } from 'vite';
@@ -28,7 +36,15 @@ export default defineConfig({
 		minify:      false,    // 调试期保留可读输出；上线再 minify
 		sourcemap:   true,
 		rollupOptions: {
-			external: [],        // solid-js 必须 inline（IDE 端依赖）
+			// 关键：solid-js 全家桶必须 external，由宿主提供 runtime singleton。
+			// 否则 dist 里 inline 的 Solid 与宿主的 Solid 是两套独立响应式系统，
+			// 跨边界传 signal / props 会彻底失去响应性（setSignal 后 UI 不更新）。
+			external: [
+				'solid-js',
+				'solid-js/web',
+				'solid-js/store',
+				'solid-js/h',
+			],
 			output: {
 				preserveModules: false,
 			},

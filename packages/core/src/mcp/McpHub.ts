@@ -10,6 +10,8 @@
 
 import { McpServerConfig, McpServerInfo, McpTool, McpToolCallResponse, McpResourceReadResponse } from './McpTypes.js';
 import { McpClient } from './McpClient.js';
+import { McpToolIndex } from './McpToolIndex.js';
+import type { EmbeddingService } from './embeddingService.js';
 
 export type McpHubChangeListener = (servers: McpServerInfo[]) => void;
 
@@ -26,6 +28,18 @@ export class McpHub {
 	private changeListeners: McpHubChangeListener[] = [];
 	private static readonly RETRY_BASE_DELAY_MS = 3000;
 	private static readonly RETRY_MAX_DELAY_MS = 60000;
+
+	/** B2: 工具索引 —— 所有已连接 server 的工具元数据 + 向量索引，供 mcp_tool_search 使用 */
+	private readonly _toolIndex: McpToolIndex;
+
+	constructor(opts?: { embeddingService?: EmbeddingService }) {
+		this._toolIndex = new McpToolIndex({ primary: opts?.embeddingService });
+	}
+
+	/** 获取工具索引（搜索 / 列出 / 上层调度） */
+	get toolIndex(): McpToolIndex {
+		return this._toolIndex;
+	}
 
 	/**
 	 * 获取所有服务器状态
@@ -121,6 +135,10 @@ export class McpHub {
 			};
 			this.servers.set(config.name, connected);
 			this.clearRetryState(config.name);
+			// B2: 把工具元数据塞入索引（fire-and-forget；embedding 异步算，期间索引可继续接受查询）
+			void this._toolIndex.upsertServerTools(config.name, tools).catch(err => {
+				console.warn(`[McpHub] toolIndex.upsertServerTools(${config.name}) 失败:`, err);
+			});
 			this.notifyChange();
 			return connected;
 		} catch (error: any) {
@@ -150,6 +168,8 @@ export class McpHub {
 		this.servers.delete(name);
 		this.clients.delete(name);
 		this.retryStates.delete(name);
+		// B2: 从工具索引中移除该 server 的所有条目（防止 mcp_tool_search 召回已断开的工具）
+		this._toolIndex.removeServer(name);
 		this.notifyChange();
 	}
 

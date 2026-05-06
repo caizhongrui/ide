@@ -72,7 +72,10 @@ const batchSubscribers = new Map<string, Set<BatchEventSubscriber>>();   // batc
 export function emitBatchEventToSubscribers(batchId: string, event: BatchEvent): void {
 	const set = batchSubscribers.get(batchId);
 	if (!set) return;
-	for (const sub of set) {
+	// snapshot：和 SessionManager.emitEvent 同款防御，避免迭代期间被 add/delete 干扰。
+	// 这里 sub() 是 sync 写 SSE chunk，本身不会触发新 subscribe，但保留快照习惯统一风格。
+	const subs = Array.from(set);
+	for (const sub of subs) {
 		try { sub(event); } catch (err) {
 			console.warn('[BatchRoutes] subscriber error:', err);
 		}
@@ -156,6 +159,30 @@ export function BatchRoutes(scheduler: TaskScheduler) {
 			return c.json({ ok: true, tasks: scheduler.listTasks(id) });
 		} catch (err) {
 			return c.json({ error: (err as Error).message }, 500);
+		}
+	});
+
+	// ── 替换 draft 批次内所有任务（编辑保存用） ────────────────────────
+	const ReplaceTasksSchema = z.object({
+		tasks: z.array(z.object({
+			workspaceId:  z.string().min(1),
+			title:        z.string().min(1).max(200),
+			prompt:       z.string().min(1),
+			mode:         z.string().optional(),
+			template:     z.string().optional(),
+			dependsOn:    z.array(z.string()).optional(),
+			onFailure:    OnFailureSchema.optional(),
+			maxRetry:     z.number().int().min(0).max(10).optional(),
+		})).min(1),
+	});
+	app.post('/batches/:id/replace-tasks', zValidator('json', ReplaceTasksSchema), async (c) => {
+		const id = c.req.param('id');
+		const { tasks } = c.req.valid('json');
+		try {
+			await scheduler.replaceTasks(id, tasks);
+			return c.json({ ok: true, tasks: scheduler.listTasks(id) });
+		} catch (err) {
+			return c.json({ error: (err as Error).message }, 400);
 		}
 	});
 

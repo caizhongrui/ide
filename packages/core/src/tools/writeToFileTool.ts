@@ -32,9 +32,8 @@ export async function writeToFileTool(
 			? filePath
 			: path.resolve(ctx.workspacePath, filePath);
 
-		// Check if file exists
-		const exists = pf.existsSync(absolutePath);
-		const fileExists = exists;
+		// Check if file exists (K8e: async)
+		const fileExists = await pf.exists(absolutePath);
 
 		// Pre-process content (remove markdown code blocks if present)
 		if (content.startsWith('```')) {
@@ -44,14 +43,8 @@ export async function writeToFileTool(
 			content = content.split('\n').slice(0, -1).join('\n');
 		}
 
-		// Create directory if it doesn't exist
-		const dir = path.dirname(absolutePath);
-		if (!pf.existsSync(dir)) {
-			pf.mkdirSync(dir, { recursive: true });
-		}
-
-		// Write file
-		pf.writeFileSync(absolutePath, content, 'utf-8');
+		// Write file (K8e: async; pf.writeFile 已经会自动 mkdir parent)
+		await pf.writeFile(absolutePath, content, 'utf-8');
 
 		// Track file modification
 		ctx.fileContextTracker.trackFileWrite(absolutePath, 'roo_edited');
@@ -61,7 +54,7 @@ export async function writeToFileTool(
 		if (ctx.sessionId) {
 			try {
 				const { FileTime } = await import('../file/FileTime.js');
-				FileTime.read(ctx.sessionId, absolutePath);
+				await FileTime.read(ctx.sessionId, absolutePath);
 			} catch { /* ignore */ }
 		}
 

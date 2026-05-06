@@ -32,6 +32,16 @@ export interface ITerminal {
 	 * 中断正在执行的命令（通过 PID 或 token）。
 	 */
 	cancel(token: string): Promise<void>;
+
+	/**
+	 * 后台启动命令（fire-and-forget）。
+	 * 适用于：bashTool 的 background 模式，启动 daemon / watcher 之类立即返回。
+	 *
+	 * @param command 完整命令
+	 * @param options 执行选项（cwd / env 等；timeoutMs/maxOutput* 不适用）
+	 * @returns 子进程 PID（启动失败时抛错）
+	 */
+	executeBackground?(command: string, options?: ExecuteOptions): Promise<{ pid: number }>;
 }
 
 export interface ExecuteOptions {

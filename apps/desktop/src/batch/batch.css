@@ -2,10 +2,36 @@
  *  批量任务面板样式（v0.2.16+）
  * ════════════════════════════════════════════════════════════════════════ */
 
+/* 批次模式：main 占满全宽（外层 .main-batch-fullwidth 确保不被 sidebar 推挤） */
+.main-batch-fullwidth {
+	flex: 1;
+	width: 100%;
+	display: flex;
+}
+
+.batch-panel-wrap {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	background: var(--bg-base);
+	overflow: hidden;
+}
+
+/* 顶部三段式工具栏（替代原 sidebar header） */
+.batch-top-toolbar {
+	display: flex;
+	align-items: center;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-subtle);
+	flex-shrink: 0;
+}
+
 .batch-panel {
 	display: flex;
-	height: 100%;
-	background: var(--bg-base);
+	flex: 1;
+	min-height: 0;
 	overflow: hidden;
 }
 
@@ -223,6 +249,16 @@
 	margin-top: 8px;
 }
 
+.batch-action-error {
+	margin-top: 8px;
+	padding: 8px 12px;
+	background: rgba(239, 68, 68, 0.1);
+	border: 1px solid rgba(239, 68, 68, 0.3);
+	border-radius: 4px;
+	color: #ef4444;
+	font-size: 12px;
+}
+
 /* ── 任务表格 ─────────────────────────────────────────────────── */
 .batch-task-table {
 	flex: 1;
@@ -328,6 +364,24 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+.task-title-edit {
+	width: 100%;
+	padding: 3px 6px;
+	font-size: 11.5px;
+	font-family: inherit;
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	background: var(--bg-base);
+	color: var(--text-base);
+	box-sizing: border-box;
+}
+.task-title-edit:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+.task-title-edit:hover {
+	border-color: var(--border-strong, var(--accent));
 }
 .task-failure-reason {
 	font-size: 10.5px;
@@ -553,52 +607,154 @@
 }
 .form-import-actions { display: flex; gap: 6px; }
 
-.form-task-row {
-	display: flex;
-	gap: 8px;
-	padding: 10px;
+/* ── 任务卡片（重设计 v2，更整齐） ─────────────────────────────── */
+.form-task-card {
 	background: var(--bg-subtle);
-	border-radius: 6px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	padding: 10px 12px 12px;
+	margin-bottom: 10px;
+	transition: border-color 120ms;
+}
+.form-task-card:hover { border-color: var(--border-strong, var(--border)); }
+.form-task-card:focus-within { border-color: var(--accent); }
+
+.form-task-card-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	margin-bottom: 8px;
 }
-.form-task-num {
-	width: 24px;
+.form-task-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 22px;
+	height: 22px;
+	padding: 0 6px;
+	border-radius: 11px;
+	background: var(--accent);
+	color: #fff;
+	font-size: 10.5px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+.form-task-ws-pill {
 	font-size: 11px;
-	color: var(--text-faint);
-	padding-top: 6px;
+	color: var(--text-muted);
+	padding: 3px 8px;
+	border-radius: 10px;
+	background: rgba(99, 102, 241, 0.08);
+	border: 1px solid rgba(99, 102, 241, 0.18);
 }
-.form-task-fields { flex: 1; }
-.form-task-row1 {
-	display: flex;
-	gap: 6px;
-	margin-bottom: 6px;
-}
-.form-task-row1 select,
-.form-task-row1 input {
-	padding: 4px 8px;
-	font-size: 12px;
-	border: 1px solid var(--border);
+.form-task-spacer { flex: 1; }
+.form-task-delete {
+	width: 26px;
+	height: 26px;
 	border-radius: 4px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--text-faint);
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	transition: all 120ms;
+}
+.form-task-delete:hover {
+	color: #ef4444;
+	border-color: rgba(239, 68, 68, 0.3);
+	background: rgba(239, 68, 68, 0.08);
+}
+
+.form-task-title {
+	width: 100%;
+	padding: 7px 10px;
+	font-size: 13px;
+	font-weight: 500;
+	border: 1px solid var(--border);
+	border-radius: 5px;
 	background: var(--bg-base);
 	color: var(--text-base);
+	margin-bottom: 6px;
+	font-family: inherit;
+	box-sizing: border-box;
 }
-.form-task-row1 select { flex: 0 0 auto; min-width: 100px; }
-.form-task-row1 input { flex: 1; min-width: 100px; }
-.form-task-row1 .btn-mini-danger {
-	font-size: 14px;
-	padding: 0 8px;
-	flex-shrink: 0;
+.form-task-title:focus {
+	outline: none;
+	border-color: var(--accent);
 }
+
 .form-task-prompt {
 	width: 100%;
+	box-sizing: border-box;
 	font-family: inherit;
 	font-size: 12px;
-	padding: 6px 8px;
+	line-height: 1.55;
+	padding: 8px 10px;
 	border: 1px solid var(--border);
-	border-radius: 4px;
+	border-radius: 5px;
 	background: var(--bg-base);
 	color: var(--text-base);
 	resize: vertical;
+	min-height: 60px;
+	margin-bottom: 8px;
+}
+.form-task-prompt:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+.form-task-options {
+	display: flex;
+	gap: 16px;
+	flex-wrap: wrap;
+}
+.form-task-opt {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	color: var(--text-muted);
+}
+.form-task-opt-label {
+	font-size: 10.5px;
+	color: var(--text-faint);
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+}
+
+/* 自定义 select 样式（替代 native 默认丑陋样式） */
+.form-task-opt select,
+.form-row select,
+.form-group select,
+.col-on-failure select {
+	-webkit-appearance: none;
+	-moz-appearance: none;
+	appearance: none;
+	padding: 4px 24px 4px 8px;
+	font-size: 11.5px;
+	font-family: inherit;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	background: var(--bg-base);
+	color: var(--text-base);
+	cursor: pointer;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+	background-repeat: no-repeat;
+	background-position: right 6px center;
+	background-size: 10px;
+	transition: border-color 120ms;
+}
+.form-task-opt select:hover,
+.form-row select:hover,
+.col-on-failure select:hover {
+	border-color: var(--accent);
+}
+.form-task-opt select:focus,
+.form-row select:focus {
+	outline: none;
+	border-color: var(--accent);
 }
 
 .form-error {

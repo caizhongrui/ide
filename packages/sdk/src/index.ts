@@ -140,6 +140,100 @@ export interface HealthResult {
 	uptime: number;
 }
 
+/* ──────────── B3: Auto-Memory 类型 ──────────── */
+
+export type MemoryScope    = 'global' | 'workspace' | 'session';
+export type MemoryCategory = 'preference' | 'convention' | 'fact' | 'style' | 'tech-stack' | 'other';
+export type MemorySource   = 'auto' | 'manual';
+
+export interface MemoryRecord {
+	id:             string;
+	scope:          MemoryScope;
+	workspaceId?:   string;
+	sessionId?:     string;
+	category:       MemoryCategory;
+	content:        string;
+	source:         MemorySource;
+	starred:        boolean;
+	createdAt:      number;
+	lastAccessedAt: number;
+	accessCount:    number;
+}
+
+/* ──────────── B1: Subagent 类型 ──────────── */
+
+export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface SubagentRecord {
+	taskId:            string;
+	parentSessionId:   string;
+	subagentSessionId: string;
+	subagentType:      string;
+	description?:      string;
+	isolation:         'inherit' | 'worktree';
+	background:        boolean;
+	status:            SubagentStatus;
+	createdAt:         number;
+	startedAt?:        number;
+	finishedAt?:       number;
+	error?:            string;
+	output?:           string;
+	worktreePath?:     string;
+	worktreeBranch?:   string;
+}
+
+/* ──────────── B4: Codebase Index 类型 ──────────── */
+
+export type CodebaseSymbolKind = 'function' | 'method' | 'class' | 'interface' | 'type' | 'const' | 'export' | 'other';
+
+export interface CodebaseFileNode {
+	path:    string;
+	purpose: string;
+	loc:     number;
+	mtime:   number;
+}
+
+export interface CodebaseApiEntry {
+	id?:         number;
+	filePath:    string;
+	symbolName:  string;
+	symbolKind:  CodebaseSymbolKind;
+	signature?:  string;
+	docstring?:  string;
+	startLine:   number;
+	endLine:     number;
+}
+
+export interface CodebaseModuleSummary {
+	dirPath:  string;
+	summary:  string;
+	keyFiles: string[];
+}
+
+export interface CodebaseDepsEntry {
+	from:  string;
+	to:    string;
+	count: number;
+}
+
+export interface CodebaseIndexSnapshot {
+	workspaceId:    string;
+	workspacePath:  string;
+	lastIndexedAt:  number;
+	fileCount:      number;
+	apiCount:       number;
+	moduleCount:    number;
+	architecture?:  string;
+	tree:           CodebaseFileNode[];
+	modules:        CodebaseModuleSummary[];
+	deps:           CodebaseDepsEntry[];
+}
+
+export interface CodebaseSearchHit {
+	entry: CodebaseApiEntry;
+	score: number;
+}
+
 export class MaxianClient {
 	private readonly baseUrl: string;
 	private readonly auth?: string;
@@ -598,6 +692,278 @@ export class MaxianClient {
 		return this.request('POST', '/tools/execute', opts);
 	}
 
+	/* ──────────── B2: MCP 服务器配置 ──────────── */
+
+	/**
+	 * 拉取当前 sidecar 持有的 MCP 配置 + 各服务器的运行时连接状态。
+	 */
+	async getMcpConfig(): Promise<{
+		configs: Array<{ name: string; url: string; headers?: Record<string, string>; enabled: boolean; description?: string }>;
+		runtime: Array<{ name: string; isConnected: boolean; isConnecting: boolean; error?: string; toolCount: number; resourceCount: number }>;
+		toolIndexSize: number;
+	}> {
+		return this.request('GET', '/config/mcp');
+	}
+
+	/**
+	 * 全量替换 MCP 配置（语义：桌面 settings 保存按钮）。
+	 * sidecar 收到后会断开旧连接 + 立即重连所有 enabled 的 server，并重建工具索引。
+	 */
+	async setMcpConfig(configs: Array<{
+		name: string;
+		url: string;
+		headers?: Record<string, string>;
+		enabled: boolean;
+		description?: string;
+	}>): Promise<{
+		ok: boolean;
+		added: string[];
+		updated: string[];
+		removed: string[];
+		runtime: Array<{ name: string; isConnected: boolean; isConnecting: boolean; error?: string; toolCount: number }>;
+	}> {
+		return this.request('PUT', '/config/mcp', { configs });
+	}
+
+	/** 列出当前已索引的全部 MCP 工具（用于桌面 UI 显示） */
+	async listMcpTools(): Promise<{
+		total: number;
+		tools: Array<{
+			toolId: string;
+			serverName: string;
+			rawToolName: string;
+			description: string;
+			inputSchema?: unknown;
+		}>;
+	}> {
+		return this.request('GET', '/config/mcp/tools');
+	}
+
+	/** 在 MCP 工具索引中搜索（与 mcp_tool_search 元工具同源） */
+	async searchMcpTools(query: string, opts?: { max?: number; servers?: string[] }): Promise<{
+		hits: Array<{ toolId: string; serverName: string; rawToolName: string; description: string; score: number }>;
+	}> {
+		const max = opts?.max ?? 10;
+		const servers = opts?.servers?.join(',');
+		const qs = new URLSearchParams({ q: query, max: String(max) });
+		if (servers) qs.set('servers', servers);
+		return this.request('GET', `/config/mcp/tools/search?${qs.toString()}`);
+	}
+
+	/* ──────────── B1: Sub-agents 编排 ──────────── */
+
+	/**
+	 * 列出某 parent session 派出的所有子代理（含 background + 已完成）
+	 */
+	async listSubagents(opts?: { parentSessionId?: string; status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' }): Promise<{
+		records: Array<{
+			taskId:           string;
+			parentSessionId:  string;
+			subagentSessionId: string;
+			subagentType:     string;
+			description?:     string;
+			isolation:        'inherit' | 'worktree';
+			background:       boolean;
+			status:           'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+			createdAt:        number;
+			startedAt?:       number;
+			finishedAt?:      number;
+			error?:           string;
+			output?:          string;
+			worktreePath?:    string;
+			worktreeBranch?:  string;
+		}>;
+	}> {
+		const qs = new URLSearchParams();
+		if (opts?.parentSessionId) qs.set('parent', opts.parentSessionId);
+		if (opts?.status) qs.set('status', opts.status);
+		const suffix = qs.toString() ? `?${qs.toString()}` : '';
+		return this.request('GET', `/subagents${suffix}`);
+	}
+
+	/** 查询单个子代理状态 */
+	async getSubagent(taskId: string): Promise<{
+		taskId:           string;
+		status:           'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+		output?:          string;
+		error?:           string;
+		startedAt?:       number;
+		finishedAt?:      number;
+	}> {
+		return this.request('GET', `/subagents/${taskId}`);
+	}
+
+	/** 取消单个子代理（写入 cancelled 信号；子代理 loop 下一轮检测到会退出） */
+	async cancelSubagent(taskId: string): Promise<{ ok: boolean }> {
+		return this.request('POST', `/subagents/${taskId}/cancel`);
+	}
+
+	/**
+	 * 订阅子代理事件流（任务编排面板用）。
+	 * 返回 close() 用于断开。
+	 */
+	subscribeSubagentEvents(opts?: {
+		onUpdate?: (record: {
+			taskId:            string;
+			parentSessionId:   string;
+			subagentSessionId: string;
+			subagentType:      string;
+			description?:      string;
+			isolation:         'inherit' | 'worktree';
+			background:        boolean;
+			status:            'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+			createdAt:         number;
+			startedAt?:        number;
+			finishedAt?:       number;
+			error?:            string;
+			output?:           string;
+			worktreePath?:     string;
+			worktreeBranch?:   string;
+		}) => void;
+	}): { close: () => void } {
+		const url = `${this.baseUrl}/subagents/events`;
+		const finalUrl = this.authQuery
+			? `${url}?auth=${encodeURIComponent(this.authQuery)}`
+			: url;
+		const es = new EventSource(finalUrl);
+		const handlers: Array<[string, (e: MessageEvent) => void]> = [];
+		const bind = (evt: string, fn: ((e: any) => void) | undefined) => {
+			if (!fn) return;
+			const wrap = (e: MessageEvent) => { try { fn(JSON.parse(e.data)) } catch { /* */ } };
+			es.addEventListener(evt, wrap as EventListener);
+			handlers.push([evt, wrap]);
+		};
+		bind('task-update', opts?.onUpdate);
+		return {
+			close: () => {
+				for (const [evt, wrap] of handlers) es.removeEventListener(evt, wrap as EventListener);
+				es.close();
+			},
+		};
+	}
+
+	/* ──────────── B3: Auto-Memory ──────────── */
+
+	async listMemories(filter?: {
+		scope?:       MemoryScope;
+		workspaceId?: string;
+		sessionId?:   string;
+	}): Promise<{ records: MemoryRecord[] }> {
+		const qs = new URLSearchParams();
+		if (filter?.scope)       qs.set('scope', filter.scope);
+		if (filter?.workspaceId) qs.set('workspace_id', filter.workspaceId);
+		if (filter?.sessionId)   qs.set('session_id', filter.sessionId);
+		const tail = qs.size > 0 ? `?${qs.toString()}` : '';
+		return this.request('GET', `/memory${tail}`);
+	}
+
+	async getMemory(id: string): Promise<{ record: MemoryRecord }> {
+		return this.request('GET', `/memory/${id}`);
+	}
+
+	async createMemory(input: {
+		scope:        MemoryScope;
+		workspaceId?: string;
+		sessionId?:   string;
+		category:     MemoryCategory;
+		content:      string;
+		source?:      'auto' | 'manual';
+		starred?:     boolean;
+	}): Promise<{ record: MemoryRecord }> {
+		return this.request('POST', `/memory`, input);
+	}
+
+	async updateMemory(id: string, patch: { content?: string; category?: MemoryCategory }): Promise<{ record: MemoryRecord }> {
+		return this.request('PUT', `/memory/${id}`, patch);
+	}
+
+	async setMemoryStarred(id: string, starred: boolean): Promise<{ record: MemoryRecord }> {
+		return this.request('PATCH', `/memory/${id}/star`, { starred });
+	}
+
+	async deleteMemory(id: string): Promise<{ ok: boolean }> {
+		return this.request('DELETE', `/memory/${id}`);
+	}
+
+	async searchMemories(input: {
+		query:        string;
+		scope?:       MemoryScope;
+		workspaceId?: string;
+		sessionId?:   string;
+		category?:    MemoryCategory;
+		maxResults?:  number;
+		minScore?:    number;
+	}): Promise<{ hits: Array<{ record: MemoryRecord; score: number }> }> {
+		return this.request('POST', `/memory/search`, input);
+	}
+
+	async clearMemories(filter?: { scope?: MemoryScope; workspaceId?: string; sessionId?: string }): Promise<{ removed: number }> {
+		return this.request('POST', `/memory/clear`, filter ?? {});
+	}
+
+	/* ──────────── B4: Codebase Index ──────────── */
+
+	async getCodebaseSnapshot(workspaceId: string): Promise<{ snapshot: CodebaseIndexSnapshot | null }> {
+		return this.request('GET', `/codebase/${encodeURIComponent(workspaceId)}`);
+	}
+
+	async refreshCodebaseIndex(workspaceId: string, opts?: { incremental?: boolean }): Promise<{
+		ok:         boolean;
+		snapshot?:  CodebaseIndexSnapshot;
+		durationMs?: number;
+		error?:     string;
+	}> {
+		return this.request('POST', `/codebase/${encodeURIComponent(workspaceId)}/refresh`, {
+			incremental: opts?.incremental !== false,
+		});
+	}
+
+	/**
+	 * SSE 进度版刷新；调用方拿到 EventSource 自己监听 progress / done / error 事件。
+	 * 返回的 close() 用于提前断开（用户取消）。
+	 */
+	subscribeCodebaseRefresh(workspaceId: string, opts?: {
+		incremental?: boolean;
+		onStart?:    (e: { workspaceId: string; incremental: boolean; startedAt: number }) => void;
+		onProgress?: (e: { message: string; ts: number }) => void;
+		onDone?:     (e: { ok: boolean; snapshot: CodebaseIndexSnapshot; durationMs: number }) => void;
+		onError?:    (e: { message: string }) => void;
+	}): { close: () => void } {
+		const inc = opts?.incremental !== false;
+		const url = `${this.baseUrl}/codebase/${encodeURIComponent(workspaceId)}/refresh/events?incremental=${inc}`;
+		// EventSource 不支持自定义 header 传 Basic Auth；走 querystring auth 兜底
+		const sep = url.includes('?') ? '&' : '?';
+		const finalUrl = this.authQuery
+			? `${url}${sep}auth=${encodeURIComponent(this.authQuery)}`
+			: url;
+		const es = new EventSource(finalUrl);
+		const handlers: Array<[string, (e: MessageEvent) => void]> = [];
+		const bind = (evt: string, fn: ((e: any) => void) | undefined) => {
+			if (!fn) return;
+			const wrap = (e: MessageEvent) => { try { fn(JSON.parse(e.data)) } catch { /* */ } };
+			es.addEventListener(evt, wrap as EventListener);
+			handlers.push([evt, wrap]);
+		};
+		bind('start', opts?.onStart);
+		bind('progress', opts?.onProgress);
+		bind('done', opts?.onDone);
+		bind('error', opts?.onError);
+		return {
+			close: () => {
+				for (const [evt, wrap] of handlers) es.removeEventListener(evt, wrap as EventListener);
+				es.close();
+			},
+		};
+	}
+
+	async searchCodebase(workspaceId: string, query: string, maxResults = 20): Promise<{ hits: CodebaseSearchHit[] }> {
+		return this.request('POST', `/codebase/${encodeURIComponent(workspaceId)}/search`, { query, maxResults });
+	}
+
+	async deleteCodebaseIndex(workspaceId: string): Promise<{ ok: boolean }> {
+		return this.request('DELETE', `/codebase/${encodeURIComponent(workspaceId)}`);
+	}
+
 	/* ──────────── 批量任务（v0.2.16+）──────────── */
 
 	async createBatch(input: CreateBatchInput): Promise<{ batch: TaskBatch }> {
@@ -630,6 +996,23 @@ export class MaxianClient {
 
 	async reorderBatchTasks(batchId: string, taskIds: string[]): Promise<{ ok: boolean; tasks: BatchTask[] }> {
 		return this.request('PATCH', `/batches/${batchId}/reorder`, { taskIds });
+	}
+
+	/** 仅 draft 批次：替换所有任务（编辑保存用） */
+	async replaceBatchTasks(
+		batchId: string,
+		tasks: Array<{
+			workspaceId:  string;
+			title:        string;
+			prompt:       string;
+			mode?:        string;
+			template?:    string;
+			dependsOn?:   string[];
+			onFailure?:   OnFailureStrategy;
+			maxRetry?:    number;
+		}>,
+	): Promise<{ ok: boolean; tasks: BatchTask[] }> {
+		return this.request('POST', `/batches/${batchId}/replace-tasks`, { tasks });
 	}
 
 	async deleteBatch(id: string): Promise<{ ok: boolean }> {

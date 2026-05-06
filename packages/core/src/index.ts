@@ -29,6 +29,29 @@ export type {
 	IFileContextTracker,
 } from './tools/IToolContext.js';
 
+// ─── K9-3：editTool / multieditTool 顶层导出（IDE openEditPreviewDiff 预检使用） ──
+export {
+	executeEdit,
+	validateEditParams,
+	formatEditResponse,
+	EDIT_TOOL_CONFIG,
+	EDIT_TOOL_DESCRIPTION,
+	EDIT_TOOL_SCHEMA,
+} from './tools/editTool.js';
+export type {
+	EditParams,
+	EditResult,
+} from './tools/editTool.js';
+export {
+	executeMultiedit,
+	formatMultieditResponse,
+	MULTIEDIT_CONFIG,
+} from './tools/multieditTool.js';
+export type {
+	EditOperation,
+	MultieditResult,
+} from './tools/multieditTool.js';
+
 // ─── 共享类型 ────────────────────────────────────────────
 export * from './types/index.js';
 export { CancellationTokenSource, Emitter } from './types/cancellation.js';

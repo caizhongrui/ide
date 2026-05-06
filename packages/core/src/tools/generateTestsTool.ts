@@ -10,7 +10,7 @@
  * 工具本身负责读取文件、检测语言、推导测试路径，Agent根据返回内容调用write_to_file生成测试。
  */
 
-import * as path from 'node:path';
+import * as path from 'path';
 import type { ToolResponse } from '../types/toolTypes.js';
 
 /** 文件最大读取大小（1MB） */

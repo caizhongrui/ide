@@ -8,7 +8,7 @@
 
 import { Emitter, Event } from '../types/cancellation.js';
 import { Disposable } from '../types/lifecycle.js';
-import * as path from 'node:path';
+import * as path from 'path';
 import { IApiHandler, MessageParam, ToolDefinition, ContentBlock, ToolResultContentBlock, StreamChunk } from '../api/types.js';
 import { IToolExecutor, ToolExecutionResult } from '../tools/toolExecutor.js';
 import { ToolName, toolNames as ALL_TOOL_NAMES } from '../types/toolTypes.js';

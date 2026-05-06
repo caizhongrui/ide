@@ -7,17 +7,19 @@
  *  当用户给出的 path 不存在时，提供"你是否要找…"的模糊匹配建议。
  *  完全平台无关 —— 通过 `ToolFs` 接口（platformFs(ctx)）访问文件系统。
  *
+ *  K8e: 已异步化；调用方需 `await`。
+ *
  *  使用：
  *  ```ts
  *  const fs = platformFs(ctx);
- *  const suggestions = getPathSuggestions(fs, absolutePath);
+ *  const suggestions = await getPathSuggestions(fs, absolutePath);
  *  if (suggestions.length > 0) {
  *      return `错误: 文件不存在\n路径: ${absolutePath}\n\n你是否要找:\n${suggestions.map(s => `  - ${s}`).join('\n')}`;
  *  }
  *  ```
  *--------------------------------------------------------------------------------------------*/
 
-import * as path from 'node:path';
+import * as path from 'path';
 import { distance as levenshteinDistance } from './levenshtein.js';
 import type { ToolFs } from '../tools/platformFs.js';
 
@@ -26,17 +28,17 @@ import type { ToolFs } from '../tools/platformFs.js';
  *  - getSimilarFiles 在同目录下做模糊匹配
  *  - getSimilarPathVariants 沿父级路径回溯做分段模糊匹配
  */
-export function getPathSuggestions(
+export async function getPathSuggestions(
 	fs:              ToolFs,
 	targetPath:      string,
 	maxSuggestions   = 3,
-): string[] {
+): Promise<string[]> {
 	const suggestions = new Set<string>();
 
-	for (const s of getSimilarFiles(fs, targetPath, maxSuggestions)) {
+	for (const s of await getSimilarFiles(fs, targetPath, maxSuggestions)) {
 		suggestions.add(s);
 	}
-	for (const s of getSimilarPathVariants(fs, targetPath, maxSuggestions)) {
+	for (const s of await getSimilarPathVariants(fs, targetPath, maxSuggestions)) {
 		suggestions.add(s);
 	}
 
@@ -48,31 +50,27 @@ export function getPathSuggestions(
  *  - 文件名包含/被包含 OR
  *  - Levenshtein 距离 ≤ max(2, 30% 长度)
  */
-export function getSimilarFiles(
+export async function getSimilarFiles(
 	fs:              ToolFs,
 	targetPath:      string,
 	maxSuggestions   = 3,
-): string[] {
+): Promise<string[]> {
 	try {
 		const dirPath  = path.dirname(targetPath);
 		const baseName = path.basename(targetPath).toLowerCase();
 
-		if (!fs.existsSync(dirPath)) return [];
+		if (!(await fs.exists(dirPath))) return [];
 
 		let stat;
-		try { stat = fs.statSync(dirPath); } catch { return []; }
+		try { stat = await fs.stat(dirPath); } catch { return []; }
 		if (!stat.isDirectory) return [];
 
-		const entries = fs.readdirSync(dirPath, { withFileTypes: true }) as Array<{
-			name:        string;
-			isDirectory: () => boolean;
-			isFile:      () => boolean;
-		}>;
+		const entries = await fs.listFiles(dirPath);
 
-		// 仅文件
+		// 仅文件（非目录、非符号链接）
 		const siblings = entries
-			.filter(e => typeof e.isDirectory === 'function' ? !e.isDirectory() : true)
-			.map(e => e.name);
+			.filter((e) => !e.isDirectory)
+			.map((e) => e.name);
 
 		const matches = siblings
 			.filter(name => {
@@ -100,16 +98,16 @@ export function getSimilarFiles(
  *   - 在 /repo/src 下匹配 fooo.ts → 找到 foo.ts
  *   - 返回 ['/repo/src/foo.ts']
  */
-export function getSimilarPathVariants(
+export async function getSimilarPathVariants(
 	fs:              ToolFs,
 	targetPath:      string,
 	maxSuggestions   = 3,
-): string[] {
+): Promise<string[]> {
 	try {
 		let probePath              = targetPath;
 		const missingSegments: string[] = [];
 
-		while (!fs.existsSync(probePath)) {
+		while (!(await fs.exists(probePath))) {
 			const currentSegment = path.basename(probePath);
 			const parentPath     = path.dirname(probePath);
 			if (!currentSegment || !parentPath || parentPath === probePath) {
@@ -131,14 +129,11 @@ export function getSimilarPathVariants(
 			for (const candidateBase of candidates) {
 				let entries;
 				try {
-					entries = fs.readdirSync(candidateBase, { withFileTypes: true }) as Array<{
-						name:        string;
-						isDirectory: () => boolean;
-					}>;
+					entries = await fs.listFiles(candidateBase);
 				} catch { continue; }
 
 				const matches = entries
-					.filter(child => isLastSegment || (typeof child.isDirectory === 'function' ? child.isDirectory() : false))
+					.filter(child => isLastSegment || child.isDirectory)
 					.filter(child => {
 						const childName = child.name.toLowerCase();
 						return childName.includes(expectedSegment)
@@ -158,7 +153,7 @@ export function getSimilarPathVariants(
 
 		const resolved: string[] = [];
 		for (const c of candidates) {
-			if (fs.existsSync(c)) resolved.push(c);
+			if (await fs.exists(c)) resolved.push(c);
 		}
 		return resolved.slice(0, maxSuggestions);
 	} catch {

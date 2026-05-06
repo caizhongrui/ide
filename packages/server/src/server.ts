@@ -21,6 +21,9 @@ import { HealthRoutes } from './routes/health.js';
 import { SessionRoutes } from './routes/session.js';
 import { WorkspaceRoutes } from './routes/workspace.js';
 import { ConfigRoutes } from './routes/config.js';
+import { SubagentRoutes } from './routes/subagent.js';
+import { MemoryRoutes } from './routes/memory.js';
+import { CodebaseRoutes } from './routes/codebase.js';
 import { ToolRoutes } from './routes/tool.js';
 import { AuthRoutes, type AiRuntimeConfig, type SetAiConfigFn } from './routes/auth.js';
 import { BatchRoutes, emitBatchEventToSubscribers } from './routes/batches.js';
@@ -125,9 +128,12 @@ export function createServer(
 	app.route('/', SessionRoutes(sm));
 	app.route('/', WorkspaceRoutes(wm));
 	app.route('/', ToolRoutes(opts.toolExecutor));
-	app.route('/', ConfigRoutes(opts.config));
+	app.route('/', ConfigRoutes(opts.config, sm));
 	app.route('/', AuthRoutes(setAiConfig, getAiConfig));
 	app.route('/', BatchRoutes(taskScheduler));
+	app.route('/', SubagentRoutes(sm.subagentManager));
+	app.route('/', MemoryRoutes(sm.memoryStore));
+	app.route('/', CodebaseRoutes(sm.codebaseIndex, wm));
 
 	return {
 		app, sessionManager: sm, workspaceManager: wm, taskScheduler,

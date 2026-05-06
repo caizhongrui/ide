@@ -15,3 +15,34 @@ export { MessageBubble, type MessageBubbleProps, type MessageActions } from './M
 export { ToolCallCard,  type ToolCallCardProps, type ToolRenderRegistry } from './ToolCallCard.js';
 export { ToolBatchCard, type ToolBatchCardProps } from './ToolBatchCard.js';
 export { EditDiffView } from './EditDiffView.js';
+
+// K10b
+export { TerminalPanel, type TerminalPanelProps, type TerminalTab } from './TerminalPanel.js';
+
+// K10c
+export { TokenUsageBar, type TokenUsageBarProps } from './TokenUsageBar.js';
+
+// K10d
+export {
+	CommandPalette,
+	MentionDropdown,
+	type CommandPaletteProps,
+	type MentionDropdownProps,
+	type SlashCommandItem,
+	type PaletteRect,
+} from './CommandPalette.js';
+
+// K10e
+export {
+	FileChangesPanel,
+	type FileChangesPanelProps,
+	type FileChangeEntry,
+} from './FileChangesPanel.js';
+
+// K10f
+export {
+	DiffViewer,
+	computeUnifiedDiff,
+	type DiffViewerProps,
+	type DiffLine,
+} from './DiffViewer.js';

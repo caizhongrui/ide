@@ -81,34 +81,17 @@ export interface IFileSystem {
 	 */
 	resolvePath(path: string): string;
 
-	// ── 可选的同步方法（K8 N1）────────────────────────────────────
-	// 用途：让 core/tools 在 Node 形态下不必把整条调用链 async 化。
-	// Web / IDEA 等无原生同步 fs 的形态可以**不实现**这些方法，
-	// 工具内 platformFs helper 会自动降级到内置 fs（理想状态是工具
-	// 后续异步化后即便 fallback 也不再需要，作为下一阶段独立任务）。
-
-	/** 同步读文本文件（可选） */
-	readFileSync?(path: string, encoding?: BufferEncoding): string;
-	/** 同步写文本文件（可选） */
-	writeFileSync?(path: string, content: string, encoding?: BufferEncoding): void;
-	/** 同步判断路径是否存在（可选） */
-	existsSync?(path: string): boolean;
-	/** 同步获取文件元信息（可选） */
-	statSync?(path: string): FileStat;
-	/** 同步创建目录（可选；recursive 默认 true） */
-	mkdirSync?(path: string, opts?: { recursive?: boolean }): void;
-	/** 同步列目录条目（可选） */
-	readdirSync?(path: string, opts?: { withFileTypes?: boolean }): string[] | FileEntry[];
-	/** 同步删除文件（可选） */
-	unlinkSync?(path: string): void;
-
-	// ── K8c: 收尾用的额外可选 sync 方法 ─────────────────────────
-	/** 同步获取文件元信息（不解符号链接）（可选） */
-	lstatSync?(path: string): FileStat;
-	/** 同步解析符号链接（可选） */
-	realpathSync?(path: string): string;
-	/** 同步读取文件为二进制（可选；用于图片等） */
-	readBinaryFileSync?(path: string): Uint8Array;
+	// ── K8e（已完成）：sync API 全数下线 ─────────────────────────
+	// 历史背景：N1 阶段曾增设可选的 *Sync 镜像方法（readFileSync? 等），让 core 工具不必整条调用链 async 化。
+	// K8e 完成后 core 9 大工具 + 4 大 utils 全部异步化，sync API 不再被 core 引用，已从契约里整体移除。
+	//
+	// 浏览器 / VS Code renderer / IDEA JCEF 等无 sync fs 的形态现在可以直接实现 IFileSystem，无需提供 sync 镜像。
+	//
+	// 例外（非 IFileSystem 范畴，仍保留少量 fs 直调）：
+	//   - tools/truncate.ts：写 ~/.maxian/ 系统配置
+	//   - tools/grepTool.ts findRgPath：探测系统 rg 二进制
+	//   - adapters/NodeSearchService.ts：Node 专用 ISearchService 实现
+	//   - tools/bashTool.ts / executeCommandTool.ts：child_process（K8d ITerminal 抽象覆盖）
 }
 
 /** Node.js BufferEncoding 类型镜像（core 不依赖 @types/node） */

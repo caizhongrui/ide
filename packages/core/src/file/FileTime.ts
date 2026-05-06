@@ -11,10 +11,12 @@
  *    3. withLock(file, fn)     —— 同一文件的并发写入串行化
  *
  *  比起提示词约束"请先读文件"，代码级硬失败能消除整类 bug。
+ *
+ *  K8e: 已异步化；调用方需 `await FileTime.read(...)` / `await FileTime.assert(...)`。
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import * as fsPromises from 'node:fs/promises';
+import * as path from 'path';
 
 export namespace FileTime {
 	export interface Stamp {
@@ -34,21 +36,14 @@ export namespace FileTime {
 
 	/**
 	 * 路径归一化（跨平台）：
-	 *   - 优先走 fs.realpathSync（解析符号链接 + 大小写 + 相对路径）
+	 *   - 优先走 fs.realpath（解析符号链接 + 大小写 + 相对路径）
 	 *   - Windows 上补充：小写 drive letter + 反斜杠统一为正斜杠
 	 *   - 失败（文件不存在）时退回 path.resolve() 的逻辑归一化
-	 *
-	 * 为什么需要这一层：
-	 *   - AI 可能用 'src/foo.ts' 读、用 './src/foo.ts' 编辑 → 同一文件不同 key
-	 *   - Windows 上 'D:\proj\foo' 和 'd:/proj/foo' 是同一文件但字符串不等
-	 *   - macOS 大小写不敏感文件系统里 'Foo.ts' 和 'foo.ts' 是同一文件
-	 *
-	 * 对应 OpenCode 的 Filesystem.normalizePath（同样处理这几类差异）
 	 */
-	function normalize(filepath: string): string {
+	async function normalize(filepath: string): Promise<string> {
 		let abs: string;
 		try {
-			abs = fs.realpathSync(filepath);
+			abs = await fsPromises.realpath(filepath);
 		} catch {
 			abs = path.resolve(filepath);
 		}
@@ -68,9 +63,9 @@ export namespace FileTime {
 		return s;
 	}
 
-	function captureStamp(filepath: string): Stamp {
+	async function captureStamp(filepath: string): Promise<Stamp> {
 		try {
-			const st = fs.statSync(filepath);
+			const st = await fsPromises.stat(filepath);
 			return {
 				read:  new Date(),
 				mtime: st.mtimeMs,
@@ -82,14 +77,19 @@ export namespace FileTime {
 	}
 
 	/** AI 读取文件后调用：记录 mtime/size 作为后续 assert 的基线 */
-	export function read(sessionId: string, filepath: string): void {
-		const norm = normalize(filepath);
-		getOrCreateSessionMap(sessionId).set(norm, captureStamp(norm));
+	export async function read(sessionId: string, filepath: string): Promise<void> {
+		const norm = await normalize(filepath);
+		const stamp = await captureStamp(norm);
+		getOrCreateSessionMap(sessionId).set(norm, stamp);
 	}
 
-	/** 查询该会话是否读过此文件 + 最后读取时间 */
+	/** 查询该会话是否读过此文件 + 最后读取时间（同步：仅 Map 查询） */
 	export function get(sessionId: string, filepath: string): Date | undefined {
-		const norm = normalize(filepath);
+		// get 只做 Map 查询，不做 fs 调用；保留 sync 方便调用。
+		// normalize 这里走 path.resolve 退化版本（不解符号链接，少数 edge case 可能 miss，但避免引入 async）
+		const norm = (process.platform === 'win32')
+			? path.resolve(filepath).replace(/\\/g, '/').replace(/^([A-Z]):/, (_m, l) => l.toLowerCase() + ':')
+			: path.resolve(filepath);
 		return __reads.get(sessionId)?.get(norm)?.read;
 	}
 
@@ -106,10 +106,10 @@ export namespace FileTime {
 	 *
 	 * 环境变量 `MAXIAN_DISABLE_FILETIME_CHECK=1` 可禁用（调试/特殊场景）
 	 */
-	export function assert(sessionId: string, filepath: string): void {
+	export async function assert(sessionId: string, filepath: string): Promise<void> {
 		if (process.env.MAXIAN_DISABLE_FILETIME_CHECK === '1') return;
 
-		const norm = normalize(filepath);
+		const norm = await normalize(filepath);
 		const prev = __reads.get(sessionId)?.get(norm);
 
 		if (!prev) {
@@ -122,14 +122,14 @@ export namespace FileTime {
 		// 文件新创建（之前 prev.mtime === undefined）的场景不用检查变更
 		if (prev.mtime === undefined) return;
 
-		const curr = captureStamp(norm);
+		const curr = await captureStamp(norm);
 		if (curr.mtime === undefined) {
 			throw new Error(`文件 ${filepath} 已不存在（上次读取后被删除）。请重新确认路径。`);
 		}
 
 		const changed = curr.mtime !== prev.mtime || curr.size !== prev.size;
 		if (changed) {
-			// 宽容窗：mtime 推进很短（< 5s）→ 大概率是 AI 自己 fs.writeFileSync 后
+			// 宽容窗：mtime 推进很短（< 5s）→ 大概率是 AI 自己 fs.writeFile 后
 			// IDE/format-on-save/file-watcher 二次写盘的回响（不是用户外部编辑）。
 			// 静默刷新基线放行，避免"AI 改完自己就读不懂自己的文件"死循环。
 			//
@@ -154,7 +154,7 @@ export namespace FileTime {
 
 	/** 同一文件的并发写入串行化（避免 edit + multiedit 交叉写入造成数据丢失） */
 	export async function withLock<T>(filepath: string, fn: () => Promise<T>): Promise<T> {
-		const norm = normalize(filepath);
+		const norm = await normalize(filepath);
 		const prev = __locks.get(norm) ?? Promise.resolve();
 		const next = prev.then(fn, fn);   // 不管上一个是成功还是失败，串行往下跑
 		__locks.set(norm, next);

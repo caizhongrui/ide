@@ -1,0 +1,61 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   TokenUsageBar — K10c 抽离自 desktop styles.css
+═══════════════════════════════════════════════════════════════════════════ */
+
+.token-usage-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.token-usage-bar {
+	height: 2px;
+	background: var(--bg-muted);
+	border-radius: 1px;
+	overflow: hidden;
+	margin: 0;
+	flex-grow: 1;
+	flex-shrink: 1;
+}
+
+.token-usage-fill {
+	height: 100%;
+	border-radius: 1px;
+	transition: width 500ms ease, background 500ms ease;
+}
+
+.token-compact-btn {
+	font-size: 11px;
+	padding: 2px 8px;
+	border: 1px solid color-mix(in srgb, #f59e0b 50%, transparent);
+	background: color-mix(in srgb, #f59e0b 12%, transparent);
+	color: #f59e0b;
+	border-radius: 4px;
+	cursor: pointer;
+	white-space: nowrap;
+	flex-shrink: 0;
+	transition: background 120ms, transform 80ms;
+}
+
+.token-compact-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, #f59e0b 20%, transparent);
+}
+
+.token-compact-btn:active:not(:disabled) {
+	transform: scale(0.97);
+}
+
+.token-compact-btn:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.token-compact-btn.critical {
+	border-color: color-mix(in srgb, #ef4444 60%, transparent);
+	background: color-mix(in srgb, #ef4444 15%, transparent);
+	color: #ef4444;
+}
+
+.token-compact-btn.critical:hover:not(:disabled) {
+	background: color-mix(in srgb, #ef4444 22%, transparent);
+}

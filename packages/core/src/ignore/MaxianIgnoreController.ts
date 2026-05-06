@@ -7,7 +7,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
+// K8e: 改用 fs.promises.realpath 异步版本，去掉 fsSync.realpathSync
 import ignore, { type Ignore } from 'ignore';
 import type { IFileWatcher } from '../interfaces/IFileWatcher.js';
 import type { IDisposable } from '../interfaces/IMessageBus.js';
@@ -66,7 +66,10 @@ export class MaxianIgnoreController {
 		}
 	}
 
-	validateAccess(filePath: string): boolean {
+	/**
+	 * K8e: 已异步化，调用方需 `await ignoreCtrl.validateAccess(...)`。
+	 */
+	async validateAccess(filePath: string): Promise<boolean> {
 		if (!this.maxianIgnoreContent) {
 			return true;
 		}
@@ -75,7 +78,7 @@ export class MaxianIgnoreController {
 
 			let realPath: string;
 			try {
-				realPath = fsSync.realpathSync(absolutePath);
+				realPath = await fs.realpath(absolutePath);
 			} catch {
 				realPath = absolutePath;
 			}
@@ -87,7 +90,7 @@ export class MaxianIgnoreController {
 		}
 	}
 
-	validateCommand(command: string): string | undefined {
+	async validateCommand(command: string): Promise<string | undefined> {
 		if (!this.maxianIgnoreContent) {
 			return undefined;
 		}
@@ -109,7 +112,7 @@ export class MaxianIgnoreController {
 				if (arg.includes(':')) {
 					continue;
 				}
-				if (!this.validateAccess(arg)) {
+				if (!(await this.validateAccess(arg))) {
 					return arg;
 				}
 			}
@@ -118,15 +121,15 @@ export class MaxianIgnoreController {
 		return undefined;
 	}
 
-	filterPaths(paths: string[]): string[] {
+	async filterPaths(paths: string[]): Promise<string[]> {
 		try {
-			return paths
-				.map((p) => ({
+			const checks = await Promise.all(
+				paths.map(async (p) => ({
 					path: p,
-					allowed: this.validateAccess(p),
+					allowed: await this.validateAccess(p),
 				}))
-				.filter((x) => x.allowed)
-				.map((x) => x.path);
+			);
+			return checks.filter((x) => x.allowed).map((x) => x.path);
 		} catch (error) {
 			console.error('Error filtering paths:', error);
 			return [];

@@ -19,6 +19,26 @@ import {
 import { getModeBySlug, DEFAULT_MODE, type Mode } from '../types/modeTypes.js';
 import { ISkill } from '../types/skillTypes.js';
 import { estimateTokensFromChars } from '../utils/tokenEstimate.js';
+import type { McpServerInfo, McpToolIndexEntry } from '../mcp/index.js';
+
+/**
+ * B2: MCP Tool Search 模式选项
+ *
+ * 三种模式（mcpMode）：
+ * - 'lazy'（默认）：只暴露 mcp_tool_search/load/unload 三个元工具；MCP 服务器列表 + 工具数量摘要写进 prompt 让模型知道有什么可搜，但不展开 schema
+ * - 'eager'：把所有已连接 server 的所有工具完整 schema 写进 prompt（旧行为，适合工具少时）
+ * - 'hybrid'：'lazy' 的基础上把 activeMcpTools 集合中的工具完整 schema 也写进 prompt（懒加载已激活集）
+ */
+export type McpPromptMode = 'lazy' | 'eager' | 'hybrid';
+
+export interface McpPromptOptions {
+	/** prompt 拼接策略 */
+	mode: McpPromptMode;
+	/** 已连接 MCP servers 的运行时信息，用于生成"可搜的能力清单" */
+	servers?: McpServerInfo[];
+	/** 当前会话激活的 MCP 工具集（hybrid 模式下展开它们的完整 schema） */
+	activeTools?: McpToolIndexEntry[];
+}
 
 /**
  * 系统提示词生成器
@@ -53,6 +73,8 @@ export class SystemPromptGenerator {
 			steeringContent?: string | null;
 			memoryContent?: string | null;
 			profile?: 'full' | 'lean';
+			/** B2: MCP 工具暴露策略 */
+			mcp?: McpPromptOptions;
 		}
 	): string {
 		const profile = options?.profile ?? 'full';
@@ -127,6 +149,12 @@ ${options.memoryContent}`);
 			sections.push(this.getSkillsDirectory(options.preloadedSkills));
 		}
 
+		// 14. B2: MCP 工具节（按 mode 决定展开多少）
+		if (options?.mcp) {
+			const mcpSection = this.getMcpSection(options.mcp);
+			if (mcpSection) sections.push(mcpSection);
+		}
+
 		const prompt = sections.join('\n\n');
 
 		if (options?.includeStats) {
@@ -136,6 +164,90 @@ ${options.memoryContent}`);
 		}
 
 		return prompt;
+	}
+
+	/**
+	 * B2: 生成 MCP 工具相关的 system prompt 片段
+	 *
+	 * - lazy：只列 server 名称 + 每个 server 的工具数量；告诉 LLM "用 mcp_tool_search 找具体工具"
+	 * - eager：列出所有已连接 server 的所有工具（完整描述 + 入参概览）
+	 * - hybrid：lazy 摘要 + activeTools 完整 schema（已被 mcp_tool_load 激活的）
+	 */
+	private static getMcpSection(opts: McpPromptOptions): string {
+		const connectedServers = (opts.servers ?? []).filter(s => s.isConnected);
+		if (connectedServers.length === 0) {
+			// 无任何已连接 MCP server → 不输出本节，省 tokens
+			return '';
+		}
+
+		const lines: string[] = [
+			'====',
+			'',
+			'MCP TOOLS',
+			'',
+		];
+
+		if (opts.mode === 'eager') {
+			// 旧行为：所有工具直接展开
+			lines.push('当前已连接的 MCP 服务器及其工具：');
+			lines.push('');
+			for (const s of connectedServers) {
+				lines.push(`### ${s.config.name}`);
+				if (s.config.description) lines.push(`*${s.config.description}*`);
+				lines.push('');
+				for (const t of s.tools) {
+					lines.push(`- **mcp_${s.config.name}_${t.name}**: ${t.description ?? '(无描述)'}`);
+					if (t.inputSchema?.properties) {
+						const props = Object.keys(t.inputSchema.properties).slice(0, 12);
+						if (props.length > 0) lines.push(`  参数: ${props.join(', ')}`);
+					}
+				}
+				lines.push('');
+			}
+			return lines.join('\n').trimEnd();
+		}
+
+		// lazy / hybrid 共享前缀
+		lines.push('系统已挂载若干 MCP 服务器，但工具描述不直接写进 system prompt（避免 context 膨胀）。');
+		lines.push('要使用任意 MCP 工具，按以下流程：');
+		lines.push('');
+		lines.push('1. 调 `mcp_tool_search` 查询相关工具（自然语言 query）');
+		lines.push('2. 收到候选后挑 1-3 个调 `mcp_tool_load` 加入激活集');
+		lines.push('3. 下一轮 LLM 调用时这些工具会出现在本节，可直接 XML 调用');
+		lines.push('4. 用完可以 `mcp_tool_unload` 释放（一般不必，N 轮未用会自动卸载）');
+		lines.push('');
+		lines.push('已连接的 MCP 服务器：');
+		for (const s of connectedServers) {
+			const desc = s.config.description ? `（${s.config.description}）` : '';
+			lines.push(`- **${s.config.name}** ${desc}: ${s.tools.length} 个工具`);
+		}
+		lines.push('');
+
+		if (opts.mode === 'hybrid' && opts.activeTools && opts.activeTools.length > 0) {
+			lines.push('---');
+			lines.push('');
+			lines.push('### 当前已激活工具');
+			lines.push('');
+			lines.push('以下工具已被 `mcp_tool_load` 激活，可直接 XML 调用：');
+			lines.push('');
+			for (const t of opts.activeTools) {
+				lines.push(`#### ${t.toolId}`);
+				lines.push(`*server: ${t.serverName}*`);
+				if (t.description) lines.push(t.description);
+				if (t.inputSchema?.properties) {
+					lines.push('');
+					lines.push('**参数：**');
+					for (const [key, schema] of Object.entries(t.inputSchema.properties)) {
+						const s = schema as { type?: string; description?: string };
+						const required = (t.inputSchema.required ?? []).includes(key);
+						lines.push(`- \`${key}\` ${s.type ? `(${s.type})` : ''}${required ? ' **必需**' : ''}: ${s.description ?? ''}`);
+					}
+				}
+				lines.push('');
+			}
+		}
+
+		return lines.join('\n').trimEnd();
 	}
 
 	private static generateLeanPrompt(

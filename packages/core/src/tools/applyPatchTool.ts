@@ -10,7 +10,7 @@
  *  回退策略：任一 hunk 失败则整体回滚。
  *--------------------------------------------------------------------------------------------*/
 
-import * as path from 'node:path';
+import * as path from 'path';
 import type { IToolContext } from './IToolContext.js';
 import { platformFs, type ToolFs } from './platformFs.js';
 
@@ -166,20 +166,20 @@ export async function applyPatchTool(
 			continue;
 		}
 
-		// 删除文件
+		// 删除文件（K8e: async）
 		if (newPath === '/dev/null') {
 			const abs = path.isAbsolute(origPath) ? origPath : path.resolve(ctx.workspacePath, origPath);
 			let before: string | null = null;
-			try { before = pf.readFileSync(abs, 'utf8'); } catch { /* 可能已不存在 */ }
+			try { before = await pf.readFile(abs, 'utf8'); } catch { /* 可能已不存在 */ }
 			plans.push({ abs, before, after: null, isCreate: false, isDelete: true });
 			result.hunkApplied += hunks.length;
 			continue;
 		}
 
-		// 修改文件
+		// 修改文件（K8e: async）
 		const absOrig = path.isAbsolute(origPath) ? origPath : path.resolve(ctx.workspacePath, origPath);
 		let origContent: string;
-		try { origContent = pf.readFileSync(absOrig, 'utf8'); }
+		try { origContent = await pf.readFile(absOrig, 'utf8'); }
 		catch (e) {
 			result.success = false;
 			result.hunkFailed += hunks.length;
@@ -207,20 +207,20 @@ export async function applyPatchTool(
 		}
 	}
 
-	// 全部 dry run 通过 → 执行写入
+	// 全部 dry run 通过 → 执行写入（K8e: async）
 	const { FileTime } = await import('../file/FileTime.js');
 	for (const p of plans) {
 		try {
 			if (p.isDelete) {
-				if (pf.existsSync(p.abs)) pf.unlinkSync(p.abs);
+				if (await pf.exists(p.abs)) await pf.deleteFile(p.abs);
 				result.filesDeleted.push(p.abs);
 			} else {
-				pf.mkdirSync(path.dirname(p.abs), { recursive: true });
-				pf.writeFileSync(p.abs, p.after ?? '', 'utf8');
+				// pf.writeFile 已自动 mkdir parent
+				await pf.writeFile(p.abs, p.after ?? '', 'utf8');
 				if (p.isCreate) result.filesCreated.push(p.abs);
 				else result.filesChanged.push(p.abs);
 				// FileTime：写入后刷新基线，避免下一轮 edit/multiedit 误判"外部修改"
-				if (ctx.sessionId) FileTime.read(ctx.sessionId, p.abs);
+				if (ctx.sessionId) await FileTime.read(ctx.sessionId, p.abs);
 			}
 			result.changes!.push({ path: p.abs, before: p.before, after: p.after });
 			ctx.fileContextTracker.trackFileWrite(p.abs);

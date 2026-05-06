@@ -9,14 +9,16 @@
  *  - 路径不存在时给出 path suggestions
  *  - path 不能指向文件（必须目录）—— 给出明确改写示例
  *  - 兼容 `pattern` / `file_pattern` 双参数名（IDE 用 file_pattern，对 OpenCode/CC 兼容用 pattern）
+ *
+ *  K8e: 已异步化；不再依赖 node:fs sync 调用。
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';   // 仅 fs.Dirent 类型
-import * as path from 'node:path';
+import * as path from 'path';
 import picomatch from 'picomatch';
 
 import type { IToolContext } from './IToolContext.js';
 import { platformFs, type ToolFs } from './platformFs.js';
+import type { FileEntry } from '../interfaces/IFileSystem.js';
 import { DIRS_TO_IGNORE, isLikelyNoisePath, shouldApplyNoiseFiltering } from '../utils/noiseFilter.js';
 import { getPathSuggestions } from '../utils/pathSuggestions.js';
 
@@ -57,13 +59,13 @@ export async function globTool(
 		? (path.isAbsolute(params.path) ? params.path : path.resolve(ctx.workspacePath, params.path))
 		: ctx.workspacePath;
 
-	if (!pf.existsSync(startDir)) {
+	if (!(await pf.exists(startDir))) {
 		// 调用方拿不到 suggestions（接口返回 IGlobToolResult），但 caller 可以拿到 startDir 自己再 getPathSuggestions
 		return { files: [], total: 0, truncated: false, timedOut: false };
 	}
 
 	let stat;
-	try { stat = pf.statSync(startDir); } catch {
+	try { stat = await pf.stat(startDir); } catch {
 		return { files: [], total: 0, truncated: false, timedOut: false };
 	}
 	if (!stat.isDirectory) {
@@ -87,7 +89,7 @@ export async function globTool(
 		return false;
 	};
 
-	walk(pf, startDir, '', 0, matched, limit, matcher, applyNoiseFilter, checkTimeout);
+	await walk(pf, startDir, '', 0, matched, limit, matcher, applyNoiseFilter, checkTimeout);
 
 	// mtime 降序
 	matched.sort((a, b) => b.mtime - a.mtime);
@@ -99,7 +101,7 @@ export async function globTool(
 	return { files, total, truncated, timedOut };
 }
 
-function walk(
+async function walk(
 	pf:               ToolFs,
 	root:             string,
 	rel:              string,
@@ -109,19 +111,19 @@ function walk(
 	matcher:          (s: string) => boolean,
 	applyNoiseFilter: boolean,
 	checkTimeout:     () => boolean,
-): void {
+): Promise<void> {
 	if (out.length >= limit || depth > MAX_DEPTH || checkTimeout()) return;
 
-	let entries: fs.Dirent[];
+	let entries: FileEntry[];
 	try {
-		entries = pf.readdirSync(path.join(root, rel), { withFileTypes: true }) as fs.Dirent[];
+		entries = await pf.listFiles(path.join(root, rel));
 	} catch { return; }
 
 	for (const entry of entries) {
 		if (out.length >= limit || checkTimeout()) return;
 
 		// 单段目录名快速过滤（避开 node_modules / dist / .git 等）
-		if (entry.isDirectory() && IGNORED_DIRS_SET.has(entry.name)) continue;
+		if (entry.isDirectory && IGNORED_DIRS_SET.has(entry.name)) continue;
 
 		const childRel  = rel ? path.join(rel, entry.name) : entry.name;
 		const normChildRel = childRel.replace(/\\/g, '/');
@@ -129,14 +131,15 @@ function walk(
 		// 路径级噪音过滤（只在用户没显式指向噪音目录时启用）
 		if (applyNoiseFilter && isLikelyNoisePath(normChildRel)) continue;
 
-		if (entry.isDirectory()) {
-			walk(pf, root, childRel, depth + 1, out, limit, matcher, applyNoiseFilter, checkTimeout);
-		} else if (entry.isFile()) {
+		if (entry.isDirectory) {
+			await walk(pf, root, childRel, depth + 1, out, limit, matcher, applyNoiseFilter, checkTimeout);
+		} else if (!entry.isSymbolicLink) {
+			// 普通文件（FileEntry 没区分 isFile，但 isDirectory=false && !isSymbolicLink 视为普通文件）
 			if (!matcher(normChildRel)) continue;
 
 			const full = path.join(root, childRel);
 			let mtime = 0;
-			try { mtime = pf.statSync(full).mtime; } catch { /* ignore */ }
+			try { mtime = (await pf.stat(full)).mtime; } catch { /* ignore */ }
 			out.push({ rel: childRel, mtime });
 		}
 	}
@@ -144,21 +147,23 @@ function walk(
 
 /**
  * 格式化输出（对齐 IDE 风格的中文 + 友好提示）
+ *
+ * K8e: 已异步化；getPathSuggestions / pf.exists / pf.stat 都改为 async。
  */
-export function formatGlobResult(
+export async function formatGlobResult(
 	r:        IGlobToolResult,
 	params:   IGlobToolParams,
 	pathArg?: string,        // 可选：调用方传入实际使用的 path（用于错误提示）
 	pf?:      ToolFs,        // 可选：用于路径不存在时给 suggestions
-): string {
+): Promise<string> {
 	const pattern = params.pattern ?? params.file_pattern ?? '';
 
 	if (!pattern) {
 		return '错误: 未提供文件模式（pattern 或 file_pattern）';
 	}
 
-	if (pathArg && pf && !pf.existsSync(pathArg)) {
-		const suggestions = getPathSuggestions(pf, pathArg);
+	if (pathArg && pf && !(await pf.exists(pathArg))) {
+		const suggestions = await getPathSuggestions(pf, pathArg);
 		if (suggestions.length > 0) {
 			return `错误: 路径不存在 "${pathArg}"\n\n你是否要找:\n${suggestions.map(s => `  - ${s}`).join('\n')}`;
 		}
@@ -167,7 +172,7 @@ export function formatGlobResult(
 
 	if (pathArg && pf) {
 		try {
-			const st = pf.statSync(pathArg);
+			const st = await pf.stat(pathArg);
 			if (!st.isDirectory) {
 				const dir  = pathArg.substring(0, pathArg.lastIndexOf('/'));
 				const base = pathArg.substring(pathArg.lastIndexOf('/') + 1);
