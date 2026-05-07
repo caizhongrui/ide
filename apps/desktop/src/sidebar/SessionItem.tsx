@@ -20,30 +20,57 @@ export interface SessionItemProps {
 	onTogglePin:            (id: string, pinned: boolean) => void
 	onToggleArchive:        (id: string, archived: boolean) => void
 	onDelete:               (e: MouseEvent, id: string) => void
+	// 多选删除模式（K-BulkDelete）— 可选 props
+	selectMode?:            () => boolean
+	isSelected?:            () => boolean
+	onToggleSelected?:      (id: string) => void
 }
 
 export const SessionItem: Component<SessionItemProps> = (props) => {
 	const s = (): SessionSummary => props.s
+	const isSelectMode = () => props.selectMode?.() ?? false
+	const isSelected   = () => props.isSelected?.() ?? false
 	return (
 		<div
 			class="session-item"
-			classList={{ active: props.isActive() }}
-			onClick={() => { if (props.editingSessionId() !== s().id) props.onSelect(s().id) }}
+			classList={{
+				active: props.isActive() && !isSelectMode(),
+				'session-item-selected': isSelectMode() && isSelected(),
+				'session-item-selectmode': isSelectMode(),
+			}}
+			onClick={() => {
+				// 多选模式下点击切换选中，不进入会话
+				if (isSelectMode()) {
+					if (props.onToggleSelected) props.onToggleSelected(s().id)
+					return
+				}
+				if (props.editingSessionId() !== s().id) props.onSelect(s().id)
+			}}
 		>
-			{/* Status indicator */}
-			<div class="session-status">
-				<Show
-					when={s().status === 'running'}
-					fallback={
-						<div
-							class="session-status-dot"
-							classList={{ error: s().status === 'error', done: s().status === 'done' }}
-						/>
-					}
-				>
-					<div class="session-status-spinner" />
-				</Show>
-			</div>
+			{/* 多选模式的复选框（取代 status dot） */}
+			<Show when={isSelectMode()} fallback={
+				<div class="session-status">
+					<Show
+						when={s().status === 'running'}
+						fallback={
+							<div
+								class="session-status-dot"
+								classList={{ error: s().status === 'error', done: s().status === 'done' }}
+							/>
+						}
+					>
+						<div class="session-status-spinner" />
+					</Show>
+				</div>
+			}>
+				<div class="session-checkbox" classList={{ checked: isSelected() }}>
+					<Show when={isSelected()}>
+						<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+							<polyline points="20 6 9 17 4 12" />
+						</svg>
+					</Show>
+				</div>
+			</Show>
 
 			{/* Title or rename input (双击标题直接改名) */}
 			<Show
@@ -78,8 +105,8 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
 				<span class="session-archive-badge" title="已归档">🗃</span>
 			</Show>
 
-			{/* Hover actions */}
-			<div class="session-item-actions">
+			{/* Hover actions（多选模式下隐藏，避免误操作） */}
+			<div class="session-item-actions" style={isSelectMode() ? 'display:none' : undefined}>
 				<button
 					class="item-action-btn"
 					onClick={(e) => { e.stopPropagation(); props.onTogglePin(s().id, !s().pinned) }}

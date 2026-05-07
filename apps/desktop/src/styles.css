@@ -6269,3 +6269,116 @@ html[data-theme="dark"] .browser-cors-warn { color: #fbbf24; }
   font-size: 11.5px;
   color: var(--text-faint);
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  会话多选删除（K-BulkDelete）
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* 搜索栏里的"批量删除"切换按钮 —— 复用 .sidebar-archive-toggle 的尺寸/边框,
+ * 但 active 时是红色而不是 accent 蓝（区分归档与删除两个不同语义）*/
+.sidebar-bulk-toggle.active {
+  background: color-mix(in srgb, #ef4444 18%, transparent) !important;
+  border-color: rgba(239, 68, 68, 0.40) !important;
+  color: #ef4444 !important;
+}
+
+/* 顶部选中操作栏（搜索栏下方）—— 紧凑版（适配 232px 窄边栏） */
+.sidebar-bulk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px 5px 10px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-muted));
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.sidebar-bulk-count {
+  flex: 1;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;  /* 允许 shrink */
+}
+.sidebar-bulk-count-num {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1;
+}
+.sidebar-bulk-count-unit {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+/* 图标按钮：28×26 紧凑尺寸 */
+.sidebar-bulk-icon-btn {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+.sidebar-bulk-icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-base));
+}
+.sidebar-bulk-danger {
+  background: color-mix(in srgb, #ef4444 10%, var(--bg-base));
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+}
+.sidebar-bulk-danger:hover {
+  background: #ef4444 !important;
+  color: #fff !important;
+  border-color: #ef4444 !important;
+}
+.sidebar-bulk-danger.disabled {
+  opacity: 0.35;
+  pointer-events: none;
+  background: var(--bg-base);
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+/* 复选框（替代 status dot 的位置） */
+.session-checkbox {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--bg-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.12s, border-color 0.12s;
+  color: #fff;
+}
+.session-checkbox.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 选中行高亮 */
+.session-item-selected {
+  background: color-mix(in srgb, var(--accent) 15%, var(--bg-muted));
+}
+.session-item-selected:hover {
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-muted)) !important;
+}
+
+/* 多选模式时隐藏激活会话的左侧彩色条（避免和复选框视觉冲突） */
+.session-item-selectmode.active::before {
+  display: none;
+}

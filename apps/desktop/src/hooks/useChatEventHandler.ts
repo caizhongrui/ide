@@ -284,23 +284,42 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 			// 追加到对应工具消息的 liveOutput 字段（供工具卡片实时显示）。
 			// 上限 64KB：长期跑的 bash（npm install / build）输出能到几 MB，
 			// 多任务累积容易让 webview OOM。超限保留尾部 64KB 即可（UI 也只看 tail）。
+			//
+			// K-PerfB：之前是 [...prev].reverse().findIndex + 双 slice 拼数组,O(N) × 2 拷贝。
+			// mvn 类高频输出 1000 chunk/s × N=几百消息 → 单核 100% 仅花在数组重建。
+			// 优化：
+			//   1. 后向 for 循环找 toolUseId,无数组克隆
+			//   2. 用 Array.from 单次拷贝 + 索引位置直接替换,代替双 slice
+			//   3. 字符串拼接前提早判断 cap,减少一次 64KB 串复制
 			const LIVE_OUTPUT_CAP = 64 * 1024
 			deps.setMessages((prev) => {
-				const idx = [...prev].reverse().findIndex(m => m.role === 'tool' && m.toolUseId === toolUseId)
-				if (idx === -1) return prev
-				const realIdx = prev.length - 1 - idx
-				const t = prev[realIdx] as any
-				const prevLive = t.liveOutput ?? ''
-				const marker = kind === 'stderr' ? '⚠ ' : ''
-				let next = prevLive + marker + chunk
-				if (next.length > LIVE_OUTPUT_CAP) {
-					next = '... [输出超 64KB，已截断头部]\n' + next.slice(-LIVE_OUTPUT_CAP)
+				let realIdx = -1
+				for (let i = prev.length - 1; i >= 0; i--) {
+					const m = prev[i]
+					if (m.role === 'tool' && m.toolUseId === toolUseId) { realIdx = i; break }
 				}
-				return [
-					...prev.slice(0, realIdx),
-					{ ...t, liveOutput: next },
-					...prev.slice(realIdx + 1),
-				]
+				if (realIdx === -1) return prev
+				const t = prev[realIdx] as any
+				const prevLive = (t.liveOutput as string | undefined) ?? ''
+				const marker = kind === 'stderr' ? '⚠ ' : ''
+				const piece = marker + chunk
+				let next: string
+				// 提前判断:如果 prevLive 已经接近 cap,先截再拼,避免 cap+chunk 大小的临时分配
+				if (prevLive.length + piece.length > LIVE_OUTPUT_CAP) {
+					const headRoom = LIVE_OUTPUT_CAP - piece.length
+					if (headRoom <= 0) {
+						// 单 piece 就超 cap → 只取 piece 尾部
+						next = '... [输出超 64KB，已截断头部]\n' + piece.slice(-LIVE_OUTPUT_CAP)
+					} else {
+						next = '... [输出超 64KB，已截断头部]\n' + prevLive.slice(-headRoom) + piece
+					}
+				} else {
+					next = prevLive + piece
+				}
+				// 单次拷贝 + 替换（O(N) 但只 1 次分配,vs. 之前的 2 次 slice）
+				const out = Array.from(prev) as typeof prev
+				out[realIdx] = { ...t, liveOutput: next }
+				return out
 			})
 			return
 		}

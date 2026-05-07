@@ -52,6 +52,13 @@ export interface SidebarProps {
 	deleteSession:      (e: MouseEvent, id: string) => void
 	createSession:      () => void
 	pickFolder:         () => void
+	// 多选删除（K-BulkDelete）
+	sessionSelectMode:  () => boolean
+	toggleSessionSelectMode: () => void
+	selectedSessionIds: () => Set<string>
+	toggleSessionSelected: (id: string) => void
+	selectAllVisibleSessions: (visibleIds: string[]) => void
+	bulkDeleteSelectedSessions: () => void | Promise<void>
 	// 工作区操作
 	editingWorkspaceId:  () => string | null
 	editingWorkspaceName: () => string
@@ -94,6 +101,9 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 			onTogglePin={props.togglePinSession}
 			onToggleArchive={props.toggleArchiveSession}
 			onDelete={props.deleteSession}
+			selectMode={props.sessionSelectMode}
+			isSelected={() => props.selectedSessionIds().has(s.id)}
+			onToggleSelected={props.toggleSessionSelected}
 		/>
 	)
 
@@ -191,6 +201,20 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 							<line x1="10" y1="12" x2="14" y2="12" />
 						</svg>
 					</button>
+					{/* 批量删除入口（多选模式时图标高亮）—— 跟归档按钮并排在搜索栏 */}
+					<button
+						class="sidebar-archive-toggle sidebar-bulk-toggle"
+						classList={{ active: props.sessionSelectMode() }}
+						onClick={props.toggleSessionSelectMode}
+						title={props.sessionSelectMode() ? '退出多选' : '批量删除（多选）'}
+					>
+						<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<polyline points="3 6 5 6 21 6" />
+							<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+							<path d="M10 11v6" /><path d="M14 11v6" />
+							<path d="M9 6V4h6v2" />
+						</svg>
+					</button>
 					<Show when={props.sessionSearch()}>
 						<button
 							class="sidebar-search-clear"
@@ -203,6 +227,53 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 						</button>
 					</Show>
 				</div>
+
+				{/* 多选模式工具栏（K-BulkDelete）—— 紧凑版,适配 232px 窄边栏 */}
+				<Show when={props.sessionSelectMode()}>
+					<div class="sidebar-bulk-toolbar">
+						<span class="sidebar-bulk-count" title="已选数量">
+							<span class="sidebar-bulk-count-num">{props.selectedSessionIds().size}</span>
+							<span class="sidebar-bulk-count-unit">已选</span>
+						</span>
+						<button
+							class="sidebar-bulk-icon-btn"
+							onClick={() => {
+								const visibleIds: string[] = props.globalMode() === 'chat'
+									? chatSessions().map(s => s.id)
+									: props.groupedSessions().flatMap(g => g.sessions.map(s => s.id))
+								props.selectAllVisibleSessions(visibleIds)
+							}}
+							title="全选 / 反选当前可见列表"
+						>
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+								<rect x="3" y="3" width="18" height="18" rx="2" />
+								<polyline points="8 12 11 15 16 9" />
+							</svg>
+						</button>
+						<button
+							class="sidebar-bulk-icon-btn sidebar-bulk-danger"
+							classList={{ disabled: props.selectedSessionIds().size === 0 }}
+							onClick={() => void props.bulkDeleteSelectedSessions()}
+							title={props.selectedSessionIds().size > 0 ? `删除选中的 ${props.selectedSessionIds().size} 个会话` : '请先勾选要删除的会话'}
+						>
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+								<polyline points="3 6 5 6 21 6" />
+								<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+								<path d="M10 11v6" /><path d="M14 11v6" />
+								<path d="M9 6V4h6v2" />
+							</svg>
+						</button>
+						<button
+							class="sidebar-bulk-icon-btn"
+							onClick={props.toggleSessionSelectMode}
+							title="退出多选模式"
+						>
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+								<line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+							</svg>
+						</button>
+					</div>
+				</Show>
 
 				{/* ── Chat 模式：平铺会话列表 ── */}
 				<Show when={props.globalMode() === 'chat'}>

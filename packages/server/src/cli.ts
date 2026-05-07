@@ -845,6 +845,95 @@ function detectStaleOverwrite(
 	return { block: false, message: '' };
 }
 
+/**
+ * 工具输出按时窗合并器（K-PerfA）
+ *
+ * mvn / npm install / build 这类长命令会在 1 秒内产生几百-上千条 stdout 行,
+ * 之前是每条都立刻 emit 一次 'tool_output_chunk' SSE 事件,导致：
+ *   1. sidecar 单事件循环排队上千个 emitEvent → JSON.stringify → SSE write
+ *   2. 前端 setMessages 高频触发 → messages 数组重建 → SharedChatMessage 转换 → reconciliation
+ * 多会话并发时 CPU 占用直接拉满。
+ *
+ * 这里加一层缓冲：
+ *   - 100ms 时窗内的所有 chunk 攒起来,合并为单条 SSE 事件
+ *   - 或者 buffer 累积到 8KB 时立即 flush（突发输出不延迟太久）
+ *   - 命令结束前调用方必须 await flush() 把残留 buffer 发出去
+ *
+ * 多个 chunk 合并不影响前端展示——liveOutput 区只看尾部，丢中间合并损失语义为零。
+ */
+interface BufferedOutputSink {
+	sink: (chunk: string, kind: 'stdout' | 'stderr') => void;
+	flush: () => Promise<void>;
+}
+
+function createBufferedToolOutputSink(opts: {
+	sessionId:  string;
+	toolUseId:  string;
+	toolName:   string;
+	emitEvent:  (event: Record<string, unknown>) => Promise<void>;
+	flushIntervalMs?: number;     // 默认 100ms
+	flushThresholdBytes?: number; // 默认 8KB
+}): BufferedOutputSink {
+	const interval  = opts.flushIntervalMs ?? 100;
+	const threshold = opts.flushThresholdBytes ?? 8 * 1024;
+
+	let stdoutBuf = '';
+	let stderrBuf = '';
+	let timer: ReturnType<typeof setTimeout> | null = null;
+
+	const doFlush = async () => {
+		if (timer) { clearTimeout(timer); timer = null; }
+		const so = stdoutBuf; stdoutBuf = '';
+		const se = stderrBuf; stderrBuf = '';
+		// 同一时窗内若 stdout 和 stderr 都有,各发一条
+		if (so) {
+			try {
+				await opts.emitEvent({
+					type:      'tool_output_chunk',
+					sessionId: opts.sessionId,
+					toolUseId: opts.toolUseId,
+					toolName:  opts.toolName,
+					kind:      'stdout',
+					chunk:     so,
+				});
+			} catch { /* ignore */ }
+		}
+		if (se) {
+			try {
+				await opts.emitEvent({
+					type:      'tool_output_chunk',
+					sessionId: opts.sessionId,
+					toolUseId: opts.toolUseId,
+					toolName:  opts.toolName,
+					kind:      'stderr',
+					chunk:     se,
+				});
+			} catch { /* ignore */ }
+		}
+	};
+
+	const scheduleFlush = () => {
+		if (timer) return;
+		timer = setTimeout(() => { void doFlush(); }, interval);
+	};
+
+	return {
+		sink(chunk, kind) {
+			if (!chunk) return;
+			if (kind === 'stdout') stdoutBuf += chunk;
+			else                    stderrBuf += chunk;
+			if (stdoutBuf.length + stderrBuf.length >= threshold) {
+				void doFlush();   // 满即冲,不等定时器
+			} else {
+				scheduleFlush();
+			}
+		},
+		async flush() {
+			await doFlush();
+		},
+	};
+}
+
 async function executeToolCall(
 	ctx: NodeToolContext,
 	name: string,
@@ -1098,23 +1187,20 @@ async function executeToolCall(
 				break;
 			}
 			case 'execute_command': {
-				// 流式输出：把 stdout/stderr 的每块实时推送给前端
+				// 流式输出（K-PerfA：加 100ms 时窗合并,降低高频 chunk 风暴）
 				const toolUseIdEx = (params as any).__toolUseId as string | undefined;
-				const sinkEx = (toolUseIdEx && emitEvent)
-					? async (chunk: string, kind: 'stdout' | 'stderr') => {
-						try {
-							await emitEvent({
-								type:      'tool_output_chunk',
-								sessionId: ctx.sessionId,
-								toolUseId: toolUseIdEx,
-								toolName:  'execute_command',
-								kind,
-								chunk,
-							});
-						} catch { /* ignore */ }
-					}
+				const bufferedEx  = (toolUseIdEx && emitEvent && ctx.sessionId)
+					? createBufferedToolOutputSink({
+						sessionId: ctx.sessionId,
+						toolUseId: toolUseIdEx,
+						toolName:  'execute_command',
+						emitEvent,
+					})
+					: null;
+				const sinkEx = bufferedEx
+					? (chunk: string, kind: 'stdout' | 'stderr') => bufferedEx.sink(chunk, kind)
 					: undefined;
-				// 开始横幅
+				// 开始横幅（直接 emit,不走 buffer,确保用户立刻看到命令）
 				if (toolUseIdEx && emitEvent) {
 					try {
 						await emitEvent({
@@ -1128,6 +1214,8 @@ async function executeToolCall(
 					} catch { /* ignore */ }
 				}
 				result = await executeCommandTool(ctx, params, sinkEx);
+				// 结束前先 flush buffer,把残留输出推完
+				if (bufferedEx) await bufferedEx.flush();
 				// 结束横幅
 				if (toolUseIdEx && emitEvent) {
 					try {
@@ -1206,23 +1294,20 @@ async function executeToolCall(
 				if (danger) {
 					return `Error: 拒绝执行危险命令（${danger}）。请调整为更安全的命令。`;
 				}
-				// 流式输出：每当 stdout/stderr 有新数据，通过 SSE 推给前端实时显示
-				const toolUseId = (params as any).__toolUseId as string | undefined;
-				const sink = (toolUseId && emitEvent)
-					? async (chunk: string, kind: 'stdout' | 'stderr') => {
-						try {
-							await emitEvent({
-								type:      'tool_output_chunk',
-								sessionId: ctx.sessionId,
-								toolUseId,
-								toolName:  'bash',
-								kind,
-								chunk,
-							});
-						} catch { /* ignore */ }
-					}
+				// 流式输出（K-PerfA：加 100ms 时窗合并）
+				const toolUseId  = (params as any).__toolUseId as string | undefined;
+				const bufferedB  = (toolUseId && emitEvent && ctx.sessionId)
+					? createBufferedToolOutputSink({
+						sessionId: ctx.sessionId,
+						toolUseId,
+						toolName:  'bash',
+						emitEvent,
+					})
+					: null;
+				const sink = bufferedB
+					? (chunk: string, kind: 'stdout' | 'stderr') => bufferedB.sink(chunk, kind)
 					: undefined;
-				// 开始横幅
+				// 开始横幅（直接 emit,不走 buffer）
 				if (toolUseId && emitEvent) {
 					try {
 						await emitEvent({
@@ -1236,6 +1321,8 @@ async function executeToolCall(
 					} catch { /* ignore */ }
 				}
 				const r = await bashTool(ctx, bp, sink);
+				// 结束前 flush buffer
+				if (bufferedB) await bufferedB.flush();
 				// 结束横幅
 				if (toolUseId && emitEvent) {
 					try {
@@ -3659,6 +3746,20 @@ OBJECTIVE
 			// 工具执行前再检查一次取消
 			if (server.sessionManager.isCancelled(sessionId)) {
 				console.log(`[Agent] 工具执行前检测到取消，跳过 ${toolCalls.length} 个工具`);
+				// ★ 关键修复：取消前 history 已经 push 了带 tool_use 的 assistant 消息（line 3464）。
+				// 如果直接 break，下一次 LLM 请求历史里 assistant.tool_calls 就没有对应的 tool_result，
+				// OpenAI 兼容 API 会 400 报错：
+				//   "An assistant message with 'tool_calls' must be followed by tool messages
+				//    responding to each 'tool_call_id'"
+				// 所以这里给所有未执行的工具补占位 tool_result，保证历史完整可重发。
+				const cancelResults: ContentBlock[] = toolCalls.map(tc => ({
+					type:        'tool_result',
+					tool_use_id: tc.id,
+					content:     '[用户取消，未执行]',
+				}) as ContentBlock);
+				if (cancelResults.length > 0) {
+					history.push({ role: 'user', content: cancelResults });
+				}
 				break;
 			}
 
@@ -3722,7 +3823,18 @@ OBJECTIVE
 
 			for (const tc of toolCalls) {
 				const r = resultById.get(tc.id);
-				if (!r) continue;
+				if (!r) {
+					// 防御：调度漏掉了某个工具（理论上不应发生，但有过 bug：执行中取消 / 异常吞掉）。
+					// 必须补占位 tool_result，否则 history 里 assistant.tool_calls 缺对应 tool_result，
+					// 下次 LLM 请求 OpenAI 兼容 API 会 400 "insufficient tool messages"。
+					console.warn(`[Agent] 工具 ${tc.name} (id=${tc.id}) 缺少结果，补占位 tool_result`);
+					toolResultBlocks.push({
+						type:        'tool_result',
+						tool_use_id: tc.id,
+						content:     '[内部错误：工具未执行或结果丢失]',
+					} as ContentBlock);
+					continue;
+				}
 				toolResultBlocks.push({
 					type:        'tool_result',
 					tool_use_id: tc.id,

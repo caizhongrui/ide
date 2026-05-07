@@ -91,10 +91,58 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 	);
 
 	// 移除工作区
+	// 守护：只有当该工作区下没有任何会话时才允许删除（避免会话变孤儿）。
+	// 也兜底捕获 SQL FK 约束错误（batch_tasks.workspace_id 约束等）转成友好消息。
 	app.delete('/workspaces/:id', async (c) => {
 		const id = c.req.param('id');
-		await workspaceManager.remove(id);
-		return c.json({ ok: true });
+		const ws = workspaceManager.get(id);
+		if (!ws) {
+			return c.json({ error: '工作区不存在或已被移除', code: 'WORKSPACE_NOT_FOUND' }, 404);
+		}
+
+		// 数会话（按 workspace_path 关联，不是 FK，所以这里手动数）
+		const { getDb } = await import('../database.js');
+		const db = getDb();
+		const sessionRow = db.prepare(
+			'SELECT COUNT(*) as c FROM sessions WHERE workspace_path = ?',
+		).get(ws.path) as { c: number } | undefined;
+		const sessionCount = sessionRow?.c ?? 0;
+
+		if (sessionCount > 0) {
+			console.log(`[Workspace] 拒绝删除 ${ws.name}（${ws.path}）：还有 ${sessionCount} 个会话`);
+			return c.json({
+				error: `项目「${ws.name}」下还有 ${sessionCount} 个会话，请先删除或归档这些会话后再移除项目。`,
+				code: 'WORKSPACE_HAS_SESSIONS',
+				sessionCount,
+			}, 409);
+		}
+
+		// 数 batch_tasks（FK 强约束，会真的阻止 SQL DELETE）
+		const taskRow = db.prepare(
+			'SELECT COUNT(*) as c FROM batch_tasks WHERE workspace_id = ?',
+		).get(id) as { c: number } | undefined;
+		const taskCount = taskRow?.c ?? 0;
+
+		if (taskCount > 0) {
+			console.log(`[Workspace] 拒绝删除 ${ws.name}：还有 ${taskCount} 个批量任务记录`);
+			return c.json({
+				error: `项目「${ws.name}」下还有 ${taskCount} 个批量任务记录，请先在 Task 模式删除相关批次后再移除项目。`,
+				code: 'WORKSPACE_HAS_BATCH_TASKS',
+				taskCount,
+			}, 409);
+		}
+
+		try {
+			await workspaceManager.remove(id);
+			return c.json({ ok: true });
+		} catch (err) {
+			const msg = (err as Error).message;
+			console.error(`[Workspace] 删除失败 ${ws.name}:`, msg);
+			return c.json({
+				error: `删除项目失败：${msg}`,
+				code: 'WORKSPACE_DELETE_FAILED',
+			}, 500);
+		}
 	});
 
 	// 获取工作区文件树

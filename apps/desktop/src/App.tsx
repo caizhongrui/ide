@@ -1099,6 +1099,74 @@ export default function App() {
   // 会话搜索（sidebar 顶部，按标题模糊过滤）
   const [sessionSearch, setSessionSearch] = createSignal('')
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null)
+
+  // ── 多选删除模式（K-BulkDelete）─────────────────────────────────────────
+  // 进入后所有 session 卡片左侧出现复选框，点击切换勾选；顶部出现操作栏（全选 / 反选 / 删除选中 / 取消）
+  const [sessionSelectMode, setSessionSelectMode] = createSignal(false)
+  const [selectedSessionIds, setSelectedSessionIds] = createSignal<Set<string>>(new Set())
+  /** 切换某条 session 的选中状态 */
+  function toggleSessionSelected(id: string) {
+    setSelectedSessionIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+  /** 进入 / 退出多选模式 */
+  function toggleSessionSelectMode() {
+    setSessionSelectMode(v => {
+      const next = !v
+      if (!next) setSelectedSessionIds(new Set<string>())  // 退出时清空已选
+      return next
+    })
+  }
+  /** 在当前可见列表里全选 / 反选（从 sidebar 那边把"当前可见 ids"传上来） */
+  function selectAllVisibleSessions(visibleIds: string[]) {
+    setSelectedSessionIds(prev => {
+      const next = new Set(prev)
+      const allSelected = visibleIds.every(id => next.has(id))
+      if (allSelected) {
+        for (const id of visibleIds) next.delete(id)
+      } else {
+        for (const id of visibleIds) next.add(id)
+      }
+      return next
+    })
+  }
+  /** 批量删除选中的会话 */
+  async function bulkDeleteSelectedSessions() {
+    const ids = Array.from(selectedSessionIds())
+    if (ids.length === 0) {
+      showToast({ message: '没有选中任何会话', kind: 'warn', duration: 2000 })
+      return
+    }
+    if (!await appConfirm(`确定要删除选中的 ${ids.length} 个会话吗？此操作不可撤销。`)) return
+    const c = await getClient()
+    let success = 0
+    let failed = 0
+    // 串行删除，失败的不阻塞其他的（但仍记录失败数量）
+    for (const id of ids) {
+      try {
+        await c.deleteSession(id)
+        success++
+        // 如果删的是当前会话，关掉
+        if (activeSessionId() === id) {
+          setActiveSessionId(null); unsubscribe?.(); unsubscribe = null; setMessages([])
+        }
+      } catch (e) {
+        failed++
+        console.error(`[bulk-delete] failed for ${id}:`, e)
+      }
+    }
+    setSelectedSessionIds(new Set<string>())
+    setSessionSelectMode(false)
+    await refreshSessions()
+    if (failed > 0) {
+      showToast({ message: `已删除 ${success} 个，${failed} 个失败`, kind: 'warn', duration: 4000 })
+    } else {
+      showToast({ message: `已删除 ${success} 个会话`, kind: 'success', duration: 2500 })
+    }
+  }
   const [messages, setMessages] = createSignal<ChatMessage[]>([])
   // 内存硬防御：超过 800 条 → 丢最老的 200 条保留最新 600。
   // 大任务（100+ 工具调用、超长会话）会让 messages 数组撑爆 webview 内存。
@@ -1813,12 +1881,43 @@ export default function App() {
 
   async function deleteWorkspace(e: MouseEvent, ws: Workspace) {
     e.stopPropagation()
+
+    // ★ 前置检查：项目下有会话时直接拦截（更友好的提示,不用等服务端再反弹回来）
+    const sessionsInWs = sessions().filter(s => s.workspacePath === ws.path)
+    if (sessionsInWs.length > 0) {
+      showToast({
+        message: `项目「${ws.name}」下还有 ${sessionsInWs.length} 个会话，请先删除或归档这些会话再移除项目`,
+        kind: 'warn',
+        duration: 5000,
+      })
+      return
+    }
+
     if (!await appConfirm(`确定要移除项目「${ws.name}」？\n（仅移除项目记录，不会删除磁盘文件）`)) return
+
     const c = await getClient()
-    await c.removeWorkspace(ws.id)
-    if (activeWorkspace()?.id === ws.id) setActiveWorkspace(null)
-    await refreshWorkspaces()
-    await refreshSessions()
+    try {
+      await c.removeWorkspace(ws.id)
+      if (activeWorkspace()?.id === ws.id) setActiveWorkspace(null)
+      await refreshWorkspaces()
+      await refreshSessions()
+      showToast({ message: `项目「${ws.name}」已移除`, kind: 'success', duration: 2500 })
+    } catch (err) {
+      // 服务端可能因 batch_tasks FK 约束 / 其他原因拒绝删除
+      const msg = (err as Error).message
+      // 提取出 server 返回的友好错误（格式: "[409] /workspaces/xxx: {error: '...'}"）
+      let userMsg = msg
+      const jsonMatch = msg.match(/\{[^}]*"error"\s*:\s*"([^"]+)"/)
+      if (jsonMatch && jsonMatch[1]) userMsg = jsonMatch[1]
+      showToast({
+        message: `删除失败：${userMsg}`,
+        kind: 'error',
+        duration: 6000,
+      })
+      // 兜底：刷新一下,避免本地状态跟服务端不一致
+      await refreshWorkspaces()
+      await refreshSessions()
+    }
   }
 
   // ─── Rename ────────────────────────────────────────────────────────────────
@@ -3810,6 +3909,12 @@ export default {
               deleteSession={(e, id) => void deleteSession(e, id)}
               createSession={() => void createSession()}
               pickFolder={() => void pickFolder()}
+              sessionSelectMode={sessionSelectMode}
+              toggleSessionSelectMode={toggleSessionSelectMode}
+              selectedSessionIds={selectedSessionIds}
+              toggleSessionSelected={toggleSessionSelected}
+              selectAllVisibleSessions={selectAllVisibleSessions}
+              bulkDeleteSelectedSessions={bulkDeleteSelectedSessions}
               editingWorkspaceId={editingWorkspaceId}
               editingWorkspaceName={editingWorkspaceName}
               setEditingWorkspaceName={(v) => setEditingWorkspaceName(v)}

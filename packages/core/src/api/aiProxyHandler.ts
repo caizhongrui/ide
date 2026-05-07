@@ -414,6 +414,60 @@ export class AiProxyHandler implements IApiHandler {
 	}
 
 	/**
+	 * 历史自愈：扫一遍 OpenAI 风格消息列表，对孤儿 assistant.tool_calls
+	 * （后续没有对应 role:tool 消息）补占位 tool 消息，防止 400 报错。
+	 *
+	 * OpenAI API 约束：assistant 消息带 tool_calls 时，紧随其后必须是
+	 * 一组 role:'tool' 的消息，每个 tool_call_id 都得有对应。
+	 *
+	 * 触发场景：
+	 * 1. 用户在工具执行前点了取消（旧版 bug 没补 placeholder）
+	 * 2. 上下文压缩时把 tool_result 段落压掉了 tool_use 没压掉
+	 * 3. 跨版本数据迁移
+	 *
+	 * 修复策略：扫到孤儿 tool_calls，立刻在它后面插占位 role:tool 消息。
+	 */
+	private repairOrphanToolCalls(messages: AiProxyMessage[]): AiProxyMessage[] {
+		const out: AiProxyMessage[] = [];
+		for (let i = 0; i < messages.length; i++) {
+			const m = messages[i];
+			out.push(m);
+			if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+				// 收集这个 assistant 消息所有的 tool_call_id
+				const expectedIds = new Set(m.tool_calls.map(c => c.id));
+				// 看后续连续的 role:tool 消息覆盖了哪些 id
+				const coveredIds = new Set<string>();
+				let j = i + 1;
+				while (j < messages.length && messages[j].role === 'tool') {
+					const tcId = messages[j].tool_call_id;
+					if (tcId) coveredIds.add(tcId);
+					j++;
+				}
+				// 缺哪些就补哪些
+				const missingIds: string[] = [];
+				for (const id of expectedIds) {
+					if (!coveredIds.has(id)) missingIds.push(id);
+				}
+				if (missingIds.length > 0) {
+					console.warn(`[aiProxy] 修复孤儿 tool_calls：补 ${missingIds.length} 条占位 role:tool（ids=${missingIds.join(',')}）`);
+					// 把已覆盖的 tool 消息保留，再补缺的占位（按 expectedIds 顺序）
+					// 因为我们已经 push 了 m，这里把后续 role:tool 也 push 进去，再追加占位
+					for (let k = i + 1; k < j; k++) out.push(messages[k]);
+					for (const missingId of missingIds) {
+						out.push({
+							role: 'tool',
+							content: '[历史不完整：该工具结果丢失或未执行]',
+							tool_call_id: missingId,
+						});
+					}
+					i = j - 1; // 跳过已经 push 的 role:tool 消息（外层 i++ 会变成 j）
+				}
+			}
+		}
+		return out;
+	}
+
+	/**
 	 * P1优化：为消息添加缓存控制标记
 	 * 借鉴 Cline/Continue 的实现
 	 * 注意：这主要用于 Anthropic API，对于其他 API 可能需要适配
@@ -503,6 +557,13 @@ export class AiProxyHandler implements IApiHandler {
 
 			// 转换消息格式
 			let aiProxyMessages = this.convertMessages(cacheResult.prompt, messages);
+
+			// ★ 历史自愈：检测并修复"assistant 带 tool_calls 但下一条消息缺对应 tool 回复"的孤儿状态。
+			//   原因可能是：取消时没补 placeholder / 旧版 bug 留下的破历史 / 上下文压缩边界裁错。
+			//   不修复的话 OpenAI 兼容 API 会 400：
+			//   "An assistant message with 'tool_calls' must be followed by tool messages
+			//    responding to each 'tool_call_id'"
+			aiProxyMessages = this.repairOrphanToolCalls(aiProxyMessages);
 
 			// P1优化：为消息添加缓存控制标记
 			aiProxyMessages = this.addCacheControlToMessages(aiProxyMessages);
