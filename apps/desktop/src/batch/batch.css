@@ -18,16 +18,6 @@
 	overflow: hidden;
 }
 
-/* 顶部三段式工具栏（替代原 sidebar header） */
-.batch-top-toolbar {
-	display: flex;
-	align-items: center;
-	padding: 10px 14px;
-	border-bottom: 1px solid var(--border);
-	background: var(--bg-subtle);
-	flex-shrink: 0;
-}
-
 .batch-panel {
 	display: flex;
 	flex: 1;
@@ -35,29 +25,36 @@
 	overflow: hidden;
 }
 
-/* ── 左侧批次列表 ─────────────────────────────────────────────────── */
+/* ── 左侧批次列表（与 chat/code 模式的 .sidebar 完全一致：宽度 + 顶部彩色线 + header 高度 + 渐变） ─── */
 .batch-list-pane {
-	width: 280px;
+	width: 232px;
+	min-width: 180px;
+	max-width: 280px;
 	flex-shrink: 0;
 	display: flex;
 	flex-direction: column;
-	border-right: 1px solid var(--border);
 	background: var(--bg-subtle);
+	border-right: 1px solid var(--border);
 	overflow: hidden;
+	/* 顶部彩色强调线（与 .sidebar 完全一致） */
+	box-shadow: inset 0 2px 0 var(--accent);
+	transition: box-shadow 0.3s;
 }
 
+/* Header 行：mode-segmented + actions（与 .sidebar-header 完全一致） */
 .batch-list-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	padding: 12px 14px;
+	padding: 0 8px 0 12px;
+	height: 40px;
 	border-bottom: 1px solid var(--border);
-}
-.batch-list-header h3 {
-	margin: 0;
-	font-size: 13px;
-	color: var(--text-base);
-	font-weight: 600;
+	flex-shrink: 0;
+	background: linear-gradient(
+		to bottom,
+		color-mix(in srgb, var(--accent) 6%, transparent) 0%,
+		transparent 100%
+	);
 }
 
 .batch-list-filter {

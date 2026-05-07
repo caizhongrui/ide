@@ -120,7 +120,8 @@ export function SessionRoutes(sessionManager: SessionManager) {
 		'/sessions/:id',
 		zValidator('json', z.object({
 			title: z.string().optional(),
-			mode: z.enum(['code', 'ask', 'chat', 'plan', 'debug', 'architect', 'solo']).optional(),
+			// 'bypass' = 跳过所有破坏性工具的人工审批（YOLO 模式，与 Claude Code 的 --dangerously-skip-permissions 等价）
+			mode: z.enum(['code', 'ask', 'chat', 'plan', 'bypass', 'debug', 'architect', 'solo']).optional(),
 		})),
 		(c) => {
 			const id = c.req.param('id');

@@ -311,6 +311,57 @@ export default function App() {
   }
   const [showSkillsPanel, setShowSkillsPanel] = createSignal(false)
 
+  // ── K-Pet: 桌面豹子宠物 ─────────────────────────────────────────────────
+  const [petVisible, setPetVisible] = createSignal(false)
+
+  type PetState = 'idle' | 'running' | 'waiting' | 'review' | 'failed'
+  /** 主窗口状态 → 宠物状态映射 */
+  const petState = (): PetState => {
+    // 1. 有工具审批请求 → waiting（最高优先级）
+    if (approvalRequest()) return 'waiting'
+    // 2. plan-exit / question 也算 waiting
+    if (planExitRequest()) return 'waiting'
+    if (questionRequest()) return 'waiting'
+    // 3. 正在跑（sending=true）→ running
+    if (sending()) return 'running'
+    // 4. 最近失败 → failed（短暂显示，由 PetWindow 自己 5s 后退回 idle）
+    if (lastErrorAt() && Date.now() - lastErrorAt() < 1500) return 'failed'
+    // 5. 最近完成 → review（Pet 内部 5s 后退回 idle）
+    if (lastCompletionAt() && Date.now() - lastCompletionAt() < 1500) return 'review'
+    return 'idle'
+  }
+  // 失败/完成事件的"最近时间"，让宠物有短暂 review/failed 状态
+  const [lastCompletionAt, setLastCompletionAt] = createSignal(0)
+  const [lastErrorAt, setLastErrorAt] = createSignal(0)
+
+  /** 把当前 petState 推到 pet 窗口（Tauri 事件） */
+  const _emitPetState = async (state: PetState, hint?: string) => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('pet_emit_state', { state, hint })
+    } catch { /* 非 Tauri 环境（少见）忽略 */ }
+  }
+
+  // 自动推送：状态一变就 emit（功能已暂时屏蔽，待宠物形象动效素材完成后再启用）
+  // createEffect(() => {
+  //   const s = petState()
+  //   void _emitPetState(s)
+  // })
+  void petState; void _emitPetState  // 保留引用避免 TS 报"未使用"
+
+  /** 切换宠物可见 */
+  const togglePet = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const visible = await invoke<boolean>('pet_window_toggle')
+      setPetVisible(visible)
+      // 显示后立刻同步一次状态
+      if (visible) void _emitPetState(petState())
+    } catch (e) {
+      console.warn('[Pet] toggle failed:', e)
+    }
+  }
+
   // ── B5: 浏览器预览面板 ────────────────────────────────────────────────
   const [showBrowserPanel, setShowBrowserPanel] = createSignal(false)
   const [browserUrl, setBrowserUrl] = createSignal('')
@@ -1827,6 +1878,8 @@ export default function App() {
     setMessages: (updater) => setMessages(updater),
     setSending,
     bumpRecv: _bumpRecv,
+    onPetCompletion: () => setLastCompletionAt(Date.now()),
+    onPetError:      () => setLastErrorAt(Date.now()),
     setChangedFiles: (updater) => setChangedFiles(updater),
     setTokenUsed,
     tokenLimit,
@@ -1845,6 +1898,7 @@ export default function App() {
     setCompactingState: (s) => setCompactingState(s),
     setApprovalRequest: (req) => setApprovalRequest(req),
     isAutoApproved,
+    getComposerMode: () => composerMode(),
     getClient: () => getClient() as any,
     showToast,
     pushError,
@@ -3587,6 +3641,52 @@ export default {
         await c.updateSessionMode(sid, mode)
       } catch { /* 忽略 */ }
     }
+    // ★ 动态模式切换 — 如果当前有审批弹窗等待，根据新模式决定是否自动通过
+    //   FILE_EDIT_TOOLS 必须与 packages/server/src/cli.ts 同步
+    const FILE_EDIT_TOOLS = new Set(['write_to_file', 'edit', 'multiedit', 'apply_patch'])
+    if (mode === 'bypass') {
+      // 切到 bypass：所有等待中的审批都立即通过
+      const pending = approvalRequest()
+      if (pending) {
+        try {
+          const c = await getClient()
+          await c.approveToolCall(pending.sessionId, pending.toolUseId, true)
+          setApprovalRequest(null)
+        } catch (e) {
+          console.error('[bypass] auto-approve pending failed:', e)
+        }
+      }
+      setMessages(prev => [...prev, {
+        id: String(++msgId), role: "system",
+        createdAt: Date.now(),
+        content: "⚠️ 已切换到「跳过权限」模式：所有破坏性工具调用将自动批准，请谨慎使用",
+      }])
+    } else if (mode === 'code') {
+      // 切到 code：如果当前等待中的是 文件编辑类，立即通过（"自动接受文件修改"语义）
+      const pending = approvalRequest()
+      if (pending && FILE_EDIT_TOOLS.has(pending.toolName)) {
+        try {
+          const c = await getClient()
+          await c.approveToolCall(pending.sessionId, pending.toolUseId, true)
+          setApprovalRequest(null)
+        } catch (e) {
+          console.error('[code] auto-approve file-edit pending failed:', e)
+        }
+      }
+      if (prevMode === 'bypass') {
+        setMessages(prev => [...prev, {
+          id: String(++msgId), role: "system",
+          createdAt: Date.now(),
+          content: "🔒 已退出「跳过权限」模式：恢复正常审批流程（文件修改自动接受，shell 命令仍需确认）",
+        }])
+      }
+    } else if (prevMode === 'bypass') {
+      setMessages(prev => [...prev, {
+        id: String(++msgId), role: "system",
+        createdAt: Date.now(),
+        content: "🔒 已退出「跳过权限」模式：恢复正常审批流程",
+      }])
+    }
     if (mode === 'plan') {
       setMessages(prev => [...prev, {
         id: String(++msgId), role: "system",
@@ -3888,6 +3988,15 @@ export default {
                 currentMode={globalMode()}
                 onSwitchToChat={() => leaveBatchPanelToMode('chat')}
                 onSwitchToCode={() => leaveBatchPanelToMode('code')}
+                /* 底部用户区（与 sidebar 共用一份 SidebarUserSection） */
+                currentUser={currentUser}
+                userExpanded={userExpanded}
+                setUserExpanded={(v) => setUserExpanded(v as any)}
+                showSettings={showSettings}
+                setShowSettings={(v) => setShowSettings(v)}
+                setSettingsTab={(t) => setSettingsTab(t)}
+                handleLogout={handleLogout}
+                userInitials={userInitials}
                 onJumpToSession={async (sessionId, workspaceId) => {
                   // 看日志 = "临时打开任务会话"，不应污染用户最近会话。
                   // 记下跳前的 activeSessionId，用户点 Chat/Code 段切换时恢复。
@@ -4113,6 +4222,24 @@ export default {
                       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
                     </svg>
                   </button>
+                  {/* K-Pet: 桌面豹子宠物 —— 暂屏蔽（等动效素材完成后再启用） */}
+                  <Show when={false}>
+                    <button
+                      class="icon-btn"
+                      classList={{ active: petVisible() }}
+                      onClick={() => void togglePet()}
+                      title="桌面豹子（agent 状态指示宠物）"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M6 6 L4.5 3.5 L8.5 5 Z" />
+                        <path d="M18 6 L19.5 3.5 L15.5 5 Z" />
+                        <circle cx="12" cy="13" r="6.5" />
+                        <circle cx="9.7" cy="12" r="0.7" fill="currentColor" />
+                        <circle cx="14.3" cy="12" r="0.7" fill="currentColor" />
+                        <path d="M11 15 L12 16 L13 15" />
+                      </svg>
+                    </button>
+                  </Show>
                   {/* B2: MCP 工具索引面板 — 插头图标，象征"插入外部工具" */}
                   <button
                     class="icon-btn"

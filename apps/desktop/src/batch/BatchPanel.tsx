@@ -13,6 +13,8 @@ import type { MaxianClient, TaskBatch, BatchTask, BatchEvent, Workspace } from '
 import { BatchListItem } from './BatchListItem'
 import { BatchDetailPanel } from './BatchDetailPanel'
 import { BatchCreateForm } from './BatchCreateForm'
+import { SidebarUserSection } from '../sidebar/SidebarUserSection'
+import type { UserInfo } from '../api'
 
 interface Props {
 	client:     MaxianClient
@@ -23,6 +25,15 @@ interface Props {
 	onSwitchToCode: () => void
 	/** 看日志：关闭批次面板 + 切到对应会话 */
 	onJumpToSession: (sessionId: string, workspaceId: string) => void
+	/* ── 底部用户区（与 sidebar 复用同一份 UI） ─────────────────── */
+	currentUser:     () => UserInfo | null
+	userExpanded:    () => boolean
+	setUserExpanded: (v: boolean | ((prev: boolean) => boolean)) => void
+	showSettings:    () => boolean
+	setShowSettings: (v: boolean) => void
+	setSettingsTab:  (tab: any) => void
+	handleLogout:    () => void
+	userInitials:    (user: UserInfo) => string
 }
 
 export const BatchPanel: Component<Props> = (props) => {
@@ -111,43 +122,43 @@ export const BatchPanel: Component<Props> = (props) => {
 
 	return (
 		<div class="batch-panel-wrap">
-			{/* 顶部三段式（替代原 sidebar header） */}
-			<div class="batch-top-toolbar">
-				<div class="mode-segmented">
-					<button class="mode-seg-btn" onClick={props.onSwitchToChat} title="Chat — 智能对话">
-						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-						</svg>
-						Chat
-					</button>
-					<button class="mode-seg-btn" onClick={props.onSwitchToCode} title="Code — 智能编码 Agent">
-						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-							<polyline points="16 18 22 12 16 6"/>
-							<polyline points="8 6 2 12 8 18"/>
-						</svg>
-						Code
-					</button>
-					<button class="mode-seg-btn active" title="Task — 批量给项目派任务">
-						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-							<rect x="3" y="3" width="7" height="7"/>
-							<rect x="14" y="3" width="7" height="7"/>
-							<rect x="3" y="14" width="7" height="7"/>
-							<rect x="14" y="14" width="7" height="7"/>
-						</svg>
-						Task
-					</button>
-				</div>
-			</div>
-
 			<div class="batch-panel">
-			{/* 左侧：批次列表 */}
+			{/* 左侧：批次列表（与 chat/code 模式 sidebar 同宽同样式：232px / 顶部彩色线 / 头部含三段式） */}
 			<aside class="batch-list-pane">
-				<header class="batch-list-header">
-					<h3>任务批次</h3>
-					<button class="btn-primary" onClick={() => setShowCreateForm(true)}>
-						+ 新建
-					</button>
-				</header>
+				{/* Header 行：模式切换 + 操作（结构与 .sidebar-header 一致，方便共享样式） */}
+				<div class="batch-list-header">
+					<div class="mode-segmented">
+						<button class="mode-seg-btn" onClick={props.onSwitchToChat} title="Chat — 智能对话">
+							<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+								<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+							</svg>
+							Chat
+						</button>
+						<button class="mode-seg-btn" onClick={props.onSwitchToCode} title="Code — 智能编码 Agent">
+							<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+								<polyline points="16 18 22 12 16 6"/>
+								<polyline points="8 6 2 12 8 18"/>
+							</svg>
+							Code
+						</button>
+						<button class="mode-seg-btn active" title="Task — 批量给项目派任务">
+							<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+								<rect x="3" y="3" width="7" height="7"/>
+								<rect x="14" y="3" width="7" height="7"/>
+								<rect x="3" y="14" width="7" height="7"/>
+								<rect x="14" y="14" width="7" height="7"/>
+							</svg>
+							Task
+						</button>
+					</div>
+					<div class="sidebar-actions">
+						<button class="icon-btn" onClick={() => setShowCreateForm(true)} title="新建批次">
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+							</svg>
+						</button>
+					</div>
+				</div>
 				<div class="batch-list-filter">
 					<For each={[
 						{ k: 'all', label: '全部' },
@@ -179,6 +190,17 @@ export const BatchPanel: Component<Props> = (props) => {
 						)}
 					</For>
 				</div>
+				{/* 底部用户信息（与 chat/code 模式 sidebar 完全一致） */}
+				<SidebarUserSection
+					currentUser={props.currentUser}
+					userExpanded={props.userExpanded}
+					setUserExpanded={props.setUserExpanded}
+					showSettings={props.showSettings}
+					setShowSettings={props.setShowSettings}
+					setSettingsTab={props.setSettingsTab}
+					handleLogout={props.handleLogout}
+					userInitials={props.userInitials}
+				/>
 			</aside>
 
 			{/* 右侧：批次详情 */}

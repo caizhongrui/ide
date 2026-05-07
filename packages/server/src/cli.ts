@@ -3467,8 +3467,22 @@ OBJECTIVE
 			const toolResultBlocks: ContentBlock[] = [];
 
 			// 破坏性工具（需审批 + 串行执行）
+			// 进一步细分为：
+			//   FILE_EDIT_TOOLS    —— 文件编辑类（用 git/快照可恢复，风险中等）
+			//   COMMAND_EXEC_TOOLS —— shell 命令执行类（任意副作用、不可恢复，风险最高）
+			// 不同 composer 模式对两组的处理策略不一样：
+			//   ask    → 都弹审批
+			//   code   → 自动通过 FILE_EDIT，仅对 COMMAND_EXEC 弹审批（默认体验）
+			//   bypass → 都自动通过
+			//   plan   → LLM 根本看不到这些工具（不会进到这里）
+			const FILE_EDIT_TOOLS = new Set([
+				'write_to_file', 'edit', 'multiedit', 'apply_patch',
+			]);
+			const COMMAND_EXEC_TOOLS = new Set([
+				'execute_command', 'bash',
+			]);
 			const DESTRUCTIVE_TOOLS = new Set([
-				'write_to_file', 'edit', 'multiedit', 'execute_command', 'bash', 'apply_patch',
+				...FILE_EDIT_TOOLS, ...COMMAND_EXEC_TOOLS,
 			]);
 
 			// 预处理每个工具：doom-loop 检测 + 审批（都走串行）
@@ -3504,6 +3518,25 @@ OBJECTIVE
 				} as any);
 
 				if (DESTRUCTIVE_TOOLS.has(tc.name)) {
+					// 每次工具调用都从 DB 实时读 session.mode，
+					// 这样用户在执行过程中切换模式都能立刻生效。
+					const liveMode = server.sessionManager.getMode(sessionId);
+
+					// ★ bypass 模式：所有破坏性工具一律自动批准
+					if (liveMode === 'bypass') {
+						console.log(`[Agent] bypass 模式自动批准 ${tc.name} (id=${tc.id})`);
+						pending.push({ tc, denied: false, denyReason: '' });
+						continue;
+					}
+
+					// ★ code 模式（默认）：文件编辑类自动接受，仅对 shell 命令弹审批
+					//   匹配 ModeSelector 标签描述的"自动接受文件修改"语义
+					if (liveMode === 'code' && FILE_EDIT_TOOLS.has(tc.name)) {
+						console.log(`[Agent] code 模式自动接受文件编辑 ${tc.name} (id=${tc.id})`);
+						pending.push({ tc, denied: false, denyReason: '' });
+						continue;
+					}
+
 					// Auto-approve（批量任务模式）短路：sessionManager.getAutoApproveConfig 配置过的会话
 					// 直接走 decideApproval —— 'auto' 直接通过，'deny' 走拒绝路径，'ask' 走原 approval 流程
 					const autoCfg = server.sessionManager.getAutoApproveConfig(sessionId);
@@ -3522,7 +3555,7 @@ OBJECTIVE
 						}
 						// 'ask' fall through 走原审批流程
 					}
-					console.log(`[Agent] 破坏性工具：等待用户审批 ${tc.name} (id=${tc.id}, mode=${mode})`);
+					console.log(`[Agent] 破坏性工具：等待用户审批 ${tc.name} (id=${tc.id}, mode=${liveMode})`);
 					await server.sessionManager.emitEvent(sessionId, {
 						type:       'tool_approval_request',
 						sessionId,

@@ -36,6 +36,10 @@ export interface ChatEventDeps {
 	setSending:  (v: boolean) => void
 	bumpRecv:    (n: number) => void
 
+	// ── K-Pet：让宠物窗口知道 review/failed 这种瞬时状态 ─────────────────
+	onPetCompletion?: () => void
+	onPetError?:      () => void
+
 	// ── 文件变更 ──────────────────────────────────────────────────────────
 	setChangedFiles: (updater: (prev: Map<string, FileChangeEntry>) => Map<string, FileChangeEntry>) => void
 
@@ -69,6 +73,8 @@ export interface ChatEventDeps {
 	// ── Approval ──────────────────────────────────────────────────────────
 	setApprovalRequest: (req: { sessionId: string; toolUseId: string; toolName: string; toolParams: Record<string, unknown> } | null) => void
 	isAutoApproved:     (sessionId: string, toolName: string) => boolean
+	/** K-Bypass：当前 composer 模式（bypass 时所有审批请求都自动通过）*/
+	getComposerMode?:   () => string
 	getClient:          () => Promise<{ approveToolCall: (sid: string, useId: string, ok: boolean) => Promise<unknown> }>
 
 	// ── 副作用 / helpers ──────────────────────────────────────────────────
@@ -304,6 +310,23 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 			const toolUseId = (e as any).toolUseId as string
 			const toolName  = (e as any).toolName  as string
 			const toolParams = (e as any).toolParams as Record<string, unknown>
+			const composerMode = deps.getComposerMode?.()
+			// FILE_EDIT_TOOLS 必须与 packages/server/src/cli.ts 同步
+			const FILE_EDIT_TOOLS = new Set(['write_to_file', 'edit', 'multiedit', 'apply_patch'])
+			// ★ bypass 模式 → 一切自动批准
+			//   code 模式 + 文件编辑类 → 自动批准（"自动接受文件修改"语义）
+			//   （服务端理论上已经短路了，这里是双保险防老 sidecar / 时序竞态）
+			if (composerMode === 'bypass' || (composerMode === 'code' && FILE_EDIT_TOOLS.has(toolName))) {
+				void (async () => {
+					try {
+						const c = await deps.getClient()
+						await c.approveToolCall(sid, toolUseId, true)
+					} catch (err) {
+						console.error('[mode-auto-approve] failed:', err)
+					}
+				})()
+				return
+			}
 			// 自动审批：已记忆的工具跳过弹窗
 			if (deps.isAutoApproved(sid, toolName)) {
 				void (async () => {
@@ -388,6 +411,7 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 				return m
 			}))
 			deps.setSending(false)
+			deps.onPetCompletion?.()
 			void deps.refreshSessions()
 			// 系统通知：当文档不在前台时发送 OS 通知
 			if (document.visibilityState !== 'visible') {
@@ -550,6 +574,7 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 				}]
 			})
 			deps.pushError('agent', errMsg, (e as any).sessionId as string | undefined)
+			deps.onPetError?.()
 			// 清除限流提示、sending、followup 等残留状态
 			deps.setRateLimit({ active: false, resetAt: 0, attempt: 0, message: '' })
 			deps.setSending(false)

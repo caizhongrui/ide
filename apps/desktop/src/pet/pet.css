@@ -1,0 +1,302 @@
+/* ════════════════════════════════════════════════════════════════════════
+ *  桌面机械豹宠物样式（K-Pet 码弦官方形象版）
+ *
+ *  Pet 窗口本身是 Tauri 透明无边框 always-on-top 子窗。
+ *  豹子主体是码弦官方机械豹的透明动态 GIF，CSS 只在它之上：
+ *    - 加状态色调滤镜（5 种状态各异）
+ *    - 加状态浮动角标
+ *    - 加底部光晕脉冲
+ *    - 加状态切换的弹性过渡
+ * ════════════════════════════════════════════════════════════════════════ */
+
+html, body {
+	margin: 0;
+	padding: 0;
+	background: transparent !important;
+	overflow: hidden;
+	user-select: none;
+	-webkit-user-select: none;
+	font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
+	color-scheme: light dark;
+}
+
+#pet-root {
+	width: 100vw;
+	height: 100vh;
+}
+
+.pet-root {
+	position: relative;
+	width: 100vw;
+	height: 100vh;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: grab;
+}
+.pet-root:active { cursor: grabbing; }
+
+/* ── 状态光晕（机械豹脚底的彩色软光池） ─────────────────────────────── */
+.pet-aura {
+	position: absolute;
+	left: 50%;
+	bottom: 6%;
+	transform: translateX(-50%);
+	width: 70%;
+	height: 18%;
+	border-radius: 50%;
+	pointer-events: none;
+	transition: background 0.35s, box-shadow 0.35s, opacity 0.35s;
+	opacity: 0.55;
+	filter: blur(4px);
+}
+.pet-root[data-state="idle"]    .pet-aura {
+	background: radial-gradient(ellipse, rgba(96, 165, 250, 0.45) 0%, transparent 70%);
+	opacity: 0.5;
+	animation: pet-aura-breathe 3.2s ease-in-out infinite;
+}
+.pet-root[data-state="running"] .pet-aura {
+	background: radial-gradient(ellipse, rgba(59, 130, 246, 0.65) 0%, transparent 70%);
+	box-shadow: 0 0 30px rgba(59, 130, 246, 0.45);
+	animation: pet-aura-pulse 0.7s ease-in-out infinite;
+}
+.pet-root[data-state="waiting"] .pet-aura {
+	background: radial-gradient(ellipse, rgba(245, 158, 11, 0.55) 0%, transparent 70%);
+	box-shadow: 0 0 28px rgba(245, 158, 11, 0.50);
+	animation: pet-aura-pulse 0.9s ease-in-out infinite;
+}
+.pet-root[data-state="review"]  .pet-aura {
+	background: radial-gradient(ellipse, rgba(34, 197, 94, 0.60) 0%, transparent 70%);
+	box-shadow: 0 0 36px rgba(34, 197, 94, 0.55);
+	animation: pet-aura-pulse 1.1s ease-in-out infinite;
+}
+.pet-root[data-state="failed"]  .pet-aura {
+	background: radial-gradient(ellipse, rgba(239, 68, 68, 0.55) 0%, transparent 70%);
+	box-shadow: 0 0 28px rgba(239, 68, 68, 0.50);
+}
+
+@keyframes pet-aura-pulse {
+	0%, 100% { opacity: 0.5; transform: translateX(-50%) scale(1); }
+	50%      { opacity: 0.85; transform: translateX(-50%) scale(1.12); }
+}
+@keyframes pet-aura-breathe {
+	0%, 100% { opacity: 0.4; }
+	50%      { opacity: 0.65; }
+}
+
+/* ── 机械豹主体（GIF 自带动画，CSS 只调色调和缩放） ──────────────────── */
+.pet-body {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.leo-wrap {
+	position: relative;
+	width: 96%;
+	height: 96%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transform-origin: center bottom;
+	transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.leo-img {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	pointer-events: none;
+	-webkit-user-drag: none;
+	transition: filter 0.35s, transform 0.35s;
+	/* 默认就有的轻微 drop-shadow 让机械豹立体 */
+	filter: drop-shadow(0 6px 14px rgba(56, 122, 200, 0.45));
+}
+
+/* 状态色调（在 GIF 自带蓝色基础上微调，让 5 个状态可一眼区分） */
+.pet-root[data-state="idle"]    .leo-img {
+	filter: drop-shadow(0 6px 14px rgba(56, 122, 200, 0.45));
+}
+.pet-root[data-state="running"] .leo-img {
+	filter:
+		drop-shadow(0 6px 14px rgba(59, 130, 246, 0.65))
+		brightness(1.1)
+		saturate(1.15);
+	animation: leo-running-bob 0.55s ease-in-out infinite;
+}
+.pet-root[data-state="waiting"] .leo-img {
+	filter:
+		drop-shadow(0 6px 14px rgba(245, 158, 11, 0.55))
+		hue-rotate(-50deg)
+		saturate(1.2);
+	animation: leo-waiting-tilt 1.6s ease-in-out infinite;
+}
+.pet-root[data-state="review"]  .leo-img {
+	filter:
+		drop-shadow(0 6px 14px rgba(34, 197, 94, 0.55))
+		hue-rotate(80deg)
+		saturate(1.2)
+		brightness(1.1);
+	animation: leo-review-bounce 0.7s ease-in-out infinite;
+}
+.pet-root[data-state="failed"]  .leo-img {
+	filter:
+		drop-shadow(0 6px 14px rgba(239, 68, 68, 0.55))
+		hue-rotate(140deg)
+		saturate(0.7)
+		brightness(0.9);
+	animation: leo-failed-shake 0.4s ease-in-out 3;
+}
+
+@keyframes leo-running-bob {
+	0%, 100% { transform: translateY(0) scale(1); }
+	50%      { transform: translateY(-4px) scale(1.02); }
+}
+@keyframes leo-waiting-tilt {
+	0%, 100% { transform: rotate(-3deg); }
+	50%      { transform: rotate(3deg); }
+}
+@keyframes leo-review-bounce {
+	0%   { transform: translateY(0) scale(1) rotate(-2deg); }
+	30%  { transform: translateY(-10px) scale(1.04, 0.96) rotate(2deg); }
+	50%  { transform: translateY(-14px) scale(1.06, 0.94) rotate(-2deg); }
+	70%  { transform: translateY(-8px) scale(1.04, 0.96) rotate(2deg); }
+	100% { transform: translateY(0) scale(1) rotate(-2deg); }
+}
+@keyframes leo-failed-shake {
+	0%, 100% { transform: translateX(0); }
+	25%      { transform: translateX(-4px); }
+	75%      { transform: translateX(4px); }
+}
+
+/* ── 状态浮动角标 ─────────────────────────────────────────────────────── */
+.leo-badge {
+	position: absolute;
+	top: 4%;
+	right: 4%;
+	min-width: 24px;
+	height: 24px;
+	padding: 0 7px;
+	border-radius: 12px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 14px;
+	font-weight: 800;
+	color: #fff;
+	box-shadow: 0 3px 8px rgba(0, 0, 0, 0.40);
+	pointer-events: none;
+	animation: leo-badge-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+	z-index: 2;
+	border: 1.5px solid rgba(255, 255, 255, 0.30);
+}
+.leo-badge-waiting { background: linear-gradient(135deg, #fbbf24, #d97706); }
+.leo-badge-review  { background: linear-gradient(135deg, #34d399, #16a34a); }
+.leo-badge-failed  {
+	background: linear-gradient(135deg, #f87171, #dc2626);
+	animation: leo-badge-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), leo-badge-shake 0.3s ease-in-out 0.32s 2;
+}
+.leo-badge-running {
+	background: linear-gradient(135deg, #60a5fa, #2563eb);
+	gap: 3px;
+	padding: 0 8px;
+}
+.leo-spinner-dot {
+	width: 4.5px;
+	height: 4.5px;
+	border-radius: 50%;
+	background: #fff;
+	animation: leo-spinner-bounce 0.9s ease-in-out infinite;
+}
+.leo-spinner-dot:nth-child(1) { animation-delay: 0s; }
+.leo-spinner-dot:nth-child(2) { animation-delay: 0.15s; }
+.leo-spinner-dot:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes leo-spinner-bounce {
+	0%, 60%, 100% { transform: translateY(0); opacity: 0.55; }
+	30%           { transform: translateY(-3px); opacity: 1; }
+}
+@keyframes leo-badge-pop {
+	0%   { transform: scale(0); opacity: 0; }
+	60%  { transform: scale(1.2); opacity: 1; }
+	100% { transform: scale(1); }
+}
+@keyframes leo-badge-shake {
+	0%, 100% { transform: translateX(0); }
+	25%      { transform: translateX(-2px); }
+	75%      { transform: translateX(2px); }
+}
+
+/* ── 状态文字（hover 显示） ───────────────────────────────────────────── */
+.pet-status {
+	position: absolute;
+	bottom: 2px;
+	left: 50%;
+	transform: translateX(-50%);
+	background: rgba(15, 23, 42, 0.85);
+	color: #fff;
+	font-size: 10.5px;
+	padding: 3px 10px;
+	border-radius: 12px;
+	white-space: nowrap;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 0.25s;
+	max-width: 200px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	z-index: 3;
+	border: 1px solid rgba(96, 165, 250, 0.30);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.pet-root:hover .pet-status,
+.pet-root[data-state="waiting"] .pet-status,
+.pet-root[data-state="review"]  .pet-status,
+.pet-root[data-state="failed"]  .pet-status {
+	opacity: 1;
+}
+
+/* ── 右键菜单 ──────────────────────────────────────────────────────────── */
+.pet-ctx-menu {
+	position: fixed;
+	z-index: 99;
+	background: rgba(15, 23, 42, 0.96);
+	backdrop-filter: blur(10px);
+	border: 1px solid rgba(96, 165, 250, 0.20);
+	border-radius: 8px;
+	padding: 4px;
+	min-width: 130px;
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.50);
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+.pet-ctx-item {
+	display: block;
+	width: 100%;
+	padding: 6px 12px;
+	border: none;
+	background: transparent;
+	color: #f3f4f6;
+	font-size: 11.5px;
+	text-align: left;
+	border-radius: 4px;
+	cursor: pointer;
+	transition: background 0.12s;
+}
+.pet-ctx-item:hover {
+	background: rgba(96, 165, 250, 0.18);
+}
+.pet-ctx-danger {
+	color: #fca5a5;
+}
+.pet-ctx-danger:hover {
+	background: rgba(239, 68, 68, 0.20);
+	color: #fecaca;
+}
+.pet-ctx-divider {
+	height: 1px;
+	background: rgba(255, 255, 255, 0.10);
+	margin: 3px 4px;
+}

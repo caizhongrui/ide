@@ -23,6 +23,7 @@ use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, 
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod terminal;
+mod pet;
 
 struct ServerHandle(Mutex<Option<CommandChild>>);
 struct ServerPid(Mutex<Option<u32>>);   // 备份 pid，即使 CommandChild 被 take 走也能最后一击
@@ -338,6 +339,11 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            pet::pet_window_show,
+            pet::pet_window_hide,
+            pet::pet_window_toggle,
+            pet::pet_window_snap,
+            pet::pet_emit_state,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

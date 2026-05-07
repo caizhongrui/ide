@@ -1,7 +1,11 @@
 import { defineConfig } from "vite"
+import { resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import solid from "vite-plugin-solid"
 import tailwindcss from "@tailwindcss/vite"
 import pkg from "./package.json" with { type: "json" }
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url))
 
 export default defineConfig({
   plugins: [solid(), tailwindcss()],
@@ -20,5 +24,15 @@ export default defineConfig({
   // 唯一真相源 = apps/desktop/package.json#version
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        // 主窗口
+        main: resolve(__dirname, "index.html"),
+        // 桌面豹子宠物（K-Pet 子窗口）
+        pet:  resolve(__dirname, "pet.html"),
+      },
+    },
   },
 })
