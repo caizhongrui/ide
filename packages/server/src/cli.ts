@@ -136,6 +136,8 @@ import type {
 	ITerminal,
 	IStorage,
 	IAuthProvider,
+	IMessageBus,
+	MaxianPlatform,
 } from '@maxian/core';
 import type { IToolExecutor } from '@maxian/core/tools';
 import type { MessageParam, ToolDefinition, ContentBlock } from '@maxian/core/api';
@@ -251,6 +253,15 @@ class NodeToolContext implements IToolContext {
 	readonly fileContextTracker: MemoryFileContextTracker;
 	didEditFile = false;
 	readonly sessionId?: string;
+	/**
+	 * K8d 收尾：平台能力容器。
+	 * 由 runAgentLoop 在创建 ctx 后立即注入（包含 NodeTerminal / NodeFileSystem 等），
+	 * bashTool / executeCommandTool / platformFs 等通过 ctx.platform.* 访问宿主能力。
+	 *
+	 * 接口里声明为 readonly（IToolContext.platform），这里在 class 上放宽为可写以便
+	 * runAgentLoop 一次性注入（构造时尚不知道 sessionManager 上的 messageBus）。
+	 */
+	platform?: MaxianPlatform;
 	/** B2: 全局 MCP Hub 引用（由 sessionManager 提供） */
 	mcpHub?: import('@maxian/core/mcp').McpHub;
 	/** B2: 当前会话已激活的 MCP 工具集（toolId 形式：mcp_<server>_<tool>） */
@@ -1751,14 +1762,39 @@ async function createDefaultPlatform() {
 	const { NodeTerminal } = await import('@maxian/core/adapters/NodeTerminal');
 	const terminal: ITerminal = new NodeTerminal();
 
+	// K8d 收尾：注入真实的 NodeFileSystem 替换原来的 stub。
+	// 让 ctx.platform.fs 在 executeCommandTool 等位置可以做存在性预检查。
+	const { NodeFileSystem } = await import('@maxian/core/adapters/NodeFileSystem');
+	const fs: IFileSystem = new NodeFileSystem(cwd);
+
+	// IStorage / IAuthProvider 当前 server 还没有真实实现（不属于核心 agent 工具链），
+	// 暂时保留 stub —— core 工具不会从 ctx.platform.storage / .auth 取值。
+	const storage = {} as IStorage;
+	const auth    = {} as IAuthProvider;
+
+	// 简易内存 IMessageBus（core 工具目前不会通过 ctx.platform.messageBus 主动 emit；
+	// 真正的 SSE 广播走 sessionManager.emitEvent）。
+	const messageBus: IMessageBus = {
+		emit:      () => {},
+		onCommand: () => ({ dispose() {} }),
+	};
+
+	// 装配完整 MaxianPlatform（工具层 ctx.platform 用）。
+	const { createNodePlatform } = await import('@maxian/core/adapters/NodePlatform');
+	const toolPlatform: MaxianPlatform = createNodePlatform({
+		fs, terminal, workspace, messageBus, config, storage, auth,
+		workspaceRoot: cwd,
+	});
+
 	return {
 		config,
 		workspace,
-		fs:      {} as IFileSystem,
+		fs,
 		terminal,
-		storage:  {} as IStorage,
-		auth:     {} as IAuthProvider,
+		storage,
+		auth,
 		toolExecutor,
+		toolPlatform,
 	};
 }
 
@@ -2197,6 +2233,8 @@ async function main() {
 		server.sessionManager.waitForQuestionAnswer(sid, timeout);
 	(globalThis as any).__maxianWaitForPlanExit = (sid: string, timeout: number) =>
 		server.sessionManager.waitForPlanExit(sid, timeout);
+	// B5: 浏览器桥接控制器（让 browser_* 工具能拿到）
+	(globalThis as any).__maxianBrowserController = server.sessionManager.browserController;
 	// /compact 命令入口
 	(globalThis as any).__maxianForceCompact = async (sid: string) => {
 		const session = server.sessionManager.getSession(sid);
@@ -2758,6 +2796,10 @@ OBJECTIVE
 		// 清掉上次遗留的取消标记（这次是新任务启动，不该继承上次的 cancel 状态）
 		server.sessionManager.resetCancelled(sessionId);
 		const ctx            = new NodeToolContext(workspacePath, sessionId);
+		// K8d 收尾：注入平台能力容器（NodeTerminal / NodeFileSystem / IWorkspace 等）。
+		// bashTool / executeCommandTool 等通过 ctx.platform.terminal / .fs 访问宿主能力，
+		// 不再直接 import 'node:child_process' / 'node:fs'。
+		ctx.platform             = platform.toolPlatform;
 		// B2: 注入 MCP Hub + 每会话独立的激活集 / sticky / lastUsed map
 		ctx.mcpHub               = server.sessionManager.mcpHub;
 		ctx.activeMcpTools       = new Set<string>();

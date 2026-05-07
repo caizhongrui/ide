@@ -12,6 +12,23 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.18',
+		date: '2026-05-07',
+		changes: [
+			'🌐 浏览器预览面板新增反向代理：sidecar 内置 /browser/proxy，剥掉上游 X-Frame-Options / CSP / COOP-COEP-CORP 等阻塞 iframe 的安全头，HTML 顶部内联 inspector 脚本',
+			'   · 跨域页面的 console / network 捕获 + AI 工具的 click / fill / eval 全部可用（之前仅对同源生效）',
+			'   · history.replaceState 自动改写 iframe 的 location.pathname 到上游路径，Vue Router / React Router 等 SPA 路由库不再报「No match found」',
+			'   · 注入顺序优化（vars → inspector → <base href>），用绝对 same-origin URL 兜底，避免 baseURI 切换触发 SecurityError',
+			'   · proxy 响应强制 Cache-Control: no-store + 剥 ETag/Last-Modified，每次刷新都拿最新 inspector 代码',
+			'🐛 修复 bash / execute_command 工具的「c.uuid is not a function」报错：bashTool.ts / executeCommandTool.ts 中检查 c?.randomUUID 但调用 c.uuid() 的 typo',
+			'🐛 修复「platform.terminal 未注入」报错：runAgentLoop 创建 NodeToolContext 后未注入 ctx.platform，导致 K8d 改造后的 bash / execute_command 全部失效',
+			'   · 新增 packages/core/src/adapters/NodeFileSystem.ts，IFileSystem 的 Node 实现（writeFile 自动建父目录、ENOENT/EACCES 转 FileSystemError、递归 listFiles 支持 excludePatterns）',
+			'   · 把 NodeTerminal + NodeFileSystem + workspace + config 装配为完整 MaxianPlatform 注入到每次 agent ctx',
+			'🎨 顶栏「MCP 工具索引」与「子代理任务」图标改成可区分形状：MCP = 插头（象征"插入外部工具"）/ 子代理 = 父子节点分叉树（象征"派生多个子代理"），不再都是显示器',
+			'⚙️ 大量内部稳定性 + 错误处理优化',
+		],
+	},
+	{
 		version: '0.2.17',
 		date: '2026-05-06',
 		changes: [

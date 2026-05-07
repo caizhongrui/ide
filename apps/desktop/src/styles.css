@@ -5602,3 +5602,670 @@
   max-height: 240px;
   overflow-y: auto;
 }
+
+/* ============================================================================
+ *  统一美化下拉框（全局基础样式）
+ *
+ *  - 把浏览器默认的 chunky select 替换成现代 flat 风格
+ *  - 自定义箭头 SVG（避免依赖 native triangle）
+ *  - 主题感知（dark / light 走不同 SVG 颜色）
+ *  - 不需要在每个 <select> 上加 class —— 全局 rule 自动覆盖
+ *  - 已有的 .settings-select / .memory-cat-select 等会继承基础样式后补充自己的差异
+ * ========================================================================= */
+
+select,
+.maxian-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-color: var(--bg-base);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'><path d='M1 1L5 5L9 1' stroke='%23999' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 9px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-base);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 5px 26px 5px 10px;   /* 右侧给箭头留位置 */
+  cursor: pointer;
+  outline: none;
+  min-height: 28px;
+  transition: border-color 120ms, background-color 120ms, box-shadow 120ms;
+}
+
+select:hover,
+.maxian-select:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-subtle);
+}
+
+select:focus,
+.maxian-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+select:disabled,
+.maxian-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background-color: var(--bg-muted);
+}
+
+select option,
+.maxian-select option {
+  background: var(--bg-base);
+  color: var(--text-base);
+  padding: 6px 10px;
+}
+
+/* light 主题 SVG 箭头偏深色（默认 #999 在亮底上略浅） */
+html[data-theme="light"] select,
+html[data-theme="light"] .maxian-select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'><path d='M1 1L5 5L9 1' stroke='%23666' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+}
+html[data-theme="system"] @media (prefers-color-scheme: light) {
+  select,
+  .maxian-select {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'><path d='M1 1L5 5L9 1' stroke='%23666' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  }
+}
+
+/* ─── 已有特化覆写（保留它们的尺寸 / 字号差异，但应用统一外观）───────── */
+
+/* settings-select：保持较大宽度（设置面板里 label 旁的 select） */
+.settings-select {
+  background-color: var(--bg-muted);
+  font-size: 12px;
+  padding: 6px 28px 6px 12px;
+  min-width: 160px;
+  min-height: 30px;
+}
+.settings-select:hover { background-color: var(--bg-subtle); }
+
+/* memory-cat-select：紧凑型（在 memory 卡片 / 添加表单里的小 select） */
+.memory-cat-select {
+  font-size: 11.5px;
+  padding: 4px 24px 4px 8px;
+  min-height: 26px;
+  background-color: var(--bg-base);
+  border-color: var(--border);
+}
+.memory-cat-select:hover {
+  background-color: var(--bg-subtle);
+  border-color: var(--border-strong);
+}
+
+/* 创建表单里两个 select 并排时给一个更舒服的宽度 */
+.memory-create-row .memory-cat-select {
+  flex: 1;
+  font-weight: 500;
+}
+
+
+/* ─── B2: MCP 工具索引面板 ─────────────────────────────────────────── */
+.mcp-panel {
+  width: 380px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+.mcp-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.mcp-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-base);
+  flex-wrap: wrap;
+}
+.mcp-count {
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-weight: 500;
+}
+.mcp-panel-actions { display: flex; gap: 2px; }
+
+.mcp-tabs {
+  display: flex;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.mcp-tab {
+  background: transparent;
+  border: none;
+  padding: 8px 14px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 80ms;
+  font-weight: 500;
+}
+.mcp-tab:hover { color: var(--text-base); }
+.mcp-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.mcp-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.mcp-empty {
+  padding: 32px 16px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.mcp-empty-title {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.mcp-empty-text {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.mcp-config-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 14px;
+  font-size: 11.5px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.mcp-config-btn:hover { background: var(--accent-hover); }
+
+/* Server cards */
+.mcp-server-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.mcp-server-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.mcp-server-row:hover { background: var(--bg-hover); }
+.mcp-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.mcp-status-dot.pulsing { animation: subagent-pulse 1.2s ease-in-out infinite; }
+
+.mcp-server-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mcp-server-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-base);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+.mcp-server-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.mcp-server-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #ef4444;
+  background: rgba(239,68,68,0.1);
+  padding: 4px 8px;
+  border-radius: 3px;
+  word-break: break-word;
+}
+.mcp-server-tools {
+  border-top: 1px solid var(--border);
+  background: var(--bg-base);
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mcp-tool-mini {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  align-items: baseline;
+}
+
+/* Tool list */
+.mcp-list-filter {
+  margin-bottom: 6px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-base);
+}
+.mcp-list-filter-input {
+  width: 100%;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--text-base);
+  outline: none;
+}
+.mcp-list-filter-input:focus { border-color: var(--accent); }
+
+.mcp-tool-group {
+  margin-bottom: 10px;
+}
+.mcp-tool-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-muted);
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.mcp-tool-group-server {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+}
+.mcp-tool-group-count {
+  background: var(--bg-base);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.mcp-tool-card {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  background: var(--bg-base);
+  transition: border-color 80ms;
+}
+.mcp-tool-card:hover { border-color: var(--border-strong); }
+.mcp-tool-card-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+.mcp-tool-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  color: var(--accent);
+  font-weight: 600;
+  word-break: break-all;
+}
+.mcp-tool-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.mcp-tool-from {
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-top: 3px;
+}
+.mcp-tool-from code {
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-muted);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.mcp-hit-score {
+  position: absolute;
+  right: 10px;
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--bg-muted);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.mcp-tool-card-row { position: relative; padding-right: 50px; }
+.mcp-tool-schema {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--bg-muted);
+  border-radius: 3px;
+  font-size: 10.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* Search box (复用 codebase-search-box 风格但独立类名) */
+.mcp-search-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  color: var(--text-faint);
+}
+.mcp-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  color: var(--text-base);
+}
+.mcp-search-input::placeholder { color: var(--text-faint); }
+
+/* ─── B5: 浏览器预览面板 ────────────────────────────────────────────── */
+.browser-preview-panel {
+  width: 460px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+.browser-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.browser-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.browser-tool-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  transition: all 80ms;
+}
+.browser-tool-btn:hover { background: var(--bg-hover); color: var(--text-base); }
+.browser-tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.browser-tool-btn svg.spinning { animation: codebase-spin 0.9s linear infinite; }
+.browser-url-input {
+  flex: 1;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--text-base);
+  font-family: var(--font-mono, monospace);
+  outline: none;
+  min-width: 0;
+}
+.browser-url-input:focus { border-color: var(--accent); }
+
+.browser-cors-warn {
+  padding: 6px 12px;
+  background: rgba(251, 191, 36, 0.12);
+  color: #c67c00;
+  border-bottom: 1px solid rgba(251, 191, 36, 0.3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+html[data-theme="dark"] .browser-cors-warn { color: #fbbf24; }
+
+.browser-tabs {
+  display: flex;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.browser-tab {
+  background: transparent;
+  border: none;
+  padding: 7px 14px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 80ms;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.browser-tab:hover { color: var(--text-base); }
+.browser-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.browser-tab-badge {
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 9.5px;
+  font-weight: 600;
+}
+.browser-tab.active .browser-tab-badge {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.browser-panel-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.browser-frame-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  position: relative;
+}
+.browser-iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+  min-height: 0;
+}
+.browser-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--bg-base);
+  padding: 30px;
+}
+.browser-empty-title {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.browser-empty-quick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 320px;
+}
+.browser-quick-link {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-mono, monospace);
+  transition: all 80ms;
+}
+.browser-quick-link:hover { color: var(--accent); border-color: var(--accent); }
+
+.browser-tab-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.browser-pane-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.browser-pane-clear {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.browser-pane-clear:hover { color: #ef4444; border-color: #ef4444; }
+
+.browser-log-list,
+.browser-net-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+.browser-log-row {
+  display: flex;
+  gap: 8px;
+  padding: 3px 12px;
+  word-break: break-word;
+  border-bottom: 1px solid var(--border);
+}
+.browser-log-time {
+  color: var(--text-faint);
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.browser-log-level {
+  flex-shrink: 0;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.browser-log-text {
+  flex: 1;
+  white-space: pre-wrap;
+}
+
+.browser-net-row {
+  display: grid;
+  grid-template-columns: 56px 50px 1fr 60px;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.browser-net-method {
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--bg-muted);
+  color: var(--text-muted);
+  border-radius: 3px;
+  padding: 1px 5px;
+  text-align: center;
+}
+.browser-net-status {
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.browser-net-row.status-2xx .browser-net-status { color: #22c55e; }
+.browser-net-row.status-4xx .browser-net-status { color: #f59e0b; }
+.browser-net-row.status-5xx .browser-net-status { color: #ef4444; }
+.browser-net-row.status-err .browser-net-status { color: #ef4444; }
+.browser-net-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-base);
+}
+.browser-net-time {
+  color: var(--text-faint);
+  font-size: 10px;
+  text-align: right;
+}
+.browser-empty-text {
+  padding: 20px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}

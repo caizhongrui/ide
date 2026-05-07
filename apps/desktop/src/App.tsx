@@ -79,6 +79,8 @@ import { useGitBranchPicker } from "./hooks/useGitBranchPicker"
 import { MemoryPanel } from "./panels/MemoryPanel"
 import { CodebaseIndexPanel } from "./panels/CodebaseIndexPanel"
 import { SubagentDashboard } from "./panels/SubagentDashboard"
+import { McpToolPanel } from "./panels/McpToolPanel"
+import { BrowserPreviewPanel } from "./panels/BrowserPreviewPanel"
 import {
   ApprovalDialog as SharedApprovalDialog,
   MessageList as SharedMessageList,
@@ -308,6 +310,216 @@ export default function App() {
     size:        number
   }
   const [showSkillsPanel, setShowSkillsPanel] = createSignal(false)
+
+  // ── B5: 浏览器预览面板 ────────────────────────────────────────────────
+  const [showBrowserPanel, setShowBrowserPanel] = createSignal(false)
+  const [browserUrl, setBrowserUrl] = createSignal('')
+  const [browserConsoleLogs, setBrowserConsoleLogs] = createSignal<import('./panels/BrowserPreviewPanel').BrowserConsoleEntry[]>([])
+  const [browserNetwork, setBrowserNetwork] = createSignal<import('./panels/BrowserPreviewPanel').BrowserNetworkEntry[]>([])
+  let _browserIframeRef: HTMLIFrameElement | null = null
+
+  /**
+   * 构造 sidecar 反向代理 URL：把目标 URL 包成 /browser/proxy?url=...&auth=...
+   * iframe 走这个地址后 inspector 内联到上游 HTML，跨域问题不再阻塞。
+   * auth 参数走 Basic Auth fallback（EventSource 也用同一招）。
+   */
+  function buildBrowserProxyUrl(target: string): string {
+    if (!target) return ''
+    const auth = btoa(`${USER}:${PASS}`)
+    const encoded = encodeURIComponent(target)
+    return `${BASE}/browser/proxy?url=${encoded}&auth=${auth}`
+  }
+
+  function pushBrowserLog(entry: import('./panels/BrowserPreviewPanel').BrowserConsoleEntry) {
+    setBrowserConsoleLogs(prev => {
+      const next = [...prev, entry]
+      // cap 1000 条
+      return next.length > 1000 ? next.slice(-1000) : next
+    })
+  }
+  function pushBrowserNetwork(entry: import('./panels/BrowserPreviewPanel').BrowserNetworkEntry) {
+    setBrowserNetwork(prev => {
+      const next = [...prev, entry]
+      return next.length > 500 ? next.slice(-500) : next
+    })
+  }
+
+  /** B5 V2: 把 console / network 同时往 sidecar 推一份（让 AI 工具能 getConsoleLogs / getNetworkRequests）*/
+  async function relayBrowserLogToSidecar(entry: import('./panels/BrowserPreviewPanel').BrowserConsoleEntry) {
+    try {
+      const c = await getClient()
+      await c.browserPushEvent({
+        kind: 'console',
+        level: entry.level,
+        text:  entry.text,
+        timestamp: entry.timestamp,
+      })
+    } catch { /* ignore */ }
+  }
+  async function relayBrowserNetToSidecar(entry: import('./panels/BrowserPreviewPanel').BrowserNetworkEntry) {
+    try {
+      const c = await getClient()
+      await c.browserPushEvent({
+        kind: 'network',
+        method:     entry.method,
+        url:        entry.url,
+        status:     entry.status,
+        durationMs: entry.durationMs,
+        timestamp:  entry.timestamp,
+      })
+    } catch { /* ignore */ }
+  }
+
+  /** B5 V2: 订阅 sidecar 的 AI 工具浏览器命令，转发给 iframe，再回写结果 */
+  let _browserEventsUnsub: (() => void) | null = null
+  /** AI 命令 → postMessage cmdId 字典（等 iframe 回 maxian-resp 时找到对应回写）*/
+  const _browserPendingCmds = new Map<string, { cmdId: string }>()
+
+  // 监听 iframe 回复（maxian-resp）→ 回写到 sidecar
+  const onBrowserIframeReply = async (ev: MessageEvent) => {
+    const d = ev.data
+    if (!d || typeof d !== 'object' || d.type !== 'maxian-resp') return
+    const cmdId = String(d.cmdId ?? '')
+    if (!cmdId) return
+    if (!_browserPendingCmds.has(cmdId)) return
+    _browserPendingCmds.delete(cmdId)
+    try {
+      const c = await getClient()
+      await c.browserReply(cmdId, !!d.ok, d.result, d.error)
+    } catch { /* ignore */ }
+  }
+
+  /** 浏览器面板可见时订阅 sidecar SSE；不可见时停 */
+  createEffect(() => {
+    if (!showBrowserPanel()) {
+      _browserEventsUnsub?.()
+      _browserEventsUnsub = null
+      window.removeEventListener('message', onBrowserIframeReply)
+      return
+    }
+    window.addEventListener('message', onBrowserIframeReply)
+    void (async () => {
+      try {
+        const c = await getClient()
+        _browserEventsUnsub?.()
+        const sub = c.subscribeBrowserEvents({
+          onCommand: (cmd) => {
+            if (!_browserIframeRef || !_browserIframeRef.contentWindow) {
+              void c.browserReply(cmd.cmdId, false, undefined, '前端 iframe 未挂载')
+              return
+            }
+            // 特殊：screenshot 不能走 iframe（跨域）—— 用 html2canvas-style 在 panel 这边抓
+            if (cmd.op === 'screenshot') {
+              // 简化：返回告知不支持。后续可接 Tauri webview 截图 API
+              void c.browserReply(cmd.cmdId, false, undefined, '截图功能目前需在桌面端 Tauri 截屏 API 支持中（V3 接入）')
+              return
+            }
+            // 特殊：wait-for 由前端轮询
+            if (cmd.op === 'wait-for') {
+              const selector = String((cmd.args as any).selector ?? '')
+              const timeoutMs = Number((cmd.args as any).timeoutMs ?? 5000)
+              const t0 = Date.now()
+              const tick = () => {
+                if (!_browserIframeRef || !_browserIframeRef.contentWindow) {
+                  void c.browserReply(cmd.cmdId, false, undefined, 'iframe 已销毁')
+                  return
+                }
+                // 让 iframe 检查一次
+                const tickId = `${cmd.cmdId}-tick-${Date.now()}`
+                _browserPendingCmds.set(tickId, { cmdId: tickId })
+                const onTick = (ev: MessageEvent) => {
+                  const d = ev.data
+                  if (!d || d.type !== 'maxian-resp' || d.cmdId !== tickId) return
+                  window.removeEventListener('message', onTick)
+                  _browserPendingCmds.delete(tickId)
+                  if (d.ok) {
+                    void c.browserReply(cmd.cmdId, true, { foundAfterMs: Date.now() - t0 })
+                  } else if (Date.now() - t0 > timeoutMs) {
+                    void c.browserReply(cmd.cmdId, false, undefined, `等待超时：${selector}`)
+                  } else {
+                    setTimeout(tick, 100)
+                  }
+                }
+                window.addEventListener('message', onTick)
+                _browserIframeRef.contentWindow!.postMessage({
+                  type: 'maxian-cmd', cmdId: tickId, op: 'wait-for', args: { selector },
+                }, '*')
+              }
+              tick()
+              return
+            }
+            // 一般命令：转发给 iframe
+            _browserPendingCmds.set(cmd.cmdId, { cmdId: cmd.cmdId })
+            _browserIframeRef.contentWindow.postMessage({
+              type: 'maxian-cmd',
+              cmdId: cmd.cmdId,
+              op:    cmd.op,
+              args:  cmd.args,
+            }, '*')
+          },
+          onNavigate: (e) => {
+            // sidecar 让 iframe 导航到指定 URL
+            setBrowserUrl(e.url)
+          },
+          onClosePage: () => {
+            // sidecar 让 iframe 关闭（清空 URL）
+            setBrowserUrl('')
+          },
+        })
+        _browserEventsUnsub = sub.close
+      } catch (e) {
+        console.error('[Browser] subscribe failed:', e)
+      }
+    })()
+  })
+
+  // ── B2: MCP 工具索引面板 ──────────────────────────────────────────────
+  const [showMcpPanel, setShowMcpPanel] = createSignal(false)
+  const [mcpServers, setMcpServers] = createSignal<import('./panels/McpToolPanel').McpServerRuntime[]>([])
+  const [mcpTools, setMcpTools] = createSignal<import('./panels/McpToolPanel').McpToolEntry[]>([])
+  const [mcpLoading, setMcpLoading] = createSignal(false)
+  const [mcpTab, setMcpTab] = createSignal<import('./panels/McpToolPanel').McpTab>('servers')
+  const [mcpSearchQuery, setMcpSearchQuery] = createSignal('')
+  const [mcpSearchHits, setMcpSearchHits] = createSignal<import('./panels/McpToolPanel').McpToolHit[]>([])
+  const [mcpSearchLoading, setMcpSearchLoading] = createSignal(false)
+  const [mcpToolFilter, setMcpToolFilter] = createSignal('')
+
+  async function loadMcpData() {
+    setMcpLoading(true)
+    try {
+      const c = await getClient()
+      const [cfg, tools] = await Promise.all([
+        c.getMcpConfig(),
+        c.listMcpTools(),
+      ])
+      setMcpServers(cfg.runtime as any)
+      setMcpTools(tools.tools as any)
+    } catch (e) {
+      console.error('[MCP] load failed:', e)
+    } finally {
+      setMcpLoading(false)
+    }
+  }
+
+  async function searchMcpToolsUI(query: string) {
+    if (!query.trim()) { setMcpSearchHits([]); return }
+    setMcpSearchLoading(true)
+    try {
+      const c = await getClient()
+      const r = await c.searchMcpTools(query, { max: 20 })
+      setMcpSearchHits(r.hits as any)
+    } catch (e) {
+      pushError('mcp', `搜索失败：${(e as Error).message}`)
+    } finally {
+      setMcpSearchLoading(false)
+    }
+  }
+
+  /** 打开面板时拉一次（servers 状态变化时也手动刷新） */
+  createEffect(() => {
+    if (!showMcpPanel()) return
+    void loadMcpData()
+  })
 
   // ── B1: 子代理任务编排面板 ────────────────────────────────────────────
   const [showSubagentPanel, setShowSubagentPanel] = createSignal(false)
@@ -3888,7 +4100,34 @@ export default {
                       <polyline points="8 6 2 12 8 18"/>
                     </svg>
                   </button>
-                  {/* B1: 子代理任务编排面板 */}
+                  {/* B5: 浏览器预览面板 */}
+                  <button
+                    class="icon-btn"
+                    classList={{ active: showBrowserPanel() }}
+                    onClick={() => setShowBrowserPanel(v => !v)}
+                    title="浏览器预览（dev server / localhost）"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="10"/>
+                      <line x1="2" y1="12" x2="22" y2="12"/>
+                      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    </svg>
+                  </button>
+                  {/* B2: MCP 工具索引面板 — 插头图标，象征"插入外部工具" */}
+                  <button
+                    class="icon-btn"
+                    classList={{ active: showMcpPanel() }}
+                    onClick={() => setShowMcpPanel(v => !v)}
+                    title="MCP 工具索引（已挂载 server / 工具列表 / 语义搜索）"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9 2v6"/>
+                      <path d="M15 2v6"/>
+                      <path d="M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>
+                      <path d="M12 17v5"/>
+                    </svg>
+                  </button>
+                  {/* B1: 子代理任务编排面板 — 网络分支图标，象征"父代理派生多个子代理" */}
                   <button
                     class="icon-btn"
                     classList={{ active: showSubagentPanel() }}
@@ -3896,10 +4135,13 @@ export default {
                     title="子代理任务编排（task() 派出的并行子代理）"
                     style="position:relative"
                   >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <rect x="2" y="3" width="20" height="14" rx="2"/>
-                      <line x1="8" y1="21" x2="16" y2="21"/>
-                      <line x1="12" y1="17" x2="12" y2="21"/>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="4" r="2"/>
+                      <circle cx="5" cy="20" r="2"/>
+                      <circle cx="19" cy="20" r="2"/>
+                      <path d="M12 6v3"/>
+                      <path d="M12 9l-7 9"/>
+                      <path d="M12 9l7 9"/>
                     </svg>
                     <Show when={subagentRecords().filter(r => r.status === 'running').length > 0}>
                       <span class="file-badge" style="background:#3b82f6;color:#fff">
@@ -4399,6 +4641,44 @@ export default {
                 onRemoveImage={(id) => removeImage(id)}
               />
             </Show>
+            {/* B5: 浏览器预览面板（右侧） */}
+            <BrowserPreviewPanel
+              visible={showBrowserPanel}
+              onClose={() => setShowBrowserPanel(false)}
+              currentUrl={browserUrl}
+              setCurrentUrl={(u) => setBrowserUrl(u)}
+              consoleLogs={browserConsoleLogs}
+              pushConsoleLog={(e) => { pushBrowserLog(e); void relayBrowserLogToSidecar(e) }}
+              clearConsoleLogs={() => setBrowserConsoleLogs([])}
+              networkRequests={browserNetwork}
+              pushNetworkEntry={(e) => { pushBrowserNetwork(e); void relayBrowserNetToSidecar(e) }}
+              clearNetworkEntries={() => setBrowserNetwork([])}
+              setIframeRef={(el) => { _browserIframeRef = el }}
+              buildProxyUrl={buildBrowserProxyUrl}
+            />
+            {/* B2: MCP 工具索引面板（右侧） */}
+            <McpToolPanel
+              visible={showMcpPanel}
+              servers={mcpServers}
+              tools={mcpTools}
+              loading={mcpLoading}
+              tab={mcpTab}
+              setTab={(t) => setMcpTab(t)}
+              searchQuery={mcpSearchQuery}
+              setSearchQuery={(q) => setMcpSearchQuery(q)}
+              searchHits={mcpSearchHits}
+              searchLoading={mcpSearchLoading}
+              toolFilter={mcpToolFilter}
+              setToolFilter={(q) => setMcpToolFilter(q)}
+              onClose={() => setShowMcpPanel(false)}
+              onRefresh={loadMcpData}
+              onSearch={searchMcpToolsUI}
+              onOpenSettings={() => {
+                setShowMcpPanel(false)
+                setShowSettings(true)
+                setSettingsTab('mcp')
+              }}
+            />
             {/* B1: 子代理任务编排面板（右侧） */}
             <SubagentDashboard
               visible={showSubagentPanel}

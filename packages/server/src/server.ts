@@ -24,6 +24,7 @@ import { ConfigRoutes } from './routes/config.js';
 import { SubagentRoutes } from './routes/subagent.js';
 import { MemoryRoutes } from './routes/memory.js';
 import { CodebaseRoutes } from './routes/codebase.js';
+import { BrowserRoutes } from './routes/browser.js';
 import { ToolRoutes } from './routes/tool.js';
 import { AuthRoutes, type AiRuntimeConfig, type SetAiConfigFn } from './routes/auth.js';
 import { BatchRoutes, emitBatchEventToSubscribers } from './routes/batches.js';
@@ -134,6 +135,7 @@ export function createServer(
 	app.route('/', SubagentRoutes(sm.subagentManager));
 	app.route('/', MemoryRoutes(sm.memoryStore));
 	app.route('/', CodebaseRoutes(sm.codebaseIndex, wm));
+	app.route('/', BrowserRoutes(sm.browserController));
 
 	return {
 		app, sessionManager: sm, workspaceManager: wm, taskScheduler,

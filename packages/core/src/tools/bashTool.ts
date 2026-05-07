@@ -14,7 +14,7 @@ import type { IToolContext } from './IToolContext.js';
 /** 跨形态 UUID 生成：浏览器 / Node 18+ / Bun 都暴露 globalThis.crypto.randomUUID */
 function uuid(): string {
 	const c = (globalThis as any).crypto;
-	if (c?.randomUUID) return c.uuid();
+	if (c?.randomUUID) return c.randomUUID();
 	// 极简 fallback（v4 兼容）
 	const r = () => Math.random().toString(16).slice(2, 14).padEnd(12, '0');
 	return `${r()}-${r().slice(0,4)}-4${r().slice(0,3)}-a${r().slice(0,3)}-${r().slice(0,12)}`;

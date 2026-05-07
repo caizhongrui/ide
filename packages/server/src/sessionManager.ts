@@ -13,6 +13,7 @@ import type { SessionSummary } from './types.js';
 import { getDb } from './database.js';
 import { SubagentManager } from './subagentManager.js';
 import { SqliteMemoryStore } from './sqliteMemoryStore.js';
+import { BrowserBridgeController } from './browserBridge.js';
 import { SqliteCodebaseIndex } from './sqliteCodebaseIndex.js';
 import type { ICodebaseIndex } from '@maxian/core/codebase-index';
 
@@ -133,6 +134,8 @@ export class SessionManager {
 	private readonly _subagentManager: SubagentManager = new SubagentManager({ maxConcurrentBackground: 8 });
 	/** B3: 跨会话记忆 Store（save_memory/recall_memory + 自动召回注入 system prompt） */
 	private readonly _memoryStore: IMemoryStore = new SqliteMemoryStore();
+	/** B5: 浏览器桥接控制器（Tauri desktop 模式下接 iframe；非 Tauri 模式上调返回错误） */
+	private readonly _browserController: BrowserBridgeController = new BrowserBridgeController();
 	/** B4: 代码库索引（codebase_search + 进项目自动注入架构） */
 	private readonly _codebaseIndex: ICodebaseIndex = new SqliteCodebaseIndex();
 
@@ -144,6 +147,11 @@ export class SessionManager {
 	/** 暴露 subagentManager 给 cli.ts task 工具调度层 */
 	get subagentManager(): SubagentManager {
 		return this._subagentManager;
+	}
+
+	/** B5: 暴露 browserController 给 cli.ts agent 主循环（注入到 ctx.browserController） */
+	get browserController(): BrowserBridgeController {
+		return this._browserController;
 	}
 
 	/** B3: 暴露 memoryStore 给 cli.ts agent 主循环 + 自动捕获/召回逻辑 */

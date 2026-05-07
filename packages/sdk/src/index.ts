@@ -802,6 +802,56 @@ export class MaxianClient {
 	 * 订阅子代理事件流（任务编排面板用）。
 	 * 返回 close() 用于断开。
 	 */
+	/* ──────────── B5: Browser Bridge ──────────── */
+
+	/** 浏览器面板上报实时事件（console 日志 / network 请求 / url 变化）给 sidecar buffer */
+	async browserPushEvent(event: {
+		kind:        'console' | 'network' | 'url-change';
+		level?:      string;
+		text?:       string;
+		method?:     string;
+		url?:        string;
+		status?:     number;
+		durationMs?: number;
+		timestamp?:  number;
+	}): Promise<{ ok: boolean }> {
+		return this.request('POST', '/browser/event', event);
+	}
+
+	/** AI 工具命令执行结果回写给 sidecar */
+	async browserReply(cmdId: string, ok: boolean, result?: unknown, error?: string): Promise<{ ok: boolean }> {
+		return this.request('POST', '/browser/reply', { cmdId, ok, result, error });
+	}
+
+	/** 订阅 AI 工具下发的浏览器命令（前端 panel 打开时调） */
+	subscribeBrowserEvents(opts?: {
+		onCommand?:  (cmd: { cmdId: string; op: string; args: Record<string, unknown> }) => void;
+		onNavigate?: (e: { url: string }) => void;
+		onClosePage?:() => void;
+	}): { close: () => void } {
+		const url = `${this.baseUrl}/browser/events`;
+		const finalUrl = this.authQuery
+			? `${url}?auth=${encodeURIComponent(this.authQuery)}`
+			: url;
+		const es = new EventSource(finalUrl);
+		const handlers: Array<[string, (e: MessageEvent) => void]> = [];
+		const bind = (evt: string, fn: ((e: any) => void) | undefined) => {
+			if (!fn) return;
+			const wrap = (e: MessageEvent) => { try { fn(JSON.parse(e.data)) } catch { /* */ } };
+			es.addEventListener(evt, wrap as EventListener);
+			handlers.push([evt, wrap]);
+		};
+		bind('command',    opts?.onCommand);
+		bind('navigate',   opts?.onNavigate);
+		bind('close-page', opts?.onClosePage);
+		return {
+			close: () => {
+				for (const [evt, wrap] of handlers) es.removeEventListener(evt, wrap as EventListener);
+				es.close();
+			},
+		};
+	}
+
 	subscribeSubagentEvents(opts?: {
 		onUpdate?: (record: {
 			taskId:            string;

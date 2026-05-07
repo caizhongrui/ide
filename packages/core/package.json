@@ -23,6 +23,10 @@
       "types": "./dist/adapters/NodeTerminal.d.ts",
       "import": "./dist/adapters/NodeTerminal.js"
     },
+    "./adapters/NodeFileSystem": {
+      "types": "./dist/adapters/NodeFileSystem.d.ts",
+      "import": "./dist/adapters/NodeFileSystem.js"
+    },
     "./adapters/NodeSearchService": {
       "types": "./dist/adapters/NodeSearchService.d.ts",
       "import": "./dist/adapters/NodeSearchService.js"
