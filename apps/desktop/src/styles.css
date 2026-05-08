@@ -2184,6 +2184,9 @@
 .diff-line-add .diff-text { color: #86efac; }
 
 /* ── Approval Overlay ─────────────────────────────────────────────────── */
+/*  z-index 5000：高于 slash-palette / mode-selector-popup（9999 是开下拉菜单
+ *  的菜单层，但他们都是底部小弹层；这个 modal 必须在所有其它 UI 之上而又略
+ *  低于 9999 的菜单（避免 modal 把命令面板盖住，反而困住用户）。*/
 .approval-overlay {
   position: fixed;
   inset: 0;
@@ -2191,7 +2194,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 5000;
   backdrop-filter: blur(2px);
 }
 .approval-dialog {

@@ -24,6 +24,7 @@ use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 mod terminal;
 mod pet;
+mod skills;
 
 struct ServerHandle(Mutex<Option<CommandChild>>);
 struct ServerPid(Mutex<Option<u32>>);   // 备份 pid，即使 CommandChild 被 take 走也能最后一击
@@ -319,6 +320,76 @@ fn process_stats(server_pid: tauri::State<'_, ServerPid>) -> serde_json::Value {
     })
 }
 
+/// 打开本地目录到系统资源管理器（macOS Finder / Windows Explorer / Linux 文件管理器）。
+///
+/// 行为：
+/// - 入参可以是文件路径或目录路径；若是文件则自动打开其父目录。
+/// - 如果目标目录不存在，则递归创建（mkdir -p 语义），方便用户拖入资源（如 skills .md 文件）。
+/// - 平台分发：macOS 用 `open`，Windows 用 `explorer`，Linux 用 `xdg-open`。
+///
+/// 与前端 SkillsPanel "打开目录" 按钮配合使用：用户点击后立即进入 `~/.maxian/skills/` 目录，
+/// 手动放入下载的 .md 技能文件。
+#[tauri::command]
+fn open_path_in_explorer(path: String) -> Result<(), String> {
+    use std::path::Path;
+
+    if path.trim().is_empty() {
+        return Err("路径为空".into());
+    }
+
+    // ~ 展开（前端如果传 "~/.maxian/skills/" 这种字面量也能正确处理）
+    let expanded: String = if let Some(rest) = path.strip_prefix("~/") {
+        #[cfg(unix)]
+        let home = std::env::var("HOME").unwrap_or_default();
+        #[cfg(windows)]
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        if home.is_empty() {
+            path.clone()
+        } else {
+            format!("{}/{}", home, rest)
+        }
+    } else if path == "~" {
+        #[cfg(unix)]
+        let home = std::env::var("HOME").unwrap_or_default();
+        #[cfg(windows)]
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        home
+    } else {
+        path.clone()
+    };
+
+    let p = Path::new(&expanded);
+
+    // 若是文件路径则切换到其父目录
+    let target = if p.is_file() {
+        p.parent()
+            .ok_or_else(|| format!("文件 {} 没有父目录", expanded))?
+            .to_path_buf()
+    } else {
+        p.to_path_buf()
+    };
+
+    // 不存在则尝试创建（仅当传入的不是文件路径时；文件父目录正常应当存在）
+    if !target.exists() {
+        std::fs::create_dir_all(&target)
+            .map_err(|e| format!("创建目录 {} 失败: {}", target.display(), e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    let cmd_name = "open";
+    #[cfg(target_os = "windows")]
+    let cmd_name = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd_name = "xdg-open";
+
+    std::process::Command::new(cmd_name)
+        .arg(target.as_os_str())
+        .spawn()
+        .map_err(|e| format!("打开 {} 失败（{}）: {}", target.display(), cmd_name, e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -335,6 +406,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             server_info,
             process_stats,
+            open_path_in_explorer,
             terminal::terminal_create,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -344,9 +416,16 @@ pub fn run() {
             pet::pet_window_toggle,
             pet::pet_window_snap,
             pet::pet_emit_state,
+            skills::list_bundled_skills,
+            skills::install_bundled_skills,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // 首次启动自动复制内置 core 技能到 ~/.maxian/skills/maxian-builtin/
+            // —— 标志位是版本化的，新增 core 技能后只需 +1 即可在下次启动补装
+            skills::auto_install_core_skills_on_first_launch(&handle);
+
             match spawn_server(&handle) {
                 Ok(child) => {
                     let pid = child.pid();

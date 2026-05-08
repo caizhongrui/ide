@@ -480,27 +480,38 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		/** 在目录中查找 skill 入口：
 		 *   1) 目录下直接的 .md 文件（name = basename without .md）
 		 *   2) 目录下的子目录中的 SKILL.md / skill.md / README.md（name = 子目录名）
+		 *   3) **K11d 新增**：目录下的子目录如果是"分类文件夹"（没有 SKILL.md 但里面有 .md 文件），
+		 *      递归一层把里面的 .md 当作独立 skill。这样 ~/.maxian/skills/maxian-builtin/*.md 能被识别。
 		 *  使用 statSync（跟随符号链接），符合 Claude skills 目录规范。
+		 *  最多递归 1 层，避免深度遍历。
 		 */
-		function scanSkillsIn(dir: string): Array<{ name: string; abs: string }> {
+		function scanSkillsIn(dir: string, allowRecurse: boolean = true): Array<{ name: string; abs: string }> {
 			const out: Array<{ name: string; abs: string }> = [];
 			let entries: string[];
 			try { entries = fs.readdirSync(dir); } catch { return out; }
 			for (const entry of entries) {
+				if (entry.startsWith('.')) continue;  // 跳过隐藏文件 / 标志位
 				const absEntry = path.join(dir, entry);
 				let stat: fs.Stats;
 				try { stat = fs.statSync(absEntry); } catch { continue; }  // statSync 跟随符号链接
 				if (stat.isFile() && entry.endsWith('.md')) {
 					out.push({ name: entry.slice(0, -3), abs: absEntry });
 				} else if (stat.isDirectory()) {
-					// 查找 SKILL.md / skill.md / README.md
+					// 优先：查找 SKILL.md / skill.md / README.md（标准目录型 skill）
 					const candidates = ['SKILL.md', 'skill.md', 'README.md'];
+					let matched = false;
 					for (const c of candidates) {
 						const abs = path.join(absEntry, c);
 						if (fs.existsSync(abs)) {
 							out.push({ name: entry, abs });
+							matched = true;
 							break;
 						}
+					}
+					// 没找到 SKILL.md 但允许递归 → 把这个目录当作"分类文件夹"再扫一层
+					if (!matched && allowRecurse) {
+						const inner = scanSkillsIn(absEntry, false);
+						for (const it of inner) out.push(it);
 					}
 				}
 			}

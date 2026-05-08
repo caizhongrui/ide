@@ -22,10 +22,11 @@ export interface QuestionDialogProps {
 }
 
 export const QuestionDialog: Component<QuestionDialogProps> = (props) => {
-	const req = props.request
-	if (!req()) return null
+	// 注意：不要在这里写 `if (!props.request()) return null` —— SolidJS 组件函数只运行一次，
+	// 这种写法会让组件在挂载时（request 为 null 时）永久返回 null，后续 request 变化也不会重新渲染。
+	// 直接用 <Show> 让响应式系统驱动渲染。
 	return (
-		<Show when={req()}>
+		<Show when={props.request()}>
 			{(r) => (
 				<div class="approval-overlay">
 					<div class="approval-dialog" style="max-width:560px;width:90vw">

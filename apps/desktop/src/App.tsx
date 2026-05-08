@@ -28,6 +28,7 @@ import { PlanExitDialog } from "./dialogs/PlanExitDialog"
 import { ApplyToFileDialog } from "./dialogs/ApplyToFileDialog"
 import { ToolErrorPanel } from "./panels/ToolErrorPanel"
 import { SkillsPanel } from "./panels/SkillsPanel"
+import { RecommendedSkillsPicker } from "./panels/RecommendedSkillsPicker"
 import { WorkspaceExplorerPanel } from "./panels/WorkspaceExplorerPanel"
 import { FilePreviewPanel } from "./panels/FilePreviewPanel"
 import { ContextPanel } from "./panels/ContextPanel"
@@ -310,6 +311,8 @@ export default function App() {
     size:        number
   }
   const [showSkillsPanel, setShowSkillsPanel] = createSignal(false)
+  // K11d：推荐技能库选择对话框可见性
+  const [showRecommendedSkills, setShowRecommendedSkills] = createSignal(false)
 
   // ── K-Pet: 桌面豹子宠物 ─────────────────────────────────────────────────
   const [petVisible, setPetVisible] = createSignal(false)
@@ -2012,6 +2015,56 @@ export default function App() {
   async function send() {
     const sid = activeSessionId(); const content = input().trim()
     if (!sid || !content || sending()) return
+
+    // K-Plan-Pending-Guard: 如果 plan_exit 对话框待响应（用户可能没看见对话框），
+    // 把当前输入当作"拒绝并反馈"提交给 AI，让 AI 重新规划。避免出现
+    // "用户拒绝了计划但没有提供反馈" 的尴尬情况。
+    const pendingPlan = planExitRequest()
+    if (pendingPlan) {
+      try {
+        const c = await getClient()
+        // 关键词识别：用户输入"继续/可以/好/ok/执行/同意/开始/approve"等 → 视为同意
+        const approveKeywords = ['继续', '可以', '好', '好的', 'ok', '行', '执行', '同意', '开始', 'approve', 'go', 'yes', '确认']
+        const lc = content.toLowerCase().trim()
+        const isApprove = approveKeywords.some(k => lc === k || lc === k + '。' || lc === k + '!' || lc === k + '！')
+        await c.respondPlanExit(sid, isApprove, isApprove ? undefined : content)
+        setPlanExitRequest(null)
+        setPlanExitFeedback('')
+        setInput("")
+        if (isApprove) {
+          try { await c.updateSessionMode(sid, 'code') } catch { /* ignore */ }
+          showToast({ message: `✅ 已同意计划并切换到 Code 模式（基于你的"${content}"）`, kind: 'success', duration: 3000 })
+        } else {
+          showToast({ message: `📝 已将"${content.slice(0, 30)}${content.length > 30 ? '…' : ''}"作为反馈发送给 AI 重新规划`, kind: 'info', duration: 3500 })
+        }
+      } catch (e) {
+        showToast({ message: `提交计划反馈失败：${(e as Error).message}`, kind: 'error' })
+      }
+      return
+    }
+
+    // K-Question-Pending-Guard: 如果 question 对话框待回答（用户没看见对话框），
+    // 把输入当作答复提交给 AI。避免用户白打字、AI 一直等。
+    const pendingQ = questionRequest()
+    if (pendingQ) {
+      try {
+        const c = await getClient()
+        await c.answerQuestion(sid, { answer: content, selected: [], cancelled: false })
+        setQuestionRequest(null)
+        setQuestionAnswer('')
+        setQuestionSelected([])
+        setInput("")
+        showToast({
+          message: `✅ 已将"${content.slice(0, 30)}${content.length > 30 ? '…' : ''}"作为回答发送给 AI`,
+          kind: 'success',
+          duration: 3000,
+        })
+      } catch (e) {
+        showToast({ message: `提交答复失败：${(e as Error).message}`, kind: 'error' })
+      }
+      return
+    }
+
     setSending(true)
     _resetRecv()  // 重置接收计数器 + 直接清空 DOM
     _chatEventHandler.resetAbortedAt()  // 新任务开始，清掉上次取消的丢弃窗口
@@ -4619,6 +4672,55 @@ export default {
                   onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
                   onDrop={handleDrop}
                 >
+                  {/* K-Plan-Banner: plan_exit 等待中显眼提示。
+                      解决用户反馈"对话框有时不显示就一直卡住"——这里始终可见。 */}
+                  <Show when={planExitRequest()}>
+                    <div
+                      style="display:flex;align-items:center;gap:10px;padding:10px 14px;margin:0 0 8px 0;background:rgba(99,102,241,0.10);border:1px solid rgba(99,102,241,0.35);border-radius:8px;cursor:pointer;transition:background 0.15s"
+                      onClick={() => {
+                        // 重新触发渲染，把对话框带回视野
+                        const cur = planExitRequest()
+                        if (cur) { setPlanExitRequest(null); setTimeout(() => setPlanExitRequest(cur), 10) }
+                      }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(99,102,241,0.16)' }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(99,102,241,0.10)' }}
+                      title="点击重新打开计划对话框"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(99,102,241)" stroke-width="2" style="flex-shrink:0">
+                        <circle cx="12" cy="12" r="10" />
+                        <polyline points="12 6 12 12 16 14" />
+                      </svg>
+                      <div style="flex:1;font-size:12.5px;color:var(--text-base)">
+                        <div style="font-weight:600">⏸ AI 已输出计划，等待你确认</div>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">点击此处重新打开对话框，或在下方输入框中写反馈后发送（自动作为反馈传给 AI）</div>
+                      </div>
+                      <span style="font-size:11px;color:rgb(99,102,241);background:rgba(99,102,241,0.12);padding:3px 8px;border-radius:4px;flex-shrink:0">点击展开</span>
+                    </div>
+                  </Show>
+                  {/* K-Question-Banner: AI 提问待回复时显眼提示，点击重新打开对话框 */}
+                  <Show when={questionRequest()}>
+                    <div
+                      style="display:flex;align-items:center;gap:10px;padding:10px 14px;margin:0 0 8px 0;background:rgba(245,158,11,0.10);border:1px solid rgba(245,158,11,0.40);border-radius:8px;cursor:pointer;transition:background 0.15s"
+                      onClick={() => {
+                        const cur = questionRequest()
+                        if (cur) { setQuestionRequest(null); setTimeout(() => setQuestionRequest(cur), 10) }
+                      }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(245,158,11,0.18)' }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(245,158,11,0.10)' }}
+                      title="点击重新打开提问对话框"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(245,158,11)" stroke-width="2" style="flex-shrink:0">
+                        <circle cx="12" cy="12" r="10" />
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                      </svg>
+                      <div style="flex:1;font-size:12.5px;color:var(--text-base)">
+                        <div style="font-weight:600">❓ AI 在等你回答澄清问题</div>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">点击此处重新打开对话框，或在下方输入框直接回答后发送（自动作为答复传给 AI）</div>
+                      </div>
+                      <span style="font-size:11px;color:rgb(245,158,11);background:rgba(245,158,11,0.14);padding:3px 8px;border-radius:4px;flex-shrink:0">点击展开</span>
+                    </div>
+                  </Show>
                   {/* Token 用量条（K10c：抽到 @maxian/ui 的 SharedTokenUsageBar） */}
                   <SharedTokenUsageBar
                     tokenUsed={tokenUsed()}
@@ -4860,8 +4962,29 @@ export default {
                 onClose={() => setShowSkillsPanel(false)}
                 onReload={loadSkills}
                 onOpenPreview={(p) => void openPreview(p)}
+                onOpenDir={async (p) => {
+                  try {
+                    const { invoke } = await import('@tauri-apps/api/core' as any)
+                    await invoke('open_path_in_explorer', { path: p })
+                  } catch (e) {
+                    showToast({
+                      message: `打开目录失败：请手动定位 ${p}（${(e as Error).message ?? e}）`,
+                      kind: 'warn',
+                      duration: 4000,
+                    })
+                  }
+                }}
+                onOpenRecommended={() => setShowRecommendedSkills(true)}
               />
             </Show>
+            {/* K11d：推荐技能库选择器（始终挂载，open 受 signal 控制） */}
+            <RecommendedSkillsPicker
+              open={showRecommendedSkills}
+              onClose={() => setShowRecommendedSkills(false)}
+              installedNames={() => new Set(skillsList().map(s => s.name))}
+              onInstalled={async () => { await loadSkills() }}
+              showToast={showToast}
+            />
             {/* 会话上下文面板（右侧，P1-10） */}
             <Show when={showContextPanel()}>
               <ContextPanel

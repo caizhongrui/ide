@@ -531,12 +531,34 @@ const AGENT_TOOL_DEFINITIONS: ToolDefinition[] = [
 	},
 	{
 		name: 'question',
-		description: '当你无法根据上下文自行决定时向用户提问。**只在信息缺失无法继续**时使用；能自行推断的不要问。',
+		description: `向用户提问以获取澄清。【调用规则 — 严格遵守】
+
+【必须用此工具的场景】
+- 任何时候你需要用户回答问题
+- 多选场景（"你想要 A 还是 B？"）
+- 含有问号、想让用户做决定的语句
+
+【绝对禁止】
+- 禁止在 chat content 里输出"你想要 A 还是 B？"这种问句——用户看不到对话框，会以为是你的废话
+- 禁止说"我应该先问用户..."——直接调本工具
+- 禁止把多个问题塞在一段 markdown 里再发问。一次问一个，或用 multi:true + options 多选
+
+【正确用法】
+- question 字段：一句具体的问题
+- options 字段：给 3-5 个常见选项让用户一键选（可选）
+- chat content：可以为空，或一句"等待你的回答"
+
+【调用后】
+- 工具会挂起等待用户回答（最多 10 分钟）
+- 返回 \`[用户回答: <内容>]\` → 根据回答继续
+- 返回 \`[用户取消提问]\` → 立即停止，本轮结束
+
+**只在信息缺失无法继续时使用**；能自行推断的不要问。`,
 		parameters: {
 			type: 'object',
 			properties: {
-				question: { type: 'string', description: '问题内容' },
-				options:  { type: 'array', items: { type: 'string' }, description: '可选：预设选项（用户可一键选择）' },
+				question: { type: 'string', description: '一句具体的问题（不是大段说明）' },
+				options:  { type: 'array', items: { type: 'string' }, description: '可选：3-5 个预设选项让用户一键选' },
 				multi:    { type: 'boolean', description: '是否多选' },
 			},
 			required: ['question'],
@@ -544,12 +566,32 @@ const AGENT_TOOL_DEFINITIONS: ToolDefinition[] = [
 	},
 	{
 		name: 'plan_exit',
-		description: '仅 Plan 模式可用：规划完毕后请求用户同意切换到 Build（Code）模式开始实际执行。在规划完整输出后调用一次即可。',
+		description: `输出一个完整的实施计划等待用户确认。【调用规则 — 严格遵守】
+
+【必须用此工具的场景】
+- Plan 模式：完成规划后必须调一次（不调 = 用户没法切到 Code 模式 = 任务卡死）
+- Code 模式 + 大任务：见 PLAN-FIRST 清单（新增功能/跨多文件/重构/不确定方案）
+
+【绝对禁止】
+- 禁止把计划用 markdown 文本直接输出在 chat content 里
+- 禁止说"我将使用 plan_exit"——直接调用本工具，不要描述它
+- 禁止只调一次后又在 content 里复述一遍计划
+
+【正确用法】
+- summary 字段：1-3 句话讲清"做什么 / 为什么 / 影响范围"
+- steps 字段：完整的 markdown 结构（## 文件清单、## 步骤 1/2/3、## 风险）
+- chat content：可以为空，或最多一句"已生成计划，请在弹窗中确认"
+
+【调用后】
+- 工具会挂起等待用户响应（最多 10 分钟）
+- 返回 \`[用户已同意...]\` → 切换到 Code 模式开始执行
+- 返回 \`[用户拒绝当前计划: <反馈>]\` → 根据反馈重新规划再调一次
+- 返回 \`[任务已被用户取消...]\` → 立即停止所有动作，本轮结束，不要再调任何工具`,
 		parameters: {
 			type: 'object',
 			properties: {
-				summary: { type: 'string', description: '计划摘要（用于给用户确认）' },
-				steps:   { type: 'string', description: '详细步骤 Markdown（可选）' },
+				summary: { type: 'string', description: '1-3 句话的计划摘要（给用户在对话框看的）' },
+				steps:   { type: 'string', description: '详细步骤的完整 markdown（## 文件清单 / ## 步骤 / ## 风险 等。这里写得越完整，用户越容易确认）' },
 			},
 			required: ['summary'],
 		},
@@ -1241,22 +1283,31 @@ async function executeToolCall(
 					path.join(os.homedir(), '.claude', 'skills'),
 				];
 
-				// 扫描：同时支持目录型 <name>/SKILL.md 和平铺 <name>.md
-				const scanSkills = (dir: string): Array<{ name: string; abs: string }> => {
+				// 扫描：支持
+				//   1) 平铺 <name>.md
+				//   2) 目录型 <name>/SKILL.md（或 skill.md / README.md）
+				//   3) 分类目录 <category>/<name>.md —— K11d 新增，用于 maxian-builtin/* 等分组场景
+				const scanSkills = (dir: string, allowRecurse: boolean = true): Array<{ name: string; abs: string }> => {
 					const out: Array<{ name: string; abs: string }> = [];
 					if (!fs.existsSync(dir)) return out;
 					let entries: string[];
 					try { entries = fs.readdirSync(dir); } catch { return out; }
 					for (const entry of entries) {
+						if (entry.startsWith('.')) continue;
 						const absEntry = path.join(dir, entry);
 						let stat: fs.Stats;
 						try { stat = fs.statSync(absEntry); } catch { continue; }
 						if (stat.isFile() && entry.endsWith('.md')) {
 							out.push({ name: entry.slice(0, -3), abs: absEntry });
 						} else if (stat.isDirectory()) {
+							let matched = false;
 							for (const c of ['SKILL.md', 'skill.md', 'README.md']) {
 								const abs = path.join(absEntry, c);
-								if (fs.existsSync(abs)) { out.push({ name: entry, abs }); break; }
+								if (fs.existsSync(abs)) { out.push({ name: entry, abs }); matched = true; break; }
+							}
+							if (!matched && allowRecurse) {
+								const inner = scanSkills(absEntry, false);
+								for (const it of inner) out.push(it);
 							}
 						}
 					}
@@ -2578,21 +2629,28 @@ async function main() {
 		const seen = new Set<string>();
 		const skills: Skill[] = [];
 
-		const scanSkillEntries = (dir: string): Array<{ name: string; abs: string }> => {
+		const scanSkillEntries = (dir: string, allowRecurse: boolean = true): Array<{ name: string; abs: string }> => {
 			const out: Array<{ name: string; abs: string }> = [];
 			if (!fs.existsSync(dir)) return out;
 			let entries: string[];
 			try { entries = fs.readdirSync(dir); } catch { return out; }
 			for (const entry of entries) {
+				if (entry.startsWith('.')) continue;  // K11d：跳过 .maxian-bundled-installed-vN 等标志位
 				const absEntry = path.join(dir, entry);
 				let stat: fs.Stats;
 				try { stat = fs.statSync(absEntry); } catch { continue; }  // statSync 跟随符号链接
 				if (stat.isFile() && entry.endsWith('.md')) {
 					out.push({ name: entry.slice(0, -3), abs: absEntry });
 				} else if (stat.isDirectory()) {
+					let matched = false;
 					for (const c of ['SKILL.md', 'skill.md', 'README.md']) {
 						const abs = path.join(absEntry, c);
-						if (fs.existsSync(abs)) { out.push({ name: entry, abs }); break; }
+						if (fs.existsSync(abs)) { out.push({ name: entry, abs }); matched = true; break; }
+					}
+					// K11d：分类目录（如 maxian-builtin/）递归一层把里面的 .md 当 skill
+					if (!matched && allowRecurse) {
+						const inner = scanSkillEntries(absEntry, false);
+						for (const it of inner) out.push(it);
 					}
 				}
 			}
@@ -2784,6 +2842,51 @@ PLAN-FIRST 强制清单（满足任一项 → 必须先调 plan_exit 输出计�
 4. **修一类 bug** —— 排查"这种问题/这类错误"（vs 修单个具体行号）
 5. **架构/数据流变化** —— 改接口签名、数据库 schema、新增 service / store
 6. **不确定方案** —— 用户描述模糊或需要在两条路径里选
+
+====
+
+🚨 反"自言自语"硬性禁令（违反 = 任务直接失败）
+
+**症状**：你只动嘴不动手，把"我即将调用 X 工具"当成对工具的调用。
+DeepSeek / Qwen 等模型容易犯这个错——你必须自查。
+
+**绝对禁止**（写出任何一条都视为本轮失败）：
+
+1. ❌ "我需要使用 plan_exit 工具" / "让我调用 plan_exit" / "我用 plan_exit 来..."
+   ✅ 对应的工具就在你手里，**直接发起 function_call**，**不要描述它**
+
+2. ❌ "让我先 load_skill brainstorming" / "我应该加载 X 技能"
+   ✅ 直接调用 load_skill 工具，参数 skill_name="brainstorming"
+
+3. ❌ 在 chat 里输出 markdown 计划结构（"## 步骤 1" / "### 文件清单" / "## 风险"）
+   ✅ 把这些**全部塞进 plan_exit 工具的 steps 参数**。chat 只能写一句"已生成计划，等待你确认"
+
+4. ❌ 用纯文本向用户提问（"你想要 A 还是 B？"、"技术栈你有偏好吗？"）
+   ✅ 调 question 工具，参数 question="..."，options=["A", "B"]
+
+5. ❌ "我应该先做一些探索性的询问吗？" / "让我思考一下..." 这种 narrate 思维过程
+   ✅ 思考是 reasoning_content 字段做的事，不要把思考写进 content
+
+**判定规则**：
+- 如果你在 content 里出现"我要 / 让我 / 我应该 / 我会 / 我需要" + 工具名 → **就是违规**
+- 如果你输出了 ≥ 50 字的 markdown 结构（标题/列表/表格）但**本轮没调任何工具** → **就是违规**
+- 违规后果：用户看到一堆描述但没有对话框/没有按钮，任务卡死
+
+**正确节奏**：
+- 思考 → reasoning_content（自动折叠，用户看不到）
+- 行动 → 直接发 function_call
+- 结果 → 等工具返回再继续
+
+**反例 vs 正例**：
+
+❌ 错误（DeepSeek 常见错法）：
+   content 写满"我需要使用 plan_exit 工具输出计划。计划如下：## 步骤 1：建表 ## 步骤 2：写接口 你看可以吗？"
+   → 没发任何 function_call → 用户看到一段死文本 → 任务卡死
+
+✅ 正确：
+   立刻发起 function_call: plan_exit(summary="考试系统脚手架", steps="## 步骤 1：建表 ## 步骤 2：写接口...")
+   content 字段：可以为空，或最多一句"已生成计划，请在弹窗中确认。"
+   → 用户立刻看到对话框，能点"开始执行"
 
 **MEGA-TASK 强制拆分（识别任务形态 → 选对拆分模式）**
 

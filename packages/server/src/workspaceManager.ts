@@ -94,14 +94,21 @@ export class WorkspaceManager {
 	}
 
 	/**
-	 * 列出工作区下的文件（相对路径，深度限 8 层）。
+	 * 列出工作区下的文件（相对路径）。
 	 * 若提供非空 query，则仅返回文件名或路径包含 query（大小写不敏感）的文件。
+	 *
+	 * 深度上限 15：Java Maven / 单体仓库典型路径
+	 *   <ws>/<sub-project>/<module>/src/main/java/com/<group>/<feature>/<sub>/Class.java
+	 *   = 10 层；如果工作区根再外面套一层（如 /qdport/ai → 含多个 maven 项目）就到 11 层。
+	 *   原来 8 层会把 src/main/java/com/x/y/z/Foo.java 这类路径全砍掉，导致所有 Java
+	 *   源码看不到。15 层足够覆盖常见 Java / Go / 嵌套 monorepo 结构。
+	 *   配合 IGNORED_DIRS 过滤 node_modules / target / dist / build 等大目录，性能可控。
 	 */
 	async listFiles(id: string, query: string = ''): Promise<string[]> {
 		const ws = this.get(id);
 		if (!ws) throw new Error(`Workspace ${id} not found`);
 		const results: string[] = [];
-		await this.walkDir(ws.path, ws.path, results, 0, 8);
+		await this.walkDir(ws.path, ws.path, results, 0, 15);
 
 		if (!query || query === '*' || query === '**/*') return results;
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "码弦Desktop",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "identifier": "com.maxian.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -42,6 +42,11 @@
     "externalBin": [
       "bin/maxian-server"
     ],
+    "resources": {
+      "../bundled-skills/manifest.json": "bundled-skills/manifest.json",
+      "../bundled-skills/core/*.md": "bundled-skills/core/",
+      "../bundled-skills/stack/*.md": "bundled-skills/stack/"
+    },
     "createUpdaterArtifacts": false,
     "macOS": {
       "minimumSystemVersion": "10.15",

@@ -1,0 +1,328 @@
+{
+  "$schema": "./schema.json",
+  "version": 2,
+  "description": "码弦 Desktop 内置技能库清单。core 类技能首次启动时自动安装到 ~/.maxian/skills/maxian-builtin/，stack 类技能由用户通过『推荐技能库』面板按需勾选安装。",
+  "groups": [
+    {
+      "id": "core",
+      "title": "核心工作流（默认安装）",
+      "description": "通用工程方法论，不依赖任何技术栈，所有项目都受益。",
+      "autoInstall": true,
+      "skills": [
+        {
+          "id": "brainstorming",
+          "file": "core/brainstorming.md",
+          "name": "需求探讨（苏格拉底式追问）",
+          "description": "模糊需求先追问后动手，避免凭直觉写错代码"
+        },
+        {
+          "id": "writing-plans",
+          "file": "core/writing-plans.md",
+          "name": "写实施计划",
+          "description": "结构化拆解任务步骤、风险、验收标准"
+        },
+        {
+          "id": "executing-plans",
+          "file": "core/executing-plans.md",
+          "name": "按计划稳定执行",
+          "description": "逐步推进，每步独立验证，避免一气呵成失败"
+        },
+        {
+          "id": "systematic-debugging",
+          "file": "core/systematic-debugging.md",
+          "name": "系统化调试（4 阶段根因分析）",
+          "description": "复现 → 定位 → 根因 → 修复+验证"
+        },
+        {
+          "id": "test-driven-development",
+          "file": "core/test-driven-development.md",
+          "name": "测试驱动开发（红绿重构）",
+          "description": "TDD 闭环，避免事后补测试"
+        },
+        {
+          "id": "verification-before-completion",
+          "file": "core/verification-before-completion.md",
+          "name": "完成前最终验证",
+          "description": "防止『声称完成但实际编译失败』的翻车"
+        },
+        {
+          "id": "requesting-code-review",
+          "file": "core/requesting-code-review.md",
+          "name": "提交 PR 前自查清单",
+          "description": "PR 描述模板 + 提交前自查"
+        },
+        {
+          "id": "code-review-checklist",
+          "file": "core/code-review-checklist.md",
+          "name": "代码审查 7 大维度清单",
+          "description": "正确性 / 设计 / 可读性 / 测试 / 性能 / 安全 / 文档"
+        },
+        {
+          "id": "using-git-worktrees",
+          "file": "core/using-git-worktrees.md",
+          "name": "Git Worktree 多分支并行",
+          "description": "不打断当前工作切到其他分支"
+        },
+        {
+          "id": "finishing-a-development-branch",
+          "file": "core/finishing-a-development-branch.md",
+          "name": "分支收尾（合并 / 废弃 / 清理）",
+          "description": "合并策略选择、清理动作、CHANGELOG / 版本号同步"
+        }
+      ]
+    },
+    {
+      "id": "frontend",
+      "title": "前端框架",
+      "description": "React / Vue / Next.js / 样式 / 可访问性 / 性能。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "react-best-practices",
+          "file": "stack/react-best-practices.md",
+          "name": "React 最佳实践（18+/19）",
+          "description": "Hooks / state immutable / key 稳定 / 性能优化",
+          "tags": ["frontend", "react", "javascript", "typescript"]
+        },
+        {
+          "id": "vue3-composition-api",
+          "file": "stack/vue3-composition-api.md",
+          "name": "Vue 3 Composition API 最佳实践",
+          "description": "<script setup> / ref vs reactive / Pinia / TypeScript",
+          "tags": ["frontend", "vue", "vue3", "typescript"]
+        },
+        {
+          "id": "nextjs-app-router",
+          "file": "stack/nextjs-app-router.md",
+          "name": "Next.js App Router（13/14/15）",
+          "description": "Server vs Client Component / Server Action / 缓存语义",
+          "tags": ["frontend", "react", "nextjs", "ssr"]
+        },
+        {
+          "id": "tailwind-css-patterns",
+          "file": "stack/tailwind-css-patterns.md",
+          "name": "Tailwind CSS 实战模式",
+          "description": "组件抽取 / 响应式 / 暗色模式 / 设计 token",
+          "tags": ["frontend", "css", "tailwind", "design"]
+        },
+        {
+          "id": "accessibility-a11y",
+          "file": "stack/accessibility-a11y.md",
+          "name": "Web 可访问性（A11y）",
+          "description": "语义 HTML / 键盘导航 / 对比度 / ARIA / 屏幕阅读器",
+          "tags": ["frontend", "a11y", "ui", "ux"]
+        },
+        {
+          "id": "web-performance-optimization",
+          "file": "stack/web-performance-optimization.md",
+          "name": "前端性能优化（Core Web Vitals）",
+          "description": "LCP / INP / CLS 系统化优化 / bundle / 虚拟列表",
+          "tags": ["frontend", "performance", "lighthouse"]
+        }
+      ]
+    },
+    {
+      "id": "backend",
+      "title": "后端框架",
+      "description": "Spring Boot / FastAPI / Express / Gin / NestJS。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "spring-boot-conventions",
+          "file": "stack/spring-boot-conventions.md",
+          "name": "Spring Boot 项目规范（3.x）",
+          "description": "Controller / Service / Repository 分层 / 事务 / 异常处理",
+          "tags": ["backend", "java", "spring"]
+        },
+        {
+          "id": "python-fastapi-conventions",
+          "file": "stack/python-fastapi-conventions.md",
+          "name": "Python FastAPI 项目规范",
+          "description": "Pydantic v2 / async-sync 边界 / Depends / SQLAlchemy 2",
+          "tags": ["backend", "python", "fastapi"]
+        },
+        {
+          "id": "nodejs-express-patterns",
+          "file": "stack/nodejs-express-patterns.md",
+          "name": "Node.js Express 现代实战",
+          "description": "TypeScript + ESM / asyncHandler / zod 校验 / 错误统一",
+          "tags": ["backend", "nodejs", "express", "typescript"]
+        },
+        {
+          "id": "go-gin-patterns",
+          "file": "stack/go-gin-patterns.md",
+          "name": "Go Gin Web 项目实战",
+          "description": "context 透传 / handler 薄 / GORM / 优雅关闭",
+          "tags": ["backend", "go", "gin"]
+        },
+        {
+          "id": "nestjs-conventions",
+          "file": "stack/nestjs-conventions.md",
+          "name": "NestJS 项目规范",
+          "description": "Module / Controller / Service / Guard / Interceptor",
+          "tags": ["backend", "nodejs", "nestjs", "typescript"]
+        },
+        {
+          "id": "api-design",
+          "file": "stack/api-design.md",
+          "name": "HTTP / REST API 设计规范",
+          "description": "URL 设计 / 状态码 / 错误格式 / 版本化 / 幂等",
+          "tags": ["backend", "api", "rest"]
+        }
+      ]
+    },
+    {
+      "id": "data",
+      "title": "数据库 / 缓存",
+      "description": "SQL / Redis / MongoDB / 迁移。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "sql-query-optimization",
+          "file": "stack/sql-query-optimization.md",
+          "name": "SQL 查询优化（PG / MySQL）",
+          "description": "EXPLAIN ANALYZE / 索引设计 / 反模式 / 分区",
+          "tags": ["database", "sql", "postgres", "mysql", "performance"]
+        },
+        {
+          "id": "redis-caching-patterns",
+          "file": "stack/redis-caching-patterns.md",
+          "name": "Redis 缓存模式实战",
+          "description": "Cache-Aside / 击穿穿透雪崩防护 / 数据结构选型",
+          "tags": ["cache", "redis"]
+        },
+        {
+          "id": "mongodb-best-practices",
+          "file": "stack/mongodb-best-practices.md",
+          "name": "MongoDB 最佳实践",
+          "description": "嵌入 vs 引用 / 索引 ESR / 聚合管道 / 事务",
+          "tags": ["database", "mongodb", "nosql"]
+        },
+        {
+          "id": "database-migration-safety",
+          "file": "stack/database-migration-safety.md",
+          "name": "数据库迁移安全实践",
+          "description": "Expand-Contract 模式 / 大表改动 / 回滚 / 兼容性",
+          "tags": ["database", "migration"]
+        }
+      ]
+    },
+    {
+      "id": "devops",
+      "title": "DevOps / 部署",
+      "description": "Docker / GitHub Actions / Kubernetes。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "docker-best-practices",
+          "file": "stack/docker-best-practices.md",
+          "name": "Docker 容器化最佳实践",
+          "description": "多阶段构建 / alpine / 安全 / 各语言模板",
+          "tags": ["devops", "docker", "container"]
+        },
+        {
+          "id": "ci-cd-github-actions",
+          "file": "stack/ci-cd-github-actions.md",
+          "name": "GitHub Actions CI/CD 实战",
+          "description": "缓存 / matrix / secrets / reusable workflow",
+          "tags": ["devops", "ci-cd", "github-actions"]
+        },
+        {
+          "id": "kubernetes-deployment",
+          "file": "stack/kubernetes-deployment.md",
+          "name": "Kubernetes 部署最佳实践",
+          "description": "资源限制 / 健康检查 / HPA / PDB / 优雅关闭",
+          "tags": ["devops", "kubernetes", "k8s"]
+        }
+      ]
+    },
+    {
+      "id": "testing",
+      "title": "测试",
+      "description": "E2E / 集成测试。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "e2e-testing-playwright",
+          "file": "stack/e2e-testing-playwright.md",
+          "name": "Playwright E2E 测试",
+          "description": "Page Object / fixtures / 视觉回归 / 调试 trace",
+          "tags": ["testing", "e2e", "playwright"]
+        }
+      ]
+    },
+    {
+      "id": "architecture",
+      "title": "架构设计",
+      "description": "微服务 / 事件驱动。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "microservices-patterns",
+          "file": "stack/microservices-patterns.md",
+          "name": "微服务架构模式",
+          "description": "服务拆分 / Saga / Circuit Breaker / API Gateway",
+          "tags": ["architecture", "microservices", "distributed"]
+        },
+        {
+          "id": "event-driven-architecture",
+          "file": "stack/event-driven-architecture.md",
+          "name": "事件驱动架构（EDA）",
+          "description": "Kafka / 幂等消费 / DLQ / Outbox / 顺序保证",
+          "tags": ["architecture", "kafka", "messaging", "events"]
+        }
+      ]
+    },
+    {
+      "id": "ai-engineering",
+      "title": "AI 工程",
+      "description": "LLM Prompt / RAG。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "llm-prompt-engineering",
+          "file": "stack/llm-prompt-engineering.md",
+          "name": "LLM Prompt Engineering",
+          "description": "system/user 分离 / few-shot / 防注入 / 结构化输出",
+          "tags": ["ai", "llm", "prompt"]
+        },
+        {
+          "id": "rag-system-design",
+          "file": "stack/rag-system-design.md",
+          "name": "RAG 系统设计",
+          "description": "Chunking / Embedding / 检索 / Re-rank / 防幻觉",
+          "tags": ["ai", "llm", "rag", "vector-db"]
+        }
+      ]
+    },
+    {
+      "id": "quality",
+      "title": "代码质量",
+      "description": "错误处理 / 安全。",
+      "autoInstall": false,
+      "skills": [
+        {
+          "id": "error-handling-patterns",
+          "file": "stack/error-handling-patterns.md",
+          "name": "错误处理通用模式",
+          "description": "自定义错误类型 / Result / 重试退避 / 优雅降级",
+          "tags": ["quality", "error-handling"]
+        },
+        {
+          "id": "typescript-strict-mode",
+          "file": "stack/typescript-strict-mode.md",
+          "name": "TypeScript 严格模式实践",
+          "description": "no any / 类型守卫 / zod 运行时校验",
+          "tags": ["quality", "typescript"]
+        },
+        {
+          "id": "security-best-practices",
+          "file": "stack/security-best-practices.md",
+          "name": "通用代码安全实践",
+          "description": "OWASP Top 10 / 注入 / XSS / 凭据管理 / 加密",
+          "tags": ["quality", "security", "owasp"]
+        }
+      ]
+    }
+  ]
+}

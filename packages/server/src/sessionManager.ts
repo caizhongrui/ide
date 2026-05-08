@@ -121,9 +121,19 @@ interface SessionRuntime {
 	};
 	/** 当前挂起的 plan_exit 请求（最多一个） */
 	pendingPlanExit?: {
-		resolve: (result: { approved: boolean; feedback?: string }) => void;
+		resolve: (result: { approved: boolean; feedback?: string; cancelled?: boolean }) => void;
 		reject:  (err: Error) => void;
 	};
+	/**
+	 * K-Replay：待响应事件的"重放快照"。
+	 * 解决 SSE 订阅时序竞态：客户端 send() 先 subscribe（异步发起 SSE 握手未完成）
+	 * 再 sendMessage（触发 agent loop），如果 plan_exit / question / approval 事件
+	 * 在 SSE 还没建立时就发出 → 事件丢失 → 对话框永远不显示。
+	 *
+	 * 解决方案：每次发出"待响应"事件时存进这个 Map（key=event 唯一标识），
+	 * 新订阅者建立连接时立即重放这些事件，wait 解析时清除。
+	 */
+	pendingReplayEvents: Map<string, MaxianEvent>;
 }
 
 export class SessionManager {
@@ -299,9 +309,10 @@ export class SessionManager {
 	private ensureRuntime(id: string): SessionRuntime {
 		if (!this.runtimes.has(id)) {
 			this.runtimes.set(id, {
-				subscribers: new Set(),
-				cancelled: false,
-				pendingApprovals: new Map(),
+				subscribers:         new Set(),
+				cancelled:           false,
+				pendingApprovals:    new Map(),
+				pendingReplayEvents: new Map(),
 			});
 		}
 		return this.runtimes.get(id)!;
@@ -425,12 +436,37 @@ export class SessionManager {
 	subscribe(id: string, handler: (event: MaxianEvent) => void | Promise<void>): () => void {
 		const rt = this.ensureRuntime(id);
 		rt.subscribers.add(handler);
+
+		// K-Replay：新订阅者上线时，重放所有"待响应"事件（plan_exit / question / approval）。
+		// 解决 SSE 订阅时序竞态：客户端先 subscribe（异步握手）再 sendMessage，
+		// 如果待响应事件在握手完成前发出会丢失，对话框永远不显示。
+		if (rt.pendingReplayEvents.size > 0) {
+			// fire-and-forget，不阻塞 subscribe 返回；失败由 emitEvent 同样的 try/catch 兜底
+			void (async () => {
+				for (const ev of rt.pendingReplayEvents.values()) {
+					try { await handler(ev); }
+					catch (err) { console.error('[SessionManager] replay error:', err); }
+				}
+			})();
+		}
+
 		return () => { rt.subscribers.delete(handler); };
 	}
 
 	async emitEvent(id: string, event: MaxianEvent): Promise<void> {
 		const rt = this.getRuntime(id);
 		if (!rt) return;
+
+		// K-Replay：把"待响应"事件存入重放缓存（subscribe 时回放，避免 SSE 握手前发出的事件丢失）。
+		// 三类事件：plan_exit_request / question_request / tool_approval_request。
+		// 由 wait*/register* 在 resolve 时清理。
+		const ev = event as any;
+		let replayKey: string | undefined;
+		if (ev?.type === 'plan_exit_request') replayKey = 'plan_exit';
+		else if (ev?.type === 'question_request') replayKey = 'question';
+		else if (ev?.type === 'tool_approval_request' && ev.toolUseId) replayKey = `approval:${ev.toolUseId}`;
+		if (replayKey) rt.pendingReplayEvents.set(replayKey, event);
+
 		// ⚠️ 关键：在迭代开始前 snapshot 订阅列表。
 		// 直接 for...of rt.subscribers 会让"迭代期间新加进来的订阅"也收到本事件——
 		// 在批量任务的同 session 共享场景下会导致 Task1 的 task_status:completed 事件
@@ -900,7 +936,9 @@ export class SessionManager {
 			rt.pendingQuestion = undefined;
 		}
 		if (rt?.pendingPlanExit) {
-			try { rt.pendingPlanExit.resolve({ approved: false, feedback: '任务被取消' }); } catch {}
+			// K-Plan-Cancel：标记为 cancelled 而不是 feedback，让 AI 收到明确"停止"指令。
+			// 之前用 feedback='任务被取消' 会让 AI 进入"重新规划"循环。
+			try { rt.pendingPlanExit.resolve({ approved: false, cancelled: true }); } catch {}
 			rt.pendingPlanExit = undefined;
 		}
 		// 唤醒所有挂起的 approval（被拒绝处理）
@@ -909,6 +947,8 @@ export class SessionManager {
 				try { pend.resolve(false, '任务已取消'); } catch {}
 			}
 			rt.pendingApprovals.clear();
+			// K-Replay：取消时清空所有重放事件
+			rt.pendingReplayEvents.clear();
 		}
 		const db = getDb();
 		db.prepare("UPDATE sessions SET status = 'idle', updated_at = ? WHERE id = ?").run(Date.now(), id);
@@ -964,6 +1004,8 @@ export class SessionManager {
 		}
 		pending.resolve(opts.approved, opts.feedback);
 		rt.pendingApprovals.delete(opts.toolUseId);
+		// K-Replay：响应后清除重放缓存
+		rt.pendingReplayEvents.delete(`approval:${opts.toolUseId}`);
 	}
 
 	async registerApproval(id: string, toolUseId: string): Promise<{ approved: boolean; feedback?: string }> {
@@ -987,13 +1029,16 @@ export class SessionManager {
 	): Promise<{ answer: string; selected?: string[]; cancelled: boolean }> {
 		const rt = this.ensureRuntime(id);
 		return new Promise((resolve, reject) => {
+			// K-Replay：cleanup 在 resolve / reject / 超时三条路径都执行
+			const cleanup = (): void => { rt.pendingReplayEvents.delete('question'); };
 			const timer = setTimeout(() => {
+				cleanup();
 				if (rt.pendingQuestion) { rt.pendingQuestion = undefined; }
 				reject(new Error('question 等待超时'));
 			}, timeoutMs);
 			rt.pendingQuestion = {
-				resolve: (a) => { clearTimeout(timer); resolve(a); },
-				reject:  (e) => { clearTimeout(timer); reject(e); },
+				resolve: (a) => { clearTimeout(timer); cleanup(); resolve(a); },
+				reject:  (e) => { clearTimeout(timer); cleanup(); reject(e); },
 			};
 		});
 	}
@@ -1014,16 +1059,19 @@ export class SessionManager {
 	async waitForPlanExit(
 		id:        string,
 		timeoutMs: number,
-	): Promise<{ approved: boolean; feedback?: string }> {
+	): Promise<{ approved: boolean; feedback?: string; cancelled?: boolean }> {
 		const rt = this.ensureRuntime(id);
 		return new Promise((resolve, reject) => {
+			// K-Replay：清掉重放缓存，避免新订阅者再收到已响应的请求
+			const cleanup = (): void => { rt.pendingReplayEvents.delete('plan_exit'); };
 			const timer = setTimeout(() => {
+				cleanup();
 				if (rt.pendingPlanExit) { rt.pendingPlanExit = undefined; }
 				reject(new Error('plan_exit 等待超时'));
 			}, timeoutMs);
 			rt.pendingPlanExit = {
-				resolve: (r) => { clearTimeout(timer); resolve(r); },
-				reject:  (e) => { clearTimeout(timer); reject(e); },
+				resolve: (r) => { clearTimeout(timer); cleanup(); resolve(r); },
+				reject:  (e) => { clearTimeout(timer); cleanup(); reject(e); },
 			};
 		});
 	}
