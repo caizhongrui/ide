@@ -56,6 +56,18 @@ export interface MessageBubbleProps {
 	message: ChatMessage;
 	/** 自定义内容渲染（markdown 等）；未提供则按 textContent 输出 */
 	renderContent?: (text: string) => JSX.Element | string;
+	/**
+	 * **K-Perf**：稳定 host 模式的内容渲染器。比 renderContent 性能高一个数量级。
+	 *
+	 * 调用方拿到本组件创建的稳定 host 元素引用，自己负责在 text 变化时 mutate 它的
+	 * innerHTML（或子树）。组件**不会**因为 text 变化而替换 host 元素，从而避免：
+	 *   1. SolidJS 反复创建/销毁 `<div innerHTML={...}>` 节点；
+	 *   2. 浏览器反复 parse 整段 HTML 字符串重建 DOM 子树。
+	 *
+	 * 流式 assistant / reasoning 高频更新场景下，这是避免 Windows "(未响应)" 的关键。
+	 * 如果同时提供了 renderContent 和 renderRichContentMutable，优先用 mutable 版本。
+	 */
+	renderRichContentMutable?: (host: HTMLElement, text: string) => void;
 	/** 工具卡片自定义 render 注册表（per-tool 视图） */
 	toolRenderers?: ToolRenderRegistry;
 	/** 工具名 → 显示文案（中文化） */
@@ -99,6 +111,18 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 		}
 		// 内置极简 markdown（已 escape XSS 安全）
 		return (<div innerHTML={renderLightMarkdown(text)} />) as unknown as JSX.Element;
+	};
+	/**
+	 * K-Perf：稳定 host 渲染槽。仅当 consumer 提供 renderRichContentMutable 时使用。
+	 * 返回的 host 元素引用稳定，组件只创建一次；text 变化时 createEffect 在 host 上
+	 * 就地 mutate，避免每帧整棵 DOM 子树替换。
+	 */
+	const renderRichContentMutableSlot = (getText: () => string): JSX.Element => {
+		const host = (<div class="mu-rich-host" />) as unknown as HTMLElement;
+		createEffect(() => {
+			props.renderRichContentMutable!(host, getText());
+		});
+		return host as unknown as JSX.Element;
 	};
 
 	return (
@@ -222,7 +246,9 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 						<Show when={role() === 'assistant'}>
 							{avatarNode()}
 							<div class="mu-msg-content mu-msg-content-rich">
-								{renderRichContent(msg().content)}
+								{props.renderRichContentMutable
+									? renderRichContentMutableSlot(() => msg().content)
+									: renderRichContent(msg().content)}
 								<Show when={ts() && !msg().isPartial}>
 									<span class="mu-msg-time">{ts()}</span>
 								</Show>
@@ -267,7 +293,9 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 												class="mu-reasoning-body"
 												classList={{ 'mu-reasoning-body-streaming': !!msg().isPartial }}
 											>
-												{renderRichContent(msg().content)}
+												{props.renderRichContentMutable
+													? renderRichContentMutableSlot(() => msg().content)
+													: renderRichContent(msg().content)}
 											</div>
 										</Show>
 									</div>

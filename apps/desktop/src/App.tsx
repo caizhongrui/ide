@@ -1,6 +1,6 @@
 import { createSignal, createMemo, For, Show, onMount, onCleanup, createEffect } from "solid-js"
 import type { SessionSummary, Workspace, MaxianEvent, StoredMessage } from "@maxian/sdk"
-import { renderMarkdown } from "./markdown"
+import { renderMarkdown, updateMarkdownInto } from "./markdown"
 import hljs from "highlight.js/lib/common"
 import "highlight.js/styles/github-dark.css"
 import logoUrl from "./assets/logo.png"
@@ -293,7 +293,7 @@ export default function App() {
       showToast({ message: `已回退，删除 ${res.deleted} 条消息`, kind: 'success' })
       // 重新加载消息
       const data = await c.getSessionMessages(sid, { limit: 50 })
-      setMessages(data.messages.map(storedToChatMessage))
+      progressiveSetMessages(data.messages.map(storedToChatMessage))
       setShowRevertDock(false)
     } catch (e) {
       showToast({ message: '回退失败: ' + (e as Error).message, kind: 'error' })
@@ -1180,6 +1180,34 @@ export default function App() {
       setMessages(prev => prev.slice(-600))
     }
   })
+
+  // ─── K-Perf #2：会话历史消息分批渲染 ─────────────────────────────────────
+  // 切会话 / 加载历史 / 编辑回滚 时，data.messages.map(...) 拿到 50 条历史消息后
+  // 一次性 setMessages(50 条) → MessageList 同步渲染 50 个 bubble × 每个 bubble
+  // 跑完整 markdown 管线（hljs 高亮 + DOMPurify + linkify）。在长会话 / 含大代码块
+  // 时单次渲染轻松 3-15 秒，Windows 直接 `(未响应)`。
+  //
+  // 改成：先 setMessages 最近 10 条让首屏立即可见，之后每 rAF 再追加 10 条直到全部
+  // 渲染完毕。SolidJS `<For>` 会按 msg.id 做 row cache，每帧只为新增条目创建 bubble。
+  //
+  // 注意：必须按"从新到旧"逐步前置，保持时间顺序；最早的消息最后才挂入 DOM。
+  function progressiveSetMessages(all: ChatMessage[]): void {
+    const FIRST_BATCH = 10
+    const STEP        = 10
+    if (all.length <= FIRST_BATCH) {
+      setMessages(all)
+      return
+    }
+    let shown = FIRST_BATCH
+    setMessages(all.slice(-shown))
+    const tick = (): void => {
+      if (shown >= all.length) return
+      shown = Math.min(shown + STEP, all.length)
+      setMessages(all.slice(-shown))
+      if (shown < all.length) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }
   // ─── @maxian/ui 共享 store 镜像 ─────────────────────────────────────────────
   // desktop 现有 messages signal 是真相源；这里做"单向镜像"到共享 store，
   // 让未来共享 MessageList / 三端共用代码可以无缝消费。镜像只读不写回。
@@ -1352,7 +1380,7 @@ export default function App() {
         const c = await getClient()
         const data = await c.getSessionMessages(sid, { limit: 200 })
         if (Array.isArray(data?.messages) && data.messages.length > 0) {
-          setMessages(data.messages.map(storedToChatMessage))
+          progressiveSetMessages(data.messages.map(storedToChatMessage))
           // 如果最后一条已经是 assistant / error / tool 完整结果 → 判定任务已结束
           const last = data.messages[data.messages.length - 1] as any
           if (last && (last.role === 'assistant' || last.role === 'error')) {
@@ -1718,7 +1746,7 @@ export default function App() {
     try {
       const { messages: stored, hasMore } = await c.getSessionMessages(id, { limit: 50 })
       if (stored.length > 0) {
-        setMessages(stored.map(storedToChatMessage))
+        progressiveSetMessages(stored.map(storedToChatMessage))
         setMsgHasMore(hasMore)
         setMsgOldestTs(stored[0].createdAt)
       }
@@ -1831,7 +1859,7 @@ export default function App() {
       if (!r.ok) throw new Error(r.error ?? '编辑失败')
       // 重新加载 + 自动用新内容重跑一次 AI
       const data = await c.getSessionMessages(sid, { limit: 50 })
-      setMessages(data.messages.map(storedToChatMessage))
+      progressiveSetMessages(data.messages.map(storedToChatMessage))
       // 发送一条空触发以让 agent 继续（实际上后端会用新的 history）
       setInput('')
       setSending(true)
@@ -1853,7 +1881,7 @@ export default function App() {
       if (!r.ok || !r.promptUserId) throw new Error('无法定位触发用户消息')
       // 重新加载 messages
       const data = await c.getSessionMessages(sid, { limit: 50 })
-      setMessages(data.messages.map(storedToChatMessage))
+      progressiveSetMessages(data.messages.map(storedToChatMessage))
       // 取保留的最后一条 user 消息内容再发一次
       const promptMsg = data.messages.find(m => m.id === r.promptUserId)
       if (!promptMsg) throw new Error('找不到触发消息')
@@ -4587,6 +4615,9 @@ export default {
                   {/* @maxian/ui 共享 MessageList — 三端唯一渲染入口 */}
                   <SharedMessageList
                     messages={sharedMessagesStore.messages}
+                    /* K-Perf #1：mutable host 模式，避免每帧整棵 DOM 子树替换。
+                     * 仍保留 renderContent 作为非流式形态（web/IDE）的 fallback。*/
+                    renderRichContentMutable={updateMarkdownInto}
                     renderContent={(text) => <div innerHTML={renderMarkdown(text)} />}
                     getToolLabel={(n) => TOOL_LABELS[n] ?? n}
                     renderAvatar={(role) => {

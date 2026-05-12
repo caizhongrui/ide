@@ -25,6 +25,8 @@ import { injectStyleOnce } from './_injectStyle.js';
 export interface MessageListProps {
 	messages:        Accessor<ChatMessage[]>;
 	renderContent?:  (text: string) => JSX.Element | string;
+	/** K-Perf：稳定 host 模式的内容渲染器，详见 MessageBubbleProps.renderRichContentMutable */
+	renderRichContentMutable?: (host: HTMLElement, text: string) => void;
 	toolRenderers?:  ToolRenderRegistry;
 	getToolLabel?:   (name: string) => string;
 	/** 单条消息操作按钮（hover 时显示） */
@@ -237,6 +239,7 @@ export function MessageList(props: MessageListProps): JSX.Element {
 						<MessageBubble
 							message={row.m}
 							renderContent={props.renderContent}
+							renderRichContentMutable={props.renderRichContentMutable}
 							toolRenderers={props.toolRenderers}
 							getToolLabel={props.getToolLabel}
 							actions={props.actions}

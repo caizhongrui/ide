@@ -96,8 +96,56 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 	// 任务取消时间戳：cancel 触发后，后续残留的流式事件全部忽略
 	let _abortedAt = 0
 
+	// K-Perf：assistant_message 流式 token 的 rAF 批处理。
+	// 高速流式期间（>20 token/s），原本每个 token 都 setMessages → Markdown 全量重渲染，
+	// 把 webview 主线程跑满，Windows 显示 "(未响应)"。这里把同一帧内的多个
+	// assistant_message 合并成一次 setMessages（≤16ms 延迟，肉眼无感）。
+	let _pendingAssistantText      = ""
+	let _pendingAssistantIsPartial = false
+	let _pendingAssistantHas       = false
+	let _assistantRafId: number | null = null
+
+	const flushPendingAssistant = (): void => {
+		if (_assistantRafId !== null) {
+			cancelAnimationFrame(_assistantRafId)
+			_assistantRafId = null
+		}
+		if (!_pendingAssistantHas) return
+		const content   = _pendingAssistantText
+		const isPartial = _pendingAssistantIsPartial
+		_pendingAssistantText      = ""
+		_pendingAssistantIsPartial = false
+		_pendingAssistantHas       = false
+		const ASSISTANT_PER_MSG_CAP = 80 * 1024
+		deps.setMessages((prev) => {
+			let base = prev
+			const lastMsg = base.length > 0 ? base[base.length - 1] : null
+			if (lastMsg?.role === 'reasoning' && lastMsg.isPartial) {
+				base = [...base.slice(0, -1), { ...lastMsg, isPartial: false, charCount: lastMsg.content.length }]
+			}
+			if (isPartial && base.length > 0 && base[base.length - 1].role === "assistant") {
+				const last = base[base.length - 1]
+				let nextContent = last.content + content
+				if (nextContent.length > ASSISTANT_PER_MSG_CAP) {
+					const head = nextContent.slice(0, ASSISTANT_PER_MSG_CAP / 2)
+					const tail = nextContent.slice(-ASSISTANT_PER_MSG_CAP / 2)
+					nextContent = head + `\n\n... [回复中段 ${nextContent.length - ASSISTANT_PER_MSG_CAP} 字省略]\n\n` + tail
+				}
+				return [...base.slice(0, -1), { ...last, content: nextContent, isPartial }]
+			}
+			return [...base, { id: deps.nextMsgId(), role: "assistant", content, isPartial, createdAt: Date.now() }]
+		})
+	}
+
 	const handle = function handleEvent(e: MaxianEvent) {
 		const type = e.type as string
+
+		// K-Perf：任何非 assistant_message 事件到来前，先把 pending 的流式 token 落盘。
+		// 否则下面分支（如 tool_call_start、reasoning_delta、completion）会 push 新消息或
+		// 修改尾部，导致 pending 内容落到错误位置或丢失顺序。
+		if (type !== 'assistant_message' && _pendingAssistantHas) {
+			flushPendingAssistant()
+		}
 
 		// task_aborted = 后端强制中止信号，立刻进入"忽略后续流"模式
 		if (type === "task_aborted") {
@@ -387,27 +435,20 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 			const content = (e as any).content as string
 			const isPartial = (e as any).isPartial as boolean
 			if (content) deps.bumpRecv(content.length)
-			// 单条 assistant 上限 80KB：超长回复（如代码生成）单条文本能到几十 KB，
-			// 给 cap 防长会话×长输出双重累积。代码段已经写到工具结果，自然语言部分够用。
-			const ASSISTANT_PER_MSG_CAP = 80 * 1024
-			deps.setMessages((prev) => {
-				let base = prev
-				const lastMsg = base.length > 0 ? base[base.length - 1] : null
-				if (lastMsg?.role === 'reasoning' && lastMsg.isPartial) {
-					base = [...base.slice(0, -1), { ...lastMsg, isPartial: false, charCount: lastMsg.content.length }]
-				}
-				if (isPartial && base.length > 0 && base[base.length - 1].role === "assistant") {
-					const last = base[base.length - 1]
-					let nextContent = last.content + content
-					if (nextContent.length > ASSISTANT_PER_MSG_CAP) {
-						const head = nextContent.slice(0, ASSISTANT_PER_MSG_CAP / 2)
-						const tail = nextContent.slice(-ASSISTANT_PER_MSG_CAP / 2)
-						nextContent = head + `\n\n... [回复中段 ${nextContent.length - ASSISTANT_PER_MSG_CAP} 字省略]\n\n` + tail
-					}
-					return [...base.slice(0, -1), { ...last, content: nextContent, isPartial }]
-				}
-				return [...base, { id: deps.nextMsgId(), role: "assistant", content, isPartial, createdAt: Date.now() }]
-			})
+			// K-Perf：把 token 累加到 pending，每帧最多 flush 一次。
+			// 单条 assistant 上限 80KB 的 head/tail 截断逻辑在 flushPendingAssistant 内做。
+			_pendingAssistantText      += content
+			_pendingAssistantIsPartial  = isPartial
+			_pendingAssistantHas        = true
+			if (!isPartial) {
+				// 完成态立刻落盘，不再等 rAF——后续 completion / 工具调用立即可见正确尾态
+				flushPendingAssistant()
+			} else if (_assistantRafId === null) {
+				_assistantRafId = requestAnimationFrame(() => {
+					_assistantRafId = null
+					flushPendingAssistant()
+				})
+			}
 		} else if (type === "convert_reasoning_to_assistant") {
 			// Agent 模式：最终迭代的文本以 reasoning_delta 流出，完成后转为普通助手消息
 			deps.setMessages((prev) => {
@@ -604,6 +645,10 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 
 	return {
 		handle,
-		resetAbortedAt: () => { _abortedAt = 0 },
+		resetAbortedAt: () => {
+			// 新一轮 send 前先把上一轮残留的 pending 落盘（极少触发，作兜底）
+			if (_pendingAssistantHas) flushPendingAssistant()
+			_abortedAt = 0
+		},
 	}
 }
