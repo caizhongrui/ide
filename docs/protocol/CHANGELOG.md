@@ -18,6 +18,21 @@
 
 ---
 
+## v1.1（minor）— 2026-05-12
+
+**新增 SSE 事件**：`workspace_files_changed`
+
+- 由 server 端 chokidar 文件系统 watcher 100ms 时窗合并后广播
+- 广播粒度：所有当前激活、`workspacePath` 匹配的 session 订阅者（不绑 sessionId）
+- 字段：`{ type: 'workspace_files_changed', workspaceId, added: string[], removed: string[] }`
+- 路径形态：工作区相对路径（与 `GET /workspaces/:id/files` 一致）
+- 过滤：与 `listFiles()` 的 IGNORED_DIRS 一致（node_modules / dist / dotfiles 等不上报）
+- 向后兼容：旧客户端按"静默丢弃未知事件"规则忽略，无影响
+
+事件清单从 19 种变为 20 种。详见 [sse-events.md#45](../architecture/sse-events.md)。
+
+---
+
 ## 变更规则
 
 | 变更类型 | 行动 |

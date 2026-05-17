@@ -52,7 +52,9 @@ export type MaxianEvent =
 	| FollowupSuggestionsEvent
 	| RateLimitEvent
 	| RateLimitClearedEvent
-	| TaskAbortedEvent;
+	| TaskAbortedEvent
+	// ── K-Watcher (v0.2.23)：工作区文件系统变化 ─────────────────
+	| WorkspaceFilesChangedEvent;
 
 /** AI 助手消息（流式文本） */
 export interface AssistantMessageEvent {
@@ -234,6 +236,24 @@ export interface TaskAbortedEvent {
 	type: 'task_aborted';
 	sessionId: string;
 	reason?: string;
+}
+
+/**
+ * 工作区文件系统变化（K-Watcher v0.2.23）。
+ *
+ * 由 server 端 chokidar watcher 100ms 时窗合并后广播给所有当前激活、workspacePath
+ * 匹配的 session 订阅者。客户端用于增量 patch @ 引用文件的内存缓存。
+ *
+ * - 不带 sessionId：这是工作区粒度事件，不绑特定 session。
+ * - added / removed：工作区相对路径（与 `listFiles()` 输出形态一致）。
+ * - 同一帧内同一路径只会出现在 added 或 removed 之一（先删后建会被规约为 added）。
+ * - 受 IGNORED_GLOBS 过滤（node_modules / dist / dotfiles 等不上报）。
+ */
+export interface WorkspaceFilesChangedEvent {
+	type: 'workspace_files_changed';
+	workspaceId: string;
+	added:    string[];
+	removed:  string[];
 }
 
 /** UI → Core 的命令类型 */

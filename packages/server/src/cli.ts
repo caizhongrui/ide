@@ -1955,6 +1955,17 @@ async function main() {
 		SessionManager.load(),
 	]);
 
+	// K-Watcher：把工作区文件系统变化广播给所有订阅了这个工作区的 SSE 客户端，
+	// 客户端可以增量 patch @ 引用的文件缓存。
+	workspaceManager.subscribeFileChanges((change) => {
+		void sessionManager.broadcastToWorkspace(change.workspacePath, {
+			type:        'workspace_files_changed',
+			workspaceId: change.workspaceId,
+			added:       change.added,
+			removed:     change.removed,
+		});
+	});
+
 	const { server, listener } = await bootstrap({
 		sessionManager,
 		workspaceManager,

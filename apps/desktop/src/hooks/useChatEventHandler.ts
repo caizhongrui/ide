@@ -83,6 +83,12 @@ export interface ChatEventDeps {
 	refreshSessions:     () => Promise<void>
 	maybeScrollToBottom: () => void
 	nextMsgId:           () => string
+
+	/**
+	 * K-Watcher：工作区文件系统变化（chokidar 100ms 时窗合并）。
+	 * desktop 端用于增量 patch @ 引用文件的内存缓存 `wsFileCache`。
+	 */
+	onWorkspaceFilesChanged?: (workspaceId: string, added: string[], removed: string[]) => void
 }
 
 export interface ChatEventHandler {
@@ -183,6 +189,16 @@ export function createChatEventHandler(deps: ChatEventDeps): ChatEventHandler {
 				next.set(filePath, { path: filePath, action })
 				return next
 			})
+			return
+		}
+		// K-Watcher：工作区文件系统变化（外部手动新建/删除 / git checkout / AI 工具）
+		// 由 server 端 chokidar 节流后广播，前端用于增量刷新 @ 引用文件候选缓存。
+		if (type === "workspace_files_changed") {
+			if (!deps.onWorkspaceFilesChanged) return
+			const workspaceId = (e as any).workspaceId as string
+			const added       = ((e as any).added   as string[] | undefined) ?? []
+			const removed     = ((e as any).removed as string[] | undefined) ?? []
+			deps.onWorkspaceFilesChanged(workspaceId, added, removed)
 			return
 		}
 		// Token 用量事件

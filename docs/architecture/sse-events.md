@@ -24,7 +24,7 @@ data: { "t": <timestamp> }
 
 客户端用 `Last-Event-ID` header 从指定事件 id 之后续传。Server 维护最近 500 条事件的环形缓冲区。
 
-## 4. 事件清单（19 种）
+## 4. 事件清单（20 种）
 
 ### 4.1 AI 响应
 
@@ -66,9 +66,12 @@ data: { "t": <timestamp> }
 
 | 事件 | 描述 | 核心字段 |
 |---|---|---|
-| `file_changed` | 文件变更 | `path, action: created/modified/deleted, linesAdded?, linesRemoved?` |
+| `file_changed` | 文件变更（AI 工具触发） | `path, action: created/modified/deleted, linesAdded?, linesRemoved?` |
+| `workspace_files_changed` | 工作区文件系统变化（外部新建 / 删除 / git checkout，chokidar 100ms 时窗合并；广播到所有 workspacePath 匹配的 session 订阅者） | `workspaceId, added: string[], removed: string[]` |
 | `rate_limit` | 触发限流 | `retryAfterMs` |
 | `rate_limit_cleared` | 限流解除 | — |
+
+> `workspace_files_changed` 与 `file_changed` 区别：前者由服务端 chokidar 监听文件系统主动推送（覆盖任何方式的创建/删除），后者由 AI 工具（write_to_file / multiedit 等）执行成功后主动 emit。两者**不互斥**——AI 工具创建文件会同时触发两者。
 
 ## 5. 客户端处理约定
 

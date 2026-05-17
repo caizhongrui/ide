@@ -12,6 +12,18 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.23',
+		date: '2026-05-12',
+		changes: [
+			'🔍 修复 @ 引用文件「手动创建的文件找不到」：',
+			'   · 之前 @ 引用的候选列表只在切换工作区时拉一次全量文件清单，之后就再也不刷新',
+			'   · 结果：你在 IDE 外用 touch / mkdir / git checkout 新建的文件、AI 工具刚写出来的文件，@ 菜单里都搜不到，必须切个工作区再切回来才能刷新 —— 极反人类',
+			'   · 这版服务端给每个工作区挂上文件系统 watcher（chokidar），任何方式的文件新建/删除都会主动通知客户端，@ 引用候选实时更新',
+			'   · 文件变化做了 100ms 时窗合并 + 跳过 node_modules / dist / .git 等大目录，git checkout 几千文件也不会冲爆',
+			'⚙️ 一堆内部稳定性优化',
+		],
+	},
+	{
 		version: '0.2.22',
 		date: '2026-05-12',
 		changes: [

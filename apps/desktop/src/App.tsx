@@ -2035,6 +2035,17 @@ export default function App() {
     refreshSessions: () => refreshSessions(),
     maybeScrollToBottom,
     nextMsgId: () => String(++msgId),
+    // K-Watcher：服务端 chokidar 推过来的工作区文件变化 → 增量 patch wsFileCache，
+    // 让 @ 引用文件候选实时反映外部手动新建 / git checkout / AI 工具创建的文件。
+    onWorkspaceFilesChanged: (workspaceId, added, removed) => {
+      setWsFileCache(prev => {
+        if (!prev || prev.id !== workspaceId) return prev   // 已切走 / 未加载，忽略
+        const set = new Set(prev.files)
+        for (const p of removed) set.delete(p)
+        for (const p of added)   set.add(p)
+        return { id: workspaceId, files: Array.from(set) }
+      })
+    },
   })
   const handleEvent = _chatEventHandler.handle
 

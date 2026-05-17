@@ -453,6 +453,32 @@ export class SessionManager {
 		return () => { rt.subscribers.delete(handler); };
 	}
 
+	/**
+	 * K-Watcher：把同一事件广播给所有当前激活的、workspacePath 匹配的 session 订阅者。
+	 *
+	 * 用于工作区粒度的事件（如 `workspace_files_changed`），需要送达所有正在看
+	 * 这个工作区的客户端，而不是只送某个 session。
+	 *
+	 * 注意：只命中**当前有 runtime（即有活跃订阅）的 session**。归档/未打开的
+	 * session 没有 SSE 连接，自然不需要送。
+	 */
+	async broadcastToWorkspace(workspacePath: string, event: MaxianEvent): Promise<void> {
+		const targets: Array<{ id: string; subscribers: ReadonlyArray<(e: MaxianEvent) => void | Promise<void>> }> = [];
+		for (const [id, rt] of this.runtimes) {
+			// 取 sessions DB row 比对 workspace_path —— 简单粗暴，但 list 操作走索引很快
+			const row = getDb().prepare('SELECT workspace_path FROM sessions WHERE id = ?').get(id) as { workspace_path?: string } | undefined;
+			if (!row || row.workspace_path !== workspacePath) continue;
+			targets.push({ id, subscribers: Array.from(rt.subscribers) });
+		}
+		for (const t of targets) {
+			for (const handler of t.subscribers) {
+				try { await handler(event); } catch (err) {
+					console.error(`[SessionManager] broadcast subscriber error (${t.id}):`, err);
+				}
+			}
+		}
+	}
+
 	async emitEvent(id: string, event: MaxianEvent): Promise<void> {
 		const rt = this.getRuntime(id);
 		if (!rt) return;
