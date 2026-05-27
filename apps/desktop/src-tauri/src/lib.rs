@@ -28,9 +28,25 @@ mod skills;
 
 struct ServerHandle(Mutex<Option<CommandChild>>);
 struct ServerPid(Mutex<Option<u32>>);   // 备份 pid，即使 CommandChild 被 take 走也能最后一击
+/// K-Port (v0.2.24)：sidecar 实际绑定的端口。env MAXIAN_PORT 是"期望"端口，
+/// 但被占用时会自动找空闲端口，实际端口写入这里供 server_info 读取。
+struct ServerPort(Mutex<Option<u16>>);
 
 fn read_env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// K-Port：从 start 起最多试 50 个端口找空闲的。返回 None 表示全部被占。
+fn find_free_port(start: u16) -> Option<u16> {
+    use std::net::TcpListener;
+    for offset in 0..50u16 {
+        let p = start.saturating_add(offset);
+        // bind 成功立刻 drop（listener 出作用域），端口空闲
+        if TcpListener::bind(("127.0.0.1", p)).is_ok() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 // ─── O9: 窗口尺寸/位置持久化 ──────────────────────────────────────────────
@@ -138,13 +154,53 @@ fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
 }
 
 fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
-    let port = read_env_or_default("MAXIAN_PORT", "4096");
+    let configured = read_env_or_default("MAXIAN_PORT", "4096");
     let user = read_env_or_default("MAXIAN_USER", "maxian");
     let pass = read_env_or_default("MAXIAN_PASS", "test123");
 
-    // 启动前探活：端口已被自己占就复用
-    if probe_existing_server(&port, &user, &pass) {
+    // 启动前探活：端口已被自己 maxian-server 占就复用
+    if probe_existing_server(&configured, &user, &pass) {
+        // 记录到 state，让 server_info 知道实际端口
+        if let Some(s) = app.try_state::<ServerPort>() {
+            if let Ok(mut g) = s.0.lock() {
+                *g = configured.parse::<u16>().ok();
+            }
+        }
         return Err("__REUSE_EXISTING__".into());
+    }
+
+    // K-Port：端口被别的服务占（如 Node dev server 抢了 4096）→ 自动找空闲端口
+    // jiusi 0.7.1 经验：用户多端开发常撞这种冲突，自动让步比报错强。
+    let configured_port: u16 = configured.parse().unwrap_or(4096);
+    let port_num: u16 = {
+        use std::net::TcpListener;
+        if TcpListener::bind(("127.0.0.1", configured_port)).is_ok() {
+            configured_port
+        } else {
+            match find_free_port(configured_port.saturating_add(1)) {
+                Some(p) => {
+                    eprintln!(
+                        "[maxian-desktop] ⚠️ 端口 {} 被占用，自动改用空闲端口 {}",
+                        configured_port, p
+                    );
+                    p
+                }
+                None => {
+                    return Err(format!(
+                        "找不到空闲端口（从 {} 起试了 50 个都被占）",
+                        configured_port
+                    ));
+                }
+            }
+        }
+    };
+    let port = port_num.to_string();
+
+    // 把实际端口写入 state，供 server_info / 前端读取
+    if let Some(s) = app.try_state::<ServerPort>() {
+        if let Ok(mut g) = s.0.lock() {
+            *g = Some(port_num);
+        }
     }
 
     // O4：传父进程 PID 给 sidecar，sidecar 自己 watch 父进程死亡然后自杀
@@ -247,12 +303,22 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
 }
 
 #[tauri::command]
-fn server_info() -> serde_json::Value {
+fn server_info(server_port: tauri::State<'_, ServerPort>) -> serde_json::Value {
+    // K-Port：优先读 spawn_server 写入的实际端口；fallback 到 env / 4096 默认
+    let port: u16 = server_port
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or_else(|| {
+            std::env::var("MAXIAN_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4096)
+        });
     serde_json::json!({
-        "baseUrl": format!(
-            "http://127.0.0.1:{}",
-            std::env::var("MAXIAN_PORT").unwrap_or_else(|_| "4096".into())
-        ),
+        "baseUrl": format!("http://127.0.0.1:{}", port),
+        "port": port,
         "username": std::env::var("MAXIAN_USER").unwrap_or_else(|_| "maxian".into()),
         "password": std::env::var("MAXIAN_PASS").unwrap_or_else(|_| "test123".into()),
     })
@@ -402,6 +468,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(ServerHandle(Mutex::new(None)))
         .manage(ServerPid(Mutex::new(None)))
+        .manage(ServerPort(Mutex::new(None)))
         .manage(terminal::TerminalRegistry::default())
         .invoke_handler(tauri::generate_handler![
             server_info,

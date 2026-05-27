@@ -11,6 +11,10 @@
 	font-family:   var(--maxian-font-sans, system-ui, -apple-system, sans-serif);
 	color:         var(--maxian-text-base, #e6e6e6);
 	background:    transparent;
+	/* K-Perf v0.2.24 (from jiusi 0.4.3)：CSS containment 让 Blink 把列表当独立 layout
+	   context，子元素高度变化（流式 token / 工具卡展开）不会触发祖先重排。
+	   不用 paint —— 那会裁切流式追加的内容。*/
+	contain:       layout style;
 }
 /* externalScrollHost 模式：禁用本组件内部滚动，让外部接管 */
 .mu-list-no-scroll {

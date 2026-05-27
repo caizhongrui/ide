@@ -68,36 +68,63 @@ export function MessageList(props: MessageListProps): JSX.Element {
 	let userScrolledUp = false;
 	let lastMessageCount = 0;
 	let scrollPending = false;
-	let pointerOnList = false;     // 鼠标在列表区域时暂停自动滚动（避免 hover 元素被滚走闪动）
+	// pointerOnList 已废弃（K-Perf v0.2.24 / 来自 jiusi）：之前把"鼠标在列表里"
+	// 作为暂停自动滚动的条件，实际效果是用户一边读一边鼠标停在窗口里时，
+	// 新消息根本不会自动滚下去。改为只在"用户主动上滑离开底部 80px"时才停。
 
 	/** 实际监听 scroll 的元素：外部 host > 内部 mu-list */
 	const getScrollEl = (): HTMLElement | undefined =>
 		props.externalScrollHost?.() ?? innerHost;
 
+	/** 实时检查"是否仍接近底部" —— 比 userScrolledUp 快照变量更可靠 */
+	const isNearBottom = (el: HTMLElement, slackPx = 80): boolean => {
+		const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+		return dist <= slackPx;
+	};
+
+	// K-Perf v0.2.24 (from jiusi 0.4.3)：rAF 节流 scroll handler。
+	// 原实现每个 scroll 事件都读 scrollHeight，触发同步 layout；WKWebView 在 800 条
+	// 消息列表里单次 layout 1-5ms，120Hz 滚动事件叠加 → 主线程长期 100%，合成器
+	// 拿不到帧。rAF 节流后同一帧最多读一次，layout 工作降一个数量级。
+	let scrollReadPending = false;
+	let scrollIdleTimer: number | undefined;
 	const handleScroll = (): void => {
-		const el = getScrollEl();
-		if (!el) return;
-		const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-		userScrolledUp = distFromBottom > 80;
+		// 滚动期间给 body 加 is-scrolling 类：暂停昂贵动画 / 隐藏 hover 状态。
+		// 停止滚动 150ms 后移除 class，恢复完整体验。
+		if (typeof document !== 'undefined') {
+			const b = document.body;
+			if (b && !b.classList.contains('is-scrolling')) {
+				b.classList.add('is-scrolling');
+			}
+			if (scrollIdleTimer !== undefined) clearTimeout(scrollIdleTimer);
+			scrollIdleTimer = window.setTimeout(() => {
+				document.body?.classList.remove('is-scrolling');
+				scrollIdleTimer = undefined;
+			}, 150);
+		}
+		if (scrollReadPending) return;
+		scrollReadPending = true;
+		requestAnimationFrame(() => {
+			scrollReadPending = false;
+			const el = getScrollEl();
+			if (!el) return;
+			const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+			userScrolledUp = distFromBottom > 80;
+		});
 	};
 
 	onMount(() => {
 		const el = getScrollEl();
 		el?.addEventListener('scroll', handleScroll, { passive: true });
-		// 鼠标进出列表 → 暂停 / 恢复自动滚动
-		const onEnter = (): void => { pointerOnList = true; };
-		const onLeave = (): void => { pointerOnList = false; };
-		el?.addEventListener('mouseenter', onEnter);
-		el?.addEventListener('mouseleave', onLeave);
 	});
 
-	// 自动滚到底：
-	//  - 只在「消息条数增加」（追加了新行）时滚动；patchById / patchLast 仅
-	//    更新现有消息内容时不滚——否则流式 chunk 每 ms 触发滚动，鼠标悬停
-	//    在某行上时由于布局微动，:hover 反复触发/解除导致闪动。
-	//  - rAF 节流：同一帧内多次更新只滚一次。
-	//  - 流式中最后一条仍在长大时，由 LiveOutputView 内部自己滚到底，本组件
-	//    不需要每个 chunk 都强制全局滚动。
+	// 自动滚到底（K-Perf v0.2.24 升级）：
+	//  - 只在「消息条数增加」时滚动；流式内容更新不滚。
+	//  - 用户上滑离开底部 80px 以上则不滚；回到底部附近自动恢复。
+	//  - 在 effect 入口同步再 check 一次（规避 userScrolledUp 快照过时）。
+	//  - **双 rAF + 多轮兜底校准**：流式中 markdown 段落异步落地会让 scrollHeight
+	//    估算偏小，单次 scrollTop=scrollHeight 可能滚不到真正底部；再 rAF 一次，
+	//    然后用 setTimeout 重试最多 3 轮（每轮 60ms），覆盖测量异步落地的尺寸抖动。
 	createEffect(() => {
 		const list  = props.messages();
 		const count = list.length;
@@ -112,14 +139,28 @@ export function MessageList(props: MessageListProps): JSX.Element {
 		}
 		const grew = count > lastMessageCount;
 		lastMessageCount = count;
-		if (!grew) return;          // 只有同一条消息内容更新 → 不滚
-		if (userScrolledUp) return;
-		if (pointerOnList) return;  // 鼠标在列表里 → 暂停自动滚动，避免 hover 元素被推走闪动
+		if (!grew) return;
+		if (!isNearBottom(el) && userScrolledUp) return;
 		if (scrollPending) return;
 		scrollPending = true;
 		requestAnimationFrame(() => {
-			scrollPending = false;
-			el.scrollTop = el.scrollHeight;
+			requestAnimationFrame(() => {
+				scrollPending = false;
+				if (!el.isConnected) return;
+				el.scrollTop = el.scrollHeight;
+				// 兜底校准：测量异步落地后再次贴底，最多 3 轮。
+				let retries = 0;
+				const recheck = (): void => {
+					if (retries++ >= 3) return;
+					if (!el.isConnected) return;
+					const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+					if (dist > 4) {
+						el.scrollTop = el.scrollHeight;
+						setTimeout(recheck, 60);
+					}
+				};
+				setTimeout(recheck, 60);
+			});
 		});
 	});
 

@@ -129,6 +129,92 @@ interface AiProxyStreamEvent {
 }
 
 /**
+ * K-FriendlyError：把上游各种 cryptic 错误翻译成中文可执行提示。
+ *
+ * 痛点：
+ *   - task 子代理失败时，AI 拿到 `API Key usage limit exceeded` 这种英文一句话就脑补
+ *     "我自己的 Anthropic API key 用完了"（实际是码弦云上游 key 池里某个 key 撞了 cap）；
+ *   - 上游断网/限流时给 AI 看 `socket hang up` / `Premature close`，AI 没法判断怎么继续；
+ *   - 401/403 时只显示 "HTTP 401"，用户看不出是登录过期还是真没权限。
+ *
+ * 翻译策略：保留原文（让排查有据可查）+ 追加中文可执行建议。
+ */
+export function friendlyHttpError(status: number, body: string): string {
+	const low = (body || '').toLowerCase();
+
+	// 配额 / 用量上限相关（最关键，治 task 子代理误判）
+	if (status === 429
+		|| low.includes('usage limit')
+		|| low.includes('quota')
+		|| low.includes('credit balance')
+		|| low.includes('insufficient')) {
+		return `上游 AI 服务返回配额/限流错误（HTTP ${status}）。\n`
+			+ `🔍 来源：码弦云后端转发到上游 AI 提供商（Anthropic / DeepSeek / Qwen 等）。\n`
+			+ `🔧 可能原因：① 上游某个 API key 撞了本周期 usage cap；② 你的账号余额接近耗尽；③ 并发限流。\n`
+			+ `💡 下一步：① 等 30 秒后重试；② 在「设置 → 关于」里查账户余额；③ 换个模型再试。\n`
+			+ `📌 注意：这跟你客户端的 API key 配置无关——不要因此重设密钥。\n`
+			+ `原始错误：${body}`;
+	}
+
+	// 鉴权失败（401/403）
+	if (status === 401 || status === 403 || low.includes('session_expired') || low.includes('unauthorized')) {
+		return `[SESSION_EXPIRED] 码弦云登录态失效（HTTP ${status}）。请退出后重新登录。\n原始错误：${body}`;
+	}
+
+	// 上游服务故障（5xx）
+	if (status >= 500) {
+		return `码弦云上游服务暂时不可用（HTTP ${status}）。多数情况几十秒内自动恢复，建议稍等后重试。\n`
+			+ `原始错误：${body}`;
+	}
+
+	// 其他：保留原文 + 加上 "码弦云" 标签让 AI 知道这是后端错误，不是自己配置问题
+	return `码弦云后端返回错误（HTTP ${status}）：${body}`;
+}
+
+/**
+ * K-FriendlyError：把 fetch / undici 的 cryptic 网络错误翻译成中文。
+ * 最常见：上游冷启动 / 限流 → socket 被 RST → fetch 抛出 "socket hang up" 或
+ * "Premature close"，用户看了完全不知道发生了什么。
+ */
+export function friendlyNetworkError(error: unknown): string {
+	const raw = error instanceof Error ? error.message : String(error);
+	const low = raw.toLowerCase();
+
+	// 用户主动取消
+	if ((error as any)?.name === 'AbortError') {
+		return '请求已取消';
+	}
+
+	// 上游断开
+	if (low.includes('socket connection was closed')
+		|| low.includes('premature close')
+		|| low.includes('socket hang up')
+		|| low.includes('econnreset')
+		|| low.includes('terminated')) {
+		return `上游 AI 服务主动断开了连接（没返回任何字节）。\n`
+			+ `🔧 常见原因：① 模型冷启动 / 上游限流；② 历史里含图片但当前模型不支持视觉；③ 网络抖动。\n`
+			+ `💡 下一步：① 重新发送；② 仍失败可换个模型；③ 长会话可新开会话再试。\n`
+			+ `原始错误：${raw}`;
+	}
+
+	// 超时
+	if (low.includes('timeout') || low.includes('timed out')) {
+		return `请求超时（模型响应过慢）。\n`
+			+ `💡 下一步：① 重试一次；② 如果是大文件 / 长上下文，考虑分批或新开会话。\n`
+			+ `原始错误：${raw}`;
+	}
+
+	// 网络
+	if (low.includes('fetch failed') || low.includes('network') || low.includes('enotfound') || low.includes('dns')) {
+		return `网络异常（无法访问码弦云后端）。\n`
+			+ `💡 下一步：检查本机网络 / 代理 / 防火墙后重试。\n`
+			+ `原始错误：${raw}`;
+	}
+
+	return raw;
+}
+
+/**
  * AiProxy API Handler
  * 实现 IApiHandler 接口，用于调用统一的 AI 代理服务
  *
@@ -675,7 +761,7 @@ export class AiProxyHandler implements IApiHandler {
 					if (!this.isRetryableError(lastError) || attempt === this.MAX_RETRIES) {
 						const errorChunk: ErrorStreamChunk = {
 							type: 'error',
-							error: `AiProxy API 错误 (${response.status}): ${errorText}`
+							error: friendlyHttpError(response.status, errorText),
 						};
 						yield errorChunk;
 						return;
@@ -688,7 +774,7 @@ export class AiProxyHandler implements IApiHandler {
 					if (!this.isRetryableError(error) || attempt === this.MAX_RETRIES) {
 						const errorChunk: ErrorStreamChunk = {
 							type: 'error',
-							error: error instanceof Error ? error.message : String(error)
+							error: friendlyNetworkError(error),
 						};
 						yield errorChunk;
 						return;

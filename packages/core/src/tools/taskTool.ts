@@ -38,6 +38,17 @@ export function formatTaskResult(r: ITaskToolResult, params: ITaskToolParams): s
 		(params.description ? `${params.description}\n` : '') +
 		(r.tokens ? `用量 ${r.tokens} tokens\n` : '') +
 		'---\n';
-	if (!r.success) return hdr + `失败: ${r.error ?? '未知错误'}`;
+	if (!r.success) {
+		// K-Anno：给 AI 加一段架构注解，让它知道这是子代理调用的上游问题，
+		// 不是它"自己的 API key 失效"——别再脑补让用户去检查 Anthropic API key。
+		// 也明确告诉它：可以继续用 read_file / edit / write_to_file 等本地工具推进。
+		const note = '\n\n---\n'
+			+ '📌 注意（给 AI 看的）：\n'
+			+ '- 上面的失败是**子代理（task 工具）**在调用码弦云上游 AI 服务时出错，'
+			+ '**不是你自己的 API key 失效**。这是临时的服务端问题，不需要让用户去检查 Anthropic / 任何模型提供商的 API key 配置。\n'
+			+ '- 你可以**直接使用 read_file / list_files / search_files / glob / edit / write_to_file / execute_command** 等本地工具继续推进任务——它们不依赖远程 AI 服务。\n'
+			+ '- 如果一定要再次 task 派发，先尝试 1-2 次直接工具调用收集信息，不要立刻重复 task（避免雪崩）。\n';
+		return hdr + `失败: ${r.error ?? '未知错误'}` + note;
+	}
 	return hdr + r.output;
 }
