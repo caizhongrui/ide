@@ -29,6 +29,17 @@ export interface AiProxyConfiguration {
 	flashBusinessCode?: string;  // 快速模型的 businessCode（用于探索阶段，速度优先）
 	provider?: string;   // AI提供商标识（可选，不使用businessCode时才需要）
 	model?: string;      // 模型名称（可选，不使用businessCode时才需要）
+	/**
+	 * K-MultiModel (v0.2.25)：用户在会话中选定的具体模型名。
+	 * 跟 businessCode 同时设置时，后端 resolveModel(businessCode, selectedModel)
+	 * 优先按 model 锁定行，找不到时宽容 fallback 到该 businessCode 默认。
+	 */
+	selectedModel?: string;
+	/**
+	 * K-MultiModel：当前模型是否支持视觉输入。
+	 * false 时 buildMessages 自动跳过 image_url 块，避免上游 400。
+	 */
+	supportsVision?: boolean;
 }
 
 /**
@@ -654,6 +665,34 @@ export class AiProxyHandler implements IApiHandler {
 			// P1优化：为消息添加缓存控制标记
 			aiProxyMessages = this.addCacheControlToMessages(aiProxyMessages);
 
+			// K-MultiModel (v0.2.25)：vision 降级——当前模型不支持视觉时，把所有
+			// image_url 块去掉，避免上游 400。在 textParts 末尾加占位文本让模型
+			// 知道这里"原本有 N 张图被省略"，保留对话上下文意识。
+			if (this.config.supportsVision === false) {
+				let droppedImages = 0;
+				for (const msg of aiProxyMessages) {
+					if (Array.isArray(msg.content)) {
+						const textParts: string[] = [];
+						let localDropped = 0;
+						for (const part of msg.content) {
+							if ((part as any).type === 'image_url') {
+								localDropped++;
+								droppedImages++;
+							} else if ((part as any).type === 'text') {
+								textParts.push((part as any).text);
+							}
+						}
+						if (localDropped > 0) {
+							textParts.push(`\n[此处原有 ${localDropped} 张图片，因当前模型不支持视觉已省略]`);
+						}
+						(msg as any).content = textParts.join('');
+					}
+				}
+				if (droppedImages > 0) {
+					console.log(`[Maxian] vision 降级：跳过 ${droppedImages} 张图片（selectedModel=${this.config.selectedModel ?? 'default'}, supportsVision=false）`);
+				}
+			}
+
 			// 转换工具定义
 			const aiProxyTools = tools ? this.convertTools(tools) : undefined;
 
@@ -683,9 +722,15 @@ export class AiProxyHandler implements IApiHandler {
 				? this.config.flashBusinessCode
 				: this.config.businessCode;
 			requestBody.businessCode = selectedCode;
+			// K-MultiModel (v0.2.25)：用户在前端选了具体模型时，把 model 也带上。
+			// 后端 resolveModel(businessCode, model) 优先按 model 锁定行；找不到时
+			// 宽容 fallback 到该 businessCode 默认（不影响调用）。
+			if (this.config.selectedModel) {
+				requestBody.model = this.config.selectedModel;
+			}
 		} else {
 			requestBody.provider = this.config.provider || 'qwen';
-			requestBody.model = this.config.model;
+			requestBody.model = this.config.selectedModel || this.config.model;
 		}
 
 			// 调试日志：确认工具是否正确发送
@@ -693,10 +738,23 @@ export class AiProxyHandler implements IApiHandler {
 			const assistantWithReasoningNonEmpty = aiProxyMessages.filter(m => m.role === 'assistant' && (m as any).reasoning_content).length;
 			const assistantTotal = aiProxyMessages.filter(m => m.role === 'assistant').length;
 			const assistantWithToolCalls = aiProxyMessages.filter(m => m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0).length;
+			// K-MultiModel：统计实际发给云端的 image_url 块数量（确认前端→sidecar→云端图片有没有丢）
+			let imageBlockCount = 0;
+			for (const m of aiProxyMessages) {
+				if (Array.isArray(m.content)) {
+					for (const part of m.content) {
+						if ((part as any).type === 'image_url') imageBlockCount++;
+					}
+				}
+			}
 			console.log('[Maxian] AiProxy 请求:', {
 				businessCode: requestBody.businessCode,
 				provider: requestBody.provider,
-				model: requestBody.model,
+				// K-MultiModel：明确区分"用户在 UI 选的" vs "实际发出去的"
+				selectedModel: this.config.selectedModel ?? '(用户未选，走默认)',
+				model: requestBody.model ?? '(由云端按 businessCode 决定)',
+				supportsVision: this.config.supportsVision ?? '(unknown/默认乐观)',
+				imageBlockCount,   // K-MultiModel：实际随请求发出的图片块数（>0 说明客户端确实带图给云端了）
 				apiType: requestBody.apiType,
 				toolsCount: aiProxyTools?.length || 0,
 				messagesCount: aiProxyMessages.length,

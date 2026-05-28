@@ -7,7 +7,7 @@
  *  - 保存按钮：批量同步到 sidecar，sidecar 重新连接所有 enabled 的 server 并重建工具索引
  *--------------------------------------------------------------------------------------------*/
 
-import { For, Show, createSignal, onMount, createMemo } from 'solid-js'
+import { For, Show, createSignal, onMount, onCleanup, createMemo } from 'solid-js'
 import type { Component } from 'solid-js'
 
 /** 与 server `/config/mcp` API + core McpServerConfig 对齐 */
@@ -143,6 +143,13 @@ export const SettingsMcp: Component<SettingsMcpProps> = (props) => {
 			console.warn('[SettingsMcp] 刷新运行时状态失败:', e)
 		}
 	}
+
+	// 面板打开期间轮询运行时状态：sidecar 端 MCP 断线/自动重连后，
+	// 这里每 3s 拉一次，列表会实时反映「已断开 / 重连中 / 已连接」。
+	onMount(() => {
+		const timer = setInterval(() => { void refreshRuntime() }, 3000)
+		onCleanup(() => clearInterval(timer))
+	})
 
 	const toggleServer = (id: string): void => {
 		const updated = mcpServers().map((s) => s.id === id ? { ...s, enabled: !s.enabled } : s)

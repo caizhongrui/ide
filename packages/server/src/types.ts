@@ -54,6 +54,12 @@ export interface SessionSummary {
 	archived?: boolean;
 	/** 置顶 */
 	pinned?: boolean;
+	/**
+	 * K-MultiModel (v0.2.25)：用户在该会话选定的具体模型名
+	 * （对应后端 ai_business_scene_model.model）。
+	 * null/undefined 表示走 uiMode 对应 businessCode 的默认模型（fallback）。
+	 */
+	model?: string | null;
 }
 
 /** 工作区信息 */

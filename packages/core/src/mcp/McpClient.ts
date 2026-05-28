@@ -20,6 +20,9 @@ import {
 	McpInitializeParams, McpInitializeResult
 } from './McpTypes.js';
 
+// core 不依赖 @types/node（lib 仅 ES2022+DOM），但 SSE 走 raw socket 需要 Buffer（运行时由 Node/Bun 提供）
+declare const Buffer: any;
+
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const REQUEST_TIMEOUT_MS = 60000;  // SSE 连接超时更长
 
@@ -29,16 +32,33 @@ export class McpClient {
 	private initialized = false;
 
 	// SSE 传输状态（仅 URL 以 /sse 结尾时使用）
+	// 用 node:net 原始 socket 而非 fetch / node:http —— Bun(≤1.3.x) 这两者对
+	// Transfer-Encoding: chunked 长连接都有 bug：fetch.getReader() 等整个响应才返回
+	// （SSE 永不结束 → 卡死）；node:http 收到首个 chunk 后过早 aborted。JetBrains MCP
+	// 正是 chunked SSE，curl 能用说明是 bun HTTP 高层的问题，故降到 raw socket 自己解析。
 	private sseMessageEndpoint?: string;
-	private sseReader?: ReadableStreamDefaultReader<Uint8Array>;
+	private sseSocket?: any;            // node:net / node:tls Socket（原始 SSE 连接）
+	private sseRawBuffer: any;          // Buffer：累积原始字节（HTTP 头 + chunked body）
+	private sseHeadersParsed = false;   // HTTP 响应头是否已吃完
+	private sseChunkText = '';          // 已从 chunked 解码出的 SSE 文本（待按事件切分）
+	private sseClosed = false;          // 断开收尾幂等标志（end/close/error 只处理一次）
 	private ssePendingRequests = new Map<number | string, {
 		resolve: (v: any) => void;
 		reject: (e: Error) => void;
 	}>();
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	private declare _sseReadingPromise: Promise<void> | undefined;
+
+	/** 连接意外断开（SSE 流结束/出错）时回调，供 McpHub 触发自动重连。
+	 *  主动 reset() 关闭时不会触发（closing=true）。 */
+	private onCloseCallback?: () => void;
+	/** 是否处于主动关闭（reset）流程：避免 reset 取消 reader 导致 reading loop 误触发 onClose 重连 */
+	private closing = false;
 
 	constructor(private readonly config: McpServerConfig) { }
+
+	/** 注册"连接意外断开"回调（McpHub 在 connect 成功后设置） */
+	setOnClose(cb: () => void): void {
+		this.onCloseCallback = cb;
+	}
 
 	get name(): string {
 		return this.config.name;
@@ -85,113 +105,164 @@ export class McpClient {
 	}
 
 	/**
-	 * 建立传统 SSE 连接（GET 请求）
-	 * 等待 endpoint 事件获取消息发送地址，然后在后台持续读取响应
+	 * 建立传统 SSE 连接（raw TCP socket 手写 HTTP/1.1）
+	 *
+	 * 为什么降到 node:net 而不用 fetch / node:http：
+	 * Bun(≤1.3.x) 的 fetch 与 node:http 客户端对 Transfer-Encoding: chunked 长连接都有 bug
+	 * —— fetch.getReader() 会等整个响应才返回（SSE 永不结束 → 卡死）；node:http 收到首个
+	 * chunk 后会过早 aborted。JetBrains MCP 正是 chunked SSE，curl 能用说明是 bun HTTP 高层
+	 * 解析的问题，故这里用原始 socket，自己解析 HTTP 响应头 + chunked 编码 + SSE 事件。
 	 */
 	private async connectSse(): Promise<void> {
-		const headers: Record<string, string> = {
-			'Accept': 'text/event-stream',
-			// 不发 Cache-Control，避免 CORS preflight 拦截
-			...this.config.headers,
-		};
+		this.sseClosed = false;
+		this.sseHeadersParsed = false;
+		this.sseChunkText = '';
+		this.sseRawBuffer = Buffer.alloc(0);
+		const url = new URL(this.config.url);
+		const isHttps = url.protocol === 'https:';
+		const port = Number(url.port) || (isHttps ? 443 : 80);
+		// 字面量分支 import：bun --compile 能静态识别内置模块
+		const mod: any = isHttps ? await import('node:tls') : await import('node:net');
 
-		const response = await fetch(this.config.url, {
-			method: 'GET',
-			headers,
+		await new Promise<void>((resolveEndpoint, rejectEndpoint) => {
+			let endpointDone = false;
+			let timeout: ReturnType<typeof setTimeout>;
+
+			const finishEndpoint = (err?: Error): void => {
+				if (endpointDone) return;
+				endpointDone = true;
+				clearTimeout(timeout);
+				if (err) rejectEndpoint(err); else resolveEndpoint();
+			};
+
+			const onData = (chunk: any): void => {
+				this.sseRawBuffer = Buffer.concat([this.sseRawBuffer, chunk]);
+				// 1) 先吃掉 HTTP 响应头
+				if (!this.sseHeadersParsed) {
+					const sep = this.sseRawBuffer.indexOf('\r\n\r\n');
+					if (sep < 0) return;  // 头未完整，等更多数据
+					const headerText = this.sseRawBuffer.slice(0, sep).toString('utf8');
+					const statusLine = headerText.split('\r\n')[0] || '';
+					const m = statusLine.match(/HTTP\/\d\.\d\s+(\d+)/);
+					const status = m ? parseInt(m[1], 10) : 0;
+					if (status !== 200) {
+						finishEndpoint(new Error(`SSE 连接失败 ${status || statusLine}`));
+						try { this.sseSocket?.destroy(); } catch { /* ignore */ }
+						return;
+					}
+					this.sseHeadersParsed = true;
+					this.sseRawBuffer = this.sseRawBuffer.slice(sep + 4);  // 余下是 chunked body
+				}
+				// 2) 解析 chunked body → SSE 事件
+				this.consumeChunkedSse(finishEndpoint);
+			};
+
+			const onClose = (err?: Error): void => {
+				finishEndpoint(err ?? new Error('SSE 连接在收到 endpoint 事件前关闭'));
+				this.handleSseClose();
+			};
+
+			const socket: any = mod.connect(
+				isHttps
+					? { host: url.hostname, port, servername: url.hostname }
+					: { host: url.hostname, port },
+				() => {
+					// 连接建立后发原始 HTTP/1.1 GET（手动拼请求行 + 头）
+					const lines = [
+						`GET ${url.pathname}${url.search} HTTP/1.1`,
+						`Host: ${url.host}`,
+						`Accept: text/event-stream`,
+						`Connection: keep-alive`,
+					];
+					for (const [k, v] of Object.entries(this.config.headers || {})) lines.push(`${k}: ${v}`);
+					socket.write(lines.join('\r\n') + '\r\n\r\n');
+				}
+			);
+			this.sseSocket = socket;
+			socket.on('data', onData);
+			socket.on('end', () => onClose());
+			socket.on('close', () => onClose());
+			socket.on('error', (e: Error) => onClose(e));
+
+			timeout = setTimeout(() => {
+				finishEndpoint(new Error('SSE endpoint 事件超时'));
+				try { socket.destroy(); } catch { /* ignore */ }
+			}, 10000);
 		});
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`SSE 连接失败 ${response.status}: ${errorText}`);
-		}
-
-		const reader = response.body!.getReader();
-		this.sseReader = reader;
-
-		// 等待 endpoint 事件（包含消息发送地址）
-		await this.waitForSseEndpoint(reader);
-
-		// 启动后台读取循环（持续接收响应）
-		this._sseReadingPromise = this.sseReadingLoop(reader);
 	}
 
 	/**
-	 * 等待 SSE 的 endpoint 事件，提取消息端点 URL
+	 * 解析 HTTP chunked body：逐个 chunk 取出 data 累积成 SSE 文本，按空行切分事件分发。
+	 * @param finishEndpoint 收到 endpoint 事件时调用以 resolve 连接 Promise
 	 */
-	private async waitForSseEndpoint(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
-		const decoder = new TextDecoder();
-		let buffer = '';
-		const timeoutMs = 10000;
-		const startTime = Date.now();
+	private consumeChunkedSse(finishEndpoint: (err?: Error) => void): void {
+		while (true) {
+			const crlf = this.sseRawBuffer.indexOf('\r\n');
+			if (crlf < 0) break;                        // chunk-size 行未完整
+			const sizeStr = this.sseRawBuffer.slice(0, crlf).toString('ascii').split(';')[0].trim();
+			const size = parseInt(sizeStr, 16);
+			if (Number.isNaN(size)) break;              // 容错：等更多数据
+			if (size === 0) return;                     // 末尾 0-chunk，流结束（close 事件收尾）
+			const dataStart = crlf + 2;
+			if (this.sseRawBuffer.length < dataStart + size + 2) break;  // 本 chunk data 未完整
+			const data = this.sseRawBuffer.slice(dataStart, dataStart + size);
+			this.sseRawBuffer = this.sseRawBuffer.slice(dataStart + size + 2);  // 跳过 data + 尾随 \r\n
+			this.sseChunkText += data.toString('utf8');
 
-		while (Date.now() - startTime < timeoutMs) {
-			const { done, value } = await reader.read();
-			if (done) throw new Error('SSE 连接在收到 endpoint 事件前关闭');
-
-			buffer += decoder.decode(value, { stream: true });
-
-			const events = buffer.split('\n\n');
-			buffer = events.pop() || '';
-
-			for (const eventText of events) {
-				const { eventType, data } = this.parseSseEvent(eventText);
-				if (eventType === 'endpoint' && data) {
-					// data 是相对路径，如 /message?sessionId=xxx
+			// 按 SSE 事件（空行分隔，兼容 \r\n\r\n / \n\n）切分
+			const events = this.sseChunkText.split(/\r?\n\r?\n/);
+			this.sseChunkText = events.pop() || '';
+			for (const ev of events) {
+				if (!ev.trim()) continue;
+				const { eventType, data: evData } = this.parseSseEvent(ev);
+				if (eventType === 'endpoint' && evData) {
 					const baseUrl = new URL(this.config.url);
-					this.sseMessageEndpoint = new URL(data, baseUrl.origin).toString();
-					return;
+					this.sseMessageEndpoint = new URL(evData, baseUrl.origin).toString();
+					finishEndpoint();  // resolve：endpoint 已就绪，可以发 initialize 了
+				} else if ((eventType === 'message' || eventType === 'response') && evData) {
+					this.handleSseResponseData(evData);
 				}
 			}
 		}
-
-		throw new Error('SSE endpoint 事件超时');
 	}
 
-	/**
-	 * SSE 后台读取循环：持续处理服务器推送的 JSON-RPC 响应
-	 */
-	private async sseReadingLoop(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
-		const decoder = new TextDecoder();
-		let buffer = '';
-
+	/** 解析并分发一条 JSON-RPC 响应到对应的 pending 请求 */
+	private handleSseResponseData(data: string): void {
 		try {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-
-				const events = buffer.split('\n\n');
-				buffer = events.pop() || '';
-
-				for (const eventText of events) {
-					const { eventType, data } = this.parseSseEvent(eventText);
-					if ((eventType === 'message' || eventType === 'response') && data) {
-						try {
-							const jsonResponse: JsonRpcResponse = JSON.parse(data);
-							if (jsonResponse.id !== null && jsonResponse.id !== undefined) {
-								const pending = this.ssePendingRequests.get(jsonResponse.id);
-								if (pending) {
-									this.ssePendingRequests.delete(jsonResponse.id);
-									if (jsonResponse.error) {
-										pending.reject(new Error(`MCP 错误: [${jsonResponse.error.code}] ${jsonResponse.error.message}`));
-									} else {
-										pending.resolve(jsonResponse.result);
-									}
-								}
-							}
-						} catch {
-							// 忽略解析失败
-						}
+			const jsonResponse: JsonRpcResponse = JSON.parse(data);
+			if (jsonResponse.id !== null && jsonResponse.id !== undefined) {
+				// id 可能是 number 或 string，按两种 key 各查一次，兼容服务端类型差异
+				const pending = this.ssePendingRequests.get(jsonResponse.id)
+					?? this.ssePendingRequests.get(String(jsonResponse.id))
+					?? this.ssePendingRequests.get(Number(jsonResponse.id));
+				if (pending) {
+					this.ssePendingRequests.delete(jsonResponse.id);
+					this.ssePendingRequests.delete(String(jsonResponse.id));
+					this.ssePendingRequests.delete(Number(jsonResponse.id));
+					if (jsonResponse.error) {
+						pending.reject(new Error(`MCP 错误: [${jsonResponse.error.code}] ${jsonResponse.error.message}`));
+					} else {
+						pending.resolve(jsonResponse.result);
 					}
 				}
 			}
-		} catch (e) {
-			// 连接断开，拒绝所有待处理请求
-			for (const [, pending] of this.ssePendingRequests) {
-				pending.reject(new Error('SSE 连接断开'));
-			}
-			this.ssePendingRequests.clear();
+		} catch {
+			// 忽略解析失败
+		}
+	}
+
+	/** SSE 流结束/出错统一收尾（幂等）：拒绝未决请求 + 非主动关闭时回调 onClose 触发重连 */
+	private handleSseClose(): void {
+		if (this.sseClosed) return;
+		this.sseClosed = true;
+		this.initialized = false;
+		for (const [, pending] of this.ssePendingRequests) {
+			pending.reject(new Error('SSE 连接断开'));
+		}
+		this.ssePendingRequests.clear();
+		if (!this.closing) {
+			const cb = this.onCloseCallback;
+			if (cb) { try { cb(); } catch { /* ignore */ } }
 		}
 	}
 
@@ -490,13 +561,19 @@ export class McpClient {
 	 * 重置连接状态
 	 */
 	reset(): void {
+		// 标记主动关闭：cancel(reader) 会让 reading loop 走到 done，
+		// 但 closing=true 时 finally 不会触发 onClose（避免主动断开被当成意外断线去重连）
+		this.closing = true;
+		this.sseClosed = true;   // 主动关闭，handleSseClose 不再触发重连
 		this.initialized = false;
 		this.sessionId = undefined;
 		this.requestId = 0;
 		this.sseMessageEndpoint = undefined;
-		if (this.sseReader) {
-			try { this.sseReader.cancel(); } catch { /* ignore */ }
-			this.sseReader = undefined;
+		this.sseHeadersParsed = false;
+		this.sseChunkText = '';
+		if (this.sseSocket) {
+			try { this.sseSocket.destroy(); } catch { /* ignore */ }
+			this.sseSocket = undefined;
 		}
 		this.ssePendingRequests.clear();
 	}

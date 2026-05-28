@@ -86,6 +86,8 @@ async function loadPty(): Promise<PtyModule> {
 import { getDb } from './database.js';
 import { AiProxyHandler } from '@maxian/core/api/aiproxy';
 import { buildRepoMapDigest } from './repoMapDigest.js';
+import { getSceneModel, getSceneDefaultModel } from './sceneModelCache.js';
+import { registerSceneModelsRoute, prefetchSceneModels } from './routes/sceneModels.js';
 import {
 	readFileTool,
 	writeToFileTool,
@@ -156,7 +158,7 @@ interface CliOptions {
 function parseCliArgs(): CliOptions {
 	const { values } = parseArgs({
 		options: {
-			port:     { type: 'string',  short: 'p', default: '4096' },
+			port:     { type: 'string',  short: 'p', default: '51847' },
 			host:     { type: 'string',  short: 'h', default: '127.0.0.1' },
 			username: { type: 'string',  short: 'u' },
 			password: { type: 'string' },
@@ -166,7 +168,7 @@ function parseCliArgs(): CliOptions {
 	});
 
 	return {
-		port:     parseInt((values.port as string) ?? '4096', 10),
+		port:     parseInt((values.port as string) ?? '51847', 10),
 		host:     (values.host as string) ?? '127.0.0.1',
 		username: (values.username as string) ?? process.env['MAXIAN_SERVER_USERNAME'],
 		password: (values.password as string) ?? process.env['MAXIAN_SERVER_PASSWORD'],
@@ -1988,6 +1990,30 @@ async function main() {
 		cors: opts.cors,
 	});
 
+	// K-MultiModel (v0.2.25)：注册 /scene-models/:code 透传路由 + 启动预热缓存。
+	// 客户端 ModelSelector 拉清单走这个路由；getAiHandler 也按 (uiMode 对应 businessCode,
+	// session.model) 查 sceneModelCache 拿 supportVision 等 meta 给 AiProxyHandler。
+	registerSceneModelsRoute(server.app, {
+		getAiConfig: () => {
+			const rt = server.getAiConfig();
+			if (rt) return { apiUrl: rt.apiUrl, username: rt.username, password: rt.password };
+			if (aiConfig && aiConfig.type === 'proxy') {
+				return { apiUrl: aiConfig.apiUrl, username: aiConfig.username, password: aiConfig.password };
+			}
+			return null;
+		},
+	});
+	// fire-and-forget 预热两个常用 businessCode，让首次 AI 调用时 sceneModelCache 已就绪
+	void (async () => {
+		const cfg = server.getAiConfig() ?? (aiConfig && aiConfig.type === 'proxy' ? {
+			apiUrl: aiConfig.apiUrl, username: aiConfig.username, password: aiConfig.password,
+		} : null);
+		if (cfg) {
+			await prefetchSceneModels('IDE_CHAT_CODE', cfg);
+			await prefetchSceneModels('IDE_CHAT_ASK',  cfg);
+		}
+	})();
+
 	// ─── 集成终端 WebSocket 服务 ──────────────────────────────────────────────
 
 	/**
@@ -2186,40 +2212,65 @@ async function main() {
 			}
 		}
 	});
-	function getAiHandler(uiMode?: string): AiProxyHandler | null {
+	function getAiHandler(uiMode?: string, sessionModel?: string | null): AiProxyHandler | null {
 		const defaultCode = uiMode === 'chat' ? 'IDE_CHAT_ASK' : 'IDE_CHAT_CODE';
+		// K-MultiModel：拿 meta —— 用户选了就按 model 查；没选就 fallback 到场景的默认模型
+		// （isDefault=1 那行），让 supportsVision 等元数据跟前端 UI 显示的"(默认)" 一致，
+		// 避免前端隐藏图片按钮但 sidecar 仍乐观不降级历史图片导致上游 400。
+		const meta = sessionModel
+			? getSceneModel(defaultCode, sessionModel)
+			: getSceneDefaultModel(defaultCode);
+		// K-MultiModel：每次取 handler 都打一行——明确告诉日志读者本次会话用哪个模型
+		const modelLogPart = sessionModel
+			? `model=${sessionModel} (provider=${meta?.provider ?? 'unknown'}, supportsVision=${meta ? !!meta.supportVision : '?'})`
+			: `model=(用户未选，默认=${meta?.model ?? 'unknown'}, provider=${meta?.provider ?? 'unknown'}, supportsVision=${meta ? !!meta.supportVision : '?'})`;
 
 		// 1. 运行时动态配置
 		const runtimeCfg = server.getAiConfig();
 		if (runtimeCfg) {
 			const bizCode = (runtimeCfg as any).businessCode ?? defaultCode;
-			const cacheKey = `rt|${runtimeCfg.apiUrl}|${runtimeCfg.username}|${bizCode}`;
+			// K-MultiModel：cache key 加 sessionModel 维度（不同 model 走不同 handler 实例，
+			// supportsVision config 不会串）
+			const cacheKey = `rt|${runtimeCfg.apiUrl}|${runtimeCfg.username}|${bizCode}|${sessionModel ?? ''}`;
 			const cached = __aiHandlerCache.get(cacheKey);
-			if (cached) return cached;
+			if (cached) {
+				console.log(`[AiHandler] 复用 handler: businessCode=${bizCode}, ${modelLogPart}`);
+				return cached;
+			}
 			const h = new AiProxyHandler({
 				apiUrl:            runtimeCfg.apiUrl,
 				username:          runtimeCfg.username,
 				password:          runtimeCfg.password,
 				businessCode:      bizCode,
 				flashBusinessCode: (runtimeCfg as any).flashBusinessCode ?? undefined,
+				selectedModel:     sessionModel ?? undefined,
+				// 默认乐观：清单里没找到 alias 时不主动降级（已知不支持视觉时才降）
+				supportsVision:    meta ? !!meta.supportVision : true,
 			});
 			__aiHandlerCache.set(cacheKey, h);
+			console.log(`[AiHandler] 新建 handler: businessCode=${bizCode}, ${modelLogPart}`);
 			return h;
 		}
 		// 2. 启动时静态配置
 		if (aiConfig && aiConfig.type === 'proxy') {
 			const bizCode = uiMode === 'chat' ? 'IDE_CHAT_ASK' : (aiConfig.businessCode ?? 'IDE_CHAT_CODE');
-			const cacheKey = `st|${aiConfig.apiUrl}|${aiConfig.username}|${bizCode}`;
+			const cacheKey = `st|${aiConfig.apiUrl}|${aiConfig.username}|${bizCode}|${sessionModel ?? ''}`;
 			const cached = __aiHandlerCache.get(cacheKey);
-			if (cached) return cached;
+			if (cached) {
+				console.log(`[AiHandler] 复用 handler (static): businessCode=${bizCode}, ${modelLogPart}`);
+				return cached;
+			}
 			const h = new AiProxyHandler({
 				apiUrl:            aiConfig.apiUrl,
 				username:          aiConfig.username,
 				password:          aiConfig.password,
 				businessCode:      bizCode,
 				flashBusinessCode: aiConfig.flashBusinessCode ?? undefined,
+				selectedModel:     sessionModel ?? undefined,
+				supportsVision:    meta ? !!meta.supportVision : true,
 			});
 			__aiHandlerCache.set(cacheKey, h);
+			console.log(`[AiHandler] 新建 handler (static): businessCode=${bizCode}, ${modelLogPart}`);
 			return h;
 		}
 		return null;
@@ -2319,6 +2370,32 @@ async function main() {
 	let heartbeatTimer: NodeJS.Timeout | undefined;
 	let heartbeatRunning = false;
 
+	/**
+	 * 把存储的 username 还原成明文。
+	 *
+	 * maxian 配置里的 username 是 Base64 编码（chat/completions 接口约定需要 base64
+	 * 字段，所以登录后把明文 base64 一次存起来）。但心跳接口 /knowledge/userOnline/heartbeat
+	 * 期望明文 username，否则 web 端在线用户面板显示一串 Base64 乱码而不是邮箱/用户名。
+	 *
+	 * 兼容历史：万一某些情况下 username 不是合法 base64，直接 fallback 原值。
+	 */
+	function decodeUsernameForHeartbeat(rawUsername: string): string {
+		if (!rawUsername) return rawUsername;
+		try {
+			const decoded = Buffer.from(rawUsername, 'base64').toString('utf8');
+			// 防御：base64 解码可能成功但内容不是有效 UTF-8（出现替换字符）→ fallback
+			if (!decoded || decoded.includes('�')) return rawUsername;
+			// 防御：解码结果再 base64 一次跟原值不匹配，说明原值不是合法 base64 → fallback
+			const reEncoded = Buffer.from(decoded, 'utf8').toString('base64');
+			if (reEncoded !== rawUsername && reEncoded !== rawUsername + '=' && reEncoded.replace(/=+$/, '') !== rawUsername.replace(/=+$/, '')) {
+				return rawUsername;
+			}
+			return decoded;
+		} catch {
+			return rawUsername;
+		}
+	}
+
 	async function sendHeartbeat(): Promise<void> {
 		// 优先用运行时配置（登录后动态设置），否则用 CLI 静态配置
 		const cfg = server.getAiConfig() ?? (aiConfig?.type === 'proxy' ? aiConfig : null);
@@ -2332,8 +2409,10 @@ async function main() {
 		const baseUrl = proxyCfg.apiUrl.replace(/\/+$/, '');
 		const url = `${baseUrl}/knowledge/userOnline/heartbeat`;
 
+		// userName 字段后端要明文（web 端在线用户面板直接展示这个值）
+		const plainUserName = decodeUsernameForHeartbeat(proxyCfg.username);
 		const body = {
-			userName:      proxyCfg.username,
+			userName:      plainUserName,
 			clientId:      HEARTBEAT_CLIENT_ID,
 			pluginVersion: HEARTBEAT_APP_VERSION,
 			ideType:       HEARTBEAT_IDE_TYPE,
@@ -2347,7 +2426,7 @@ async function main() {
 				body:    JSON.stringify(body),
 			});
 			if (res.ok) {
-				console.log(`[Heartbeat] 在线心跳 → ${proxyCfg.username}`);
+				console.log(`[Heartbeat] 在线心跳 → ${plainUserName}`);
 			} else {
 				console.warn(`[Heartbeat] 状态码异常: ${res.status}`);
 			}
@@ -2392,7 +2471,7 @@ async function main() {
 		const wsPath = server.sessionManager.getWorkspacePath(sid) ?? process.cwd();
 		const uiMode = session.uiMode ?? 'code';
 		const history = await server.sessionManager.loadHistory(sid);
-		const handler = getAiHandler(uiMode);
+		const handler = getAiHandler(uiMode, session.model);
 		const systemLen = 4000 + (loadProjectInstructions(wsPath).length) + (loadAvailableSkills(wsPath).length);
 
 		// 估算当前 token + 通知前端开始
@@ -3220,8 +3299,9 @@ OBJECTIVE
 				});
 				break;
 			}
-			// ── 获取 AI handler（按 uiMode 决定 businessCode） ──
-			const handler = getAiHandler(uiMode);
+			// ── 获取 AI handler（按 uiMode 决定 businessCode + session.model 锁定具体模型） ──
+			const sessForHandler = server.sessionManager.getSession(sessionId);
+			const handler = getAiHandler(uiMode, sessForHandler?.model);
 
 			// ── 上下文压缩检查（每轮开始时）─────────────────────────────
 			// 默认 128K 窗口：>55% 触发按工具类型剪枝，>85% 触发 LLM 总结

@@ -6,7 +6,7 @@
  *   1. apps/desktop/package.json#version
  *   2. apps/desktop/src-tauri/tauri.conf.json#version
  *   3. apps/desktop/src-tauri/Cargo.toml#package.version
- *   4. apps/desktop/src/App.tsx CHANGELOG[0].version  （仅警告，不强制 fail）
+ *   4. apps/desktop/src/settings/changelog.ts CHANGELOG[0].version  （仅警告，不强制 fail）
  *
  * 前 3 个不一致 → 退出 1，CI 失败。
  * 第 4 个不一致 → 警告（rebump 时偶尔会忘了更新 CHANGELOG）。
@@ -52,19 +52,19 @@ if (cargoVer !== pkgVer) {
 	errors.push(`Cargo.toml#version (${cargoVer}) ≠ package.json#version (${pkgVer})`);
 }
 
-// 4. App.tsx CHANGELOG[0]
+// 4. settings/changelog.ts CHANGELOG[0]（changelog 已从 App.tsx 切出到独立文件）
 try {
-	const app = readText('apps/desktop/src/App.tsx');
+	const cl = readText('apps/desktop/src/settings/changelog.ts');
 	// 找 CHANGELOG 数组首条 version
-	const match = app.match(/const CHANGELOG[^=]*=\s*\[\s*\{\s*version:\s*'([^']+)'/);
+	const match = cl.match(/const CHANGELOG[^=]*=\s*\[\s*\{\s*version:\s*'([^']+)'/);
 	const changelogVer = match?.[1];
 	if (!changelogVer) {
-		warnings.push('App.tsx: CHANGELOG 数组首条无法解析 version 字段');
+		warnings.push('changelog.ts: CHANGELOG 数组首条无法解析 version 字段');
 	} else if (changelogVer !== pkgVer) {
-		warnings.push(`App.tsx CHANGELOG[0].version (${changelogVer}) ≠ package.json#version (${pkgVer})（bump 时记得 unshift 一条新 entry）`);
+		warnings.push(`changelog.ts CHANGELOG[0].version (${changelogVer}) ≠ package.json#version (${pkgVer})（bump 时记得 unshift 一条新 entry）`);
 	}
 } catch (e) {
-	warnings.push(`App.tsx 检查失败: ${e.message}`);
+	warnings.push(`changelog.ts 检查失败: ${e.message}`);
 }
 
 console.log(`[version-check] desktop 版本基线: ${pkgVer}`);

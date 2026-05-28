@@ -306,12 +306,26 @@ function initSchema(db: Database.Database): void {
 		db.exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
 		console.log('[Database] 迁移完成：sessions 表新增 pinned 列');
 	}
+	// K-MultiModel (v0.2.25)：用户选的模型名（对应 ai_business_scene_model.model）。
+	// null 表示走该 uiMode 对应 businessCode 的默认模型（后端 resolveModel fallback）。
+	if (!cols.includes('model')) {
+		db.exec(`ALTER TABLE sessions ADD COLUMN model TEXT`);
+		console.log('[Database] 迁移完成：sessions 表新增 model 列（K-MultiModel）');
+	}
 
 	// ── file_snapshots 表迁移：补 action 列 ─────────────────────────────
 	const fsCols = (db.pragma('table_info(file_snapshots)') as Array<{ name: string }>).map(r => r.name);
 	if (!fsCols.includes('action')) {
 		db.exec(`ALTER TABLE file_snapshots ADD COLUMN action TEXT NOT NULL DEFAULT 'modified'`);
 		console.log('[Database] 迁移完成：file_snapshots 表新增 action 列');
+	}
+
+	// ── K-ImageHistory (v0.2.25)：messages 表加 metadata 列（存图片 dataUrl 等）─────
+	// 存 JSON：{ images: ["data:image/png;base64,...", ...] }。切会话/重开后还原缩略图。
+	const msgCols = (db.pragma('table_info(messages)') as Array<{ name: string }>).map(r => r.name);
+	if (!msgCols.includes('metadata')) {
+		db.exec(`ALTER TABLE messages ADD COLUMN metadata TEXT`);
+		console.log('[Database] 迁移完成：messages 表新增 metadata 列（K-ImageHistory）');
 	}
 
 	// ── history_entries 表迁移：补 reasoning 列 ─────────────────────────

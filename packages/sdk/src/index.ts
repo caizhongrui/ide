@@ -21,6 +21,8 @@ export interface StoredMessage {
 	role: 'user' | 'assistant' | 'system' | 'error' | 'tool' | 'reasoning';
 	content: string;
 	createdAt: number;
+	/** K-ImageHistory (v0.2.25)：附加元数据，images = 图片 dataUrl 数组（切会话后还原缩略图） */
+	metadata?: { images?: string[] } | null;
 }
 
 export interface SessionSummary {
@@ -36,6 +38,11 @@ export interface SessionSummary {
 	uiMode: 'code' | 'chat';
 	archived?: boolean;
 	pinned?: boolean;
+	/**
+	 * K-MultiModel (v0.2.25)：会话绑定的具体模型名（对应 ai_business_scene_model.model）。
+	 * null/undefined 表示走该 uiMode 对应 businessCode 的默认模型。
+	 */
+	model?: string | null;
 }
 
 export interface Workspace {
@@ -234,6 +241,23 @@ export interface CodebaseSearchHit {
 	score: number;
 }
 
+/**
+ * K-MultiModel (v0.2.25)：某 businessCode 场景下的一行候选模型。
+ * 对应后端 ai_business_scene_model 表。
+ */
+export interface SceneModel {
+	id:             number;
+	businessCode:   string;
+	provider:       string;
+	model:          string;          // 用户面选择的唯一 ID（同一 businessCode 内唯一）
+	isDefault:      number;          // 0 / 1
+	priority?:      number;
+	temperature?:   number;
+	maxTokens?:     number;
+	supportVision?: number;          // 0 / 1
+	contextWindow?: number;
+}
+
 export class MaxianClient {
 	private readonly baseUrl: string;
 	private readonly auth?: string;
@@ -324,6 +348,29 @@ export class MaxianClient {
 	 */
 	async clearSessionContent(id: string): Promise<{ ok: boolean; deletedMessages: number; deletedHistory: number }> {
 		return this.request('POST', `/sessions/${id}/clear`);
+	}
+
+	// ─── K-MultiModel (v0.2.25) ──────────────────────────────────────────
+
+	/**
+	 * 拉取某 businessCode 场景下的所有候选模型。
+	 * 透传 sidecar /scene-models/:code（sidecar 2 min 内存缓存 + 同步 sceneModelCache）。
+	 *
+	 * @param businessCode 业务场景代码，如 'IDE_CHAT_CODE' / 'IDE_CHAT_ASK'
+	 */
+	async listSceneModels(businessCode: string): Promise<{
+		models:  SceneModel[];
+		cached:  boolean;
+		error?:  string;
+	}> {
+		return this.request('GET', `/scene-models/${encodeURIComponent(businessCode)}`);
+	}
+
+	/**
+	 * 设置会话绑定的模型名。null 表示走该 uiMode 对应 businessCode 的默认模型。
+	 */
+	async setSessionModel(sid: string, model: string | null): Promise<void> {
+		await this.request('PATCH', `/sessions/${sid}/model`, { model });
 	}
 
 	async sendMessage(sessionId: string, opts: { content: string; images?: string[] }): Promise<{ messageId: string }> {

@@ -1,8 +1,42 @@
 import { MaxianClient } from "@maxian/sdk"
 
-export const BASE = (import.meta.env.VITE_MAXIAN_URL as string) || "http://127.0.0.1:4096"
+/** 默认 fallback（Rust 端拿不到 server_info 时用）。Rust 默认端口 51847，
+ *  被占时会自动 fallback 找空闲端口，实际值可能不同 —— 永远优先 invoke 拿真实值。 */
+export const BASE = (import.meta.env.VITE_MAXIAN_URL as string) || "http://127.0.0.1:51847"
 export const USER = (import.meta.env.VITE_MAXIAN_USER as string) || "maxian"
 export const PASS = (import.meta.env.VITE_MAXIAN_PASS as string) || "test123"
+
+/** 解析后的真实 sidecar 配置（invoke server_info 拿到的）。 */
+let resolvedInfo: { baseUrl: string; username: string; password: string } | null = null
+
+/** 通过 Tauri invoke 拿 sidecar 真实 baseUrl/认证（端口可能被 Rust 端 fallback 改过）。
+ *  - Tauri 环境：第一次成功后 cache，后续直接返回
+ *  - 非 Tauri 环境（浏览器 dev）：返回 null，caller 走 BASE/USER/PASS 默认值 */
+async function getServerInfo(): Promise<{ baseUrl: string; username: string; password: string } | null> {
+  if (resolvedInfo) return resolvedInfo
+  if (!(window as any).__TAURI_INTERNALS__) return null
+  try {
+    const { invoke } = await import('@tauri-apps/api/core' as any)
+    const info = await (invoke as any)('server_info') as { baseUrl?: string; username?: string; password?: string; port?: number } | null
+    if (info && info.baseUrl) {
+      resolvedInfo = {
+        baseUrl:  info.baseUrl,
+        username: info.username ?? USER,
+        password: info.password ?? PASS,
+      }
+      console.log(`[maxian] sidecar 实际地址: ${resolvedInfo.baseUrl}`)
+      return resolvedInfo
+    }
+  } catch (e) {
+    console.warn('[maxian] invoke server_info 失败，用默认 BASE:', e)
+  }
+  return null
+}
+
+/** 返回当前已解析的 sidecar base（拿不到则返回默认 BASE）。供 browser proxy 等拼 URL 用。 */
+export function resolvedBase(): string {
+  return resolvedInfo?.baseUrl ?? BASE
+}
 
 // ─── 本地凭据存储（localStorage） ───────────────────────────────────────────
 const CRED_KEY = "maxian_credentials"
@@ -61,12 +95,18 @@ let _client: MaxianClient | null = null
 export async function getClient(): Promise<MaxianClient> {
   if (_client) return _client
   const f = await makeFetch()
-  _client = new MaxianClient({ baseUrl: BASE, username: USER, password: PASS, fetch: f })
+  // 先尝试通过 invoke 拿真实 sidecar 配置（端口可能被 Rust 端 fallback）；拿不到走默认值
+  const info = await getServerInfo()
+  const baseUrl  = info?.baseUrl  ?? BASE
+  const username = info?.username ?? USER
+  const password = info?.password ?? PASS
+  _client = new MaxianClient({ baseUrl, username, password, fetch: f })
   return _client
 }
 
 export async function waitForServer(maxMs = 15000, intervalMs = 300): Promise<void> {
   const c = await getClient()
+  const usedBase = resolvedInfo?.baseUrl ?? BASE
   const start = Date.now()
   let lastErr: unknown = null
   let attempts = 0
@@ -75,7 +115,7 @@ export async function waitForServer(maxMs = 15000, intervalMs = 300): Promise<vo
     try {
       const r = await c.health()
       if (r.ok) {
-        console.log(`[maxian] server ready in ${Date.now() - start}ms (${attempts} attempts)`)
+        console.log(`[maxian] server ready in ${Date.now() - start}ms (${attempts} attempts) @ ${usedBase}`)
         return
       }
     } catch (e) {
@@ -85,7 +125,7 @@ export async function waitForServer(maxMs = 15000, intervalMs = 300): Promise<vo
     await new Promise((res) => setTimeout(res, intervalMs))
   }
   throw new Error(
-    `无法连接到 Maxian Server: ${BASE}\n最后错误: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+    `无法连接到 Maxian Server: ${usedBase}\n最后错误: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
   )
 }
 

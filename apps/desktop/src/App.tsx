@@ -1,4 +1,4 @@
-import { createSignal, createMemo, For, Show, onMount, onCleanup, createEffect } from "solid-js"
+import { createSignal, createMemo, For, Show, onMount, onCleanup, createEffect, untrack } from "solid-js"
 import type { SessionSummary, Workspace, MaxianEvent, StoredMessage } from "@maxian/sdk"
 import { renderMarkdown, updateMarkdownInto } from "./markdown"
 import hljs from "highlight.js/lib/common"
@@ -8,7 +8,7 @@ import {
   getClient, waitForServer,
   loadSavedCredentials, saveCredentials, clearCredentials,
   loginCheck, configureServerAi, clearServerAi,
-  BASE, USER, PASS,
+  resolvedBase, USER, PASS,
   type SavedCredentials, type UserInfo,
 } from "./api"
 import { initI18n, t, setLocale, getLocale } from "./i18n"
@@ -39,6 +39,10 @@ import { CompactingBanner, RateLimitBanner } from "./panels/StatusBanners"
 import { Sidebar } from "./sidebar/Sidebar"
 import { AnimatedNumber } from "./components/AnimatedNumber"
 import { RightTabBar } from "./components/RightTabBar"
+import { ModelSelector } from "./components/ModelSelector"
+import "./components/ModelSelector.css"
+import { ModelSwitchOverflowDialog, type OverflowDecision } from "./dialogs/ModelSwitchOverflowDialog"
+import type { SceneModel } from "@maxian/sdk"
 import { ToastHost, type ToastItem } from "./components/ToastHost"
 import { GlobalCommandPalette, type PaletteItem } from "./components/GlobalCommandPalette"
 import { KeybindHelpModal } from "./components/KeybindHelpModal"
@@ -409,7 +413,8 @@ export default function App() {
     if (!target) return ''
     const auth = btoa(`${USER}:${PASS}`)
     const encoded = encodeURIComponent(target)
-    return `${BASE}/browser/proxy?url=${encoded}&auth=${auth}`
+    // 用动态解析的实际端口（端口可能被 Rust 端 fallback 改过），而非静态 BASE
+    return `${resolvedBase()}/browser/proxy?url=${encoded}&auth=${auth}`
   }
 
   function pushBrowserLog(entry: import('./panels/BrowserPreviewPanel').BrowserConsoleEntry) {
@@ -1048,6 +1053,62 @@ export default function App() {
   const [composerMode, setComposerMode] = createSignal<ComposerMode>('code')
   const [showModeDropdown, setShowModeDropdown] = createSignal(false)
 
+  // ── K-MultiModel (v0.2.25)：模型清单 + per-session 模型选择 ──────────────
+  // 模型清单按当前模式对应的 businessCode 拉
+  // 'ask' / globalMode='chat' → IDE_CHAT_ASK；其余（code / plan / bypass）→ IDE_CHAT_CODE
+  const [availableModels, setAvailableModels] = createSignal<SceneModel[]>([])
+  const [modelsLoading, setModelsLoading] = createSignal(false)
+  const currentBusinessCode = createMemo<'IDE_CHAT_CODE' | 'IDE_CHAT_ASK'>(() => {
+    if (composerMode() === 'ask' || globalMode() === 'chat') return 'IDE_CHAT_ASK'
+    return 'IDE_CHAT_CODE'
+  })
+  // 拉清单：每次 businessCode 变化时；拿到空清单时 1.5s 后 retry 一次
+  // （sidecar 启动预热 prefetch 是异步的，首次 createEffect 可能比 prefetch 早完成）
+  createEffect(() => {
+    const code = currentBusinessCode()
+    void (async () => {
+      setModelsLoading(true)
+      const fetchOnce = async (): Promise<number> => {
+        try {
+          const c = await getClient()
+          const res = await c.listSceneModels(code)
+          const list = res.models ?? []
+          setAvailableModels(list)
+          return list.length
+        } catch (e) {
+          console.warn('[ModelSelector] 拉清单失败', e)
+          setAvailableModels([])
+          return -1
+        }
+      }
+      try {
+        const n = await fetchOnce()
+        // 拿到空清单 → sidecar prefetch 可能还在飞，等 1.5s retry 一次
+        if (n === 0) {
+          setTimeout(() => { void fetchOnce() }, 1500)
+        }
+      } finally {
+        setModelsLoading(false)
+      }
+    })()
+  })
+  // K-MultiModel：切模型超额对话框 state
+  const [overflowDialog, setOverflowDialog] = createSignal<{
+    open:                boolean
+    targetModel:         string
+    targetDisplayName:   string
+    targetContextWindow: number
+    currentTokens:       number
+    resolve:             (d: OverflowDecision) => void
+  }>({
+    open:                false,
+    targetModel:         '',
+    targetDisplayName:   '',
+    targetContextWindow: 0,
+    currentTokens:       0,
+    resolve:             () => {},
+  })
+
   // ── 面板位置（slash / mention 下拉用 fixed 定位）────────────────────────────
   const [paletteRect, setPaletteRect] = createSignal({ bottom: 100, left: 0, width: 600 })
   let composerWrapRef: HTMLDivElement | undefined
@@ -1130,6 +1191,27 @@ export default function App() {
   // 会话搜索（sidebar 顶部，按标题模糊过滤）
   const [sessionSearch, setSessionSearch] = createSignal('')
   const [activeSessionId, setActiveSessionId] = createSignal<string | null>(null)
+
+  // K-MultiModel：当前会话绑定的模型 + 派生 meta（从 SessionSummary.model 来）
+  const currentSessionModel = createMemo<string | null>(() => {
+    const sid = activeSessionId()
+    if (!sid) return null
+    return sessions().find(s => s.id === sid)?.model ?? null
+  })
+  // K-MultiModel：派生当前生效模型的 meta。
+  // - 用户主动选了 model → 按 model 找
+  // - 用户没选（session.model == null）→ fallback 到清单里 isDefault=1 的那行
+  //   （UI 显示"deepseek-v4-pro (默认)" 时，能源里就应该是它，supportVision 等也按它）
+  // - 清单为空（拉不到 / 后端没配）→ null（图片按钮默认显示，老行为）
+  const currentModelMeta = createMemo<SceneModel | null>(() => {
+    const list = availableModels()
+    if (list.length === 0) return null
+    const picked = currentSessionModel()
+    if (picked) {
+      return list.find(x => x.model === picked) ?? null
+    }
+    return list.find(x => x.isDefault === 1) ?? null
+  })
 
   // ── 多选删除模式（K-BulkDelete）─────────────────────────────────────────
   // 进入后所有 session 卡片左侧出现复选框，点击切换勾选；顶部出现操作栏（全选 / 反选 / 删除选中 / 取消）
@@ -1296,6 +1378,8 @@ export default function App() {
         toolSuccess: m.toolSuccess,
         liveOutput:  m.liveOutput,
         charCount:   m.charCount,
+        // K-ImageHistory：把图片元数据带到共享 store，否则 MessageBubble 读不到缩略图
+        ...(m.metadata ? { metadata: m.metadata } : {}),
       }
       shared.push(out)
       newCache.set(String(m.id), { src: m, out })
@@ -1640,6 +1724,68 @@ export default function App() {
     const r = await c.listSessions()
     setSessions(r.sessions.sort((a, b) => b.updatedAt - a.updatedAt))
   }
+
+  // K-MultiModel (v0.2.25)：切到 contextWindow 更小的模型时弹超额提示。
+  // 返回 true = 继续切；false = 取消切。
+  async function guardContextOverflow(targetModel: string): Promise<boolean> {
+    const target = availableModels().find(m => m.model === targetModel)
+    if (!target?.contextWindow) return true  // 无 meta 直接放行
+    const current = tokenUsed()
+    if (current <= target.contextWindow * 0.85) return true
+    return new Promise<boolean>(resolve => {
+      setOverflowDialog({
+        open:                true,
+        targetModel,
+        targetDisplayName:   target.model,
+        targetContextWindow: target.contextWindow!,
+        currentTokens:       current,
+        resolve: async (d) => {
+          setOverflowDialog(s => ({ ...s, open: false }))
+          if (d === 'cancel') return resolve(false)
+          if (d === 'compact') {
+            const sid = activeSessionId()
+            if (sid) {
+              try {
+                const c = await getClient()
+                await c.compactSession(sid)
+              } catch (e) {
+                showToast({ message: '压缩失败：' + (e as Error).message, kind: 'error' })
+                return resolve(false)
+              }
+            }
+          }
+          resolve(true)
+        },
+      })
+    })
+  }
+
+  // K-MultiModel：切模型
+  async function switchModel(targetModel: string): Promise<void> {
+    const sid = activeSessionId()
+    if (!sid) {
+      showToast({ message: '请先选中或创建一个会话再切模型', kind: 'warn', duration: 2000 })
+      return
+    }
+    if (!(await guardContextOverflow(targetModel))) return
+    try {
+      const c = await getClient()
+      await c.setSessionModel(sid, targetModel)
+      await refreshSessions()
+      showToast({ message: `已切换到 ${targetModel}`, kind: 'success', duration: 1500 })
+    } catch (e) {
+      showToast({ message: '切换模型失败：' + (e as Error).message, kind: 'error' })
+    }
+  }
+
+  // K-MultiModel：当前模型的 contextWindow 同步 tokenLimit（如果模型有 meta）
+  createEffect(() => {
+    const meta = currentModelMeta()
+    if (!meta?.contextWindow || meta.contextWindow <= 0) return
+    untrack(() => {
+      if (tokenLimit() !== meta.contextWindow) setTokenLimit(meta.contextWindow!)
+    })
+  })
 
   async function createSession() {
     const c = await getClient()
@@ -2136,10 +2282,15 @@ export default function App() {
     _resetRecv()  // 重置接收计数器 + 直接清空 DOM
     _chatEventHandler.resetAbortedAt()  // 新任务开始，清掉上次取消的丢弃窗口
     const imgs = attachedImages()
-    const displayContent = imgs.length > 0
-      ? `${content}\n\n[附图 ${imgs.length} 张]`
-      : content
-    setMessages((prev) => [...prev, { id: String(++msgId), role: "user", content: displayContent, createdAt: Date.now() }])
+    // K-ImageHistory：图片走 metadata.images（MessageBubble 渲染缩略图），content 保留纯文本
+    const userMsg: SharedChatMessage = {
+      id: String(++msgId),
+      role: "user",
+      content,
+      createdAt: Date.now(),
+      ...(imgs.length > 0 ? { metadata: { images: imgs.map(i => i.dataUrl) } } : {}),
+    }
+    setMessages((prev) => [...prev, userMsg])
     // 用户主动发消息 → 视为"想看响应"，重置贴底状态让后续 auto-scroll 生效
     stickToBottom = true
     requestAnimationFrame(() => chatEndRef?.scrollIntoView({ behavior: 'instant' }))
@@ -3174,8 +3325,34 @@ export default function App() {
   // 渲染处见 main 区（约第 8620 行）—— 通过 props 传入 App 内的所有终端状态/回调。
 
   // ─── 图片附件处理 ──────────────────────────────────────────────────────────
+
+  /**
+   * K-MultiModel：判断当前生效模型是否支持视觉输入。
+   * - 未拿到清单 → 默认允许（乐观，不限制用户）
+   * - 拿到清单且当前模型 supportVision=0 → 拦截 + toast 提示
+   */
+  function currentModelAllowsImage(): boolean {
+    const meta = currentModelMeta()
+    if (!meta) return true
+    return meta.supportVision === 1
+  }
+  function rejectImageWithToast(): void {
+    const meta = currentModelMeta()
+    const name = meta?.model ?? '当前模型'
+    showToast({
+      message: `「${name}」不支持图片输入。请先在 composer 上方切换到支持视觉的模型。`,
+      kind: 'warn',
+      duration: 3000,
+    })
+  }
+
   function handleImageFile(file: File) {
     if (!file.type.startsWith("image/")) return
+    // K-MultiModel：当前模型不支持视觉 → 拦截，提示用户换模型
+    if (!currentModelAllowsImage()) {
+      rejectImageWithToast()
+      return
+    }
     const reader = new FileReader()
     reader.onload = (ev) => {
       const dataUrl = ev.target?.result as string
@@ -3192,19 +3369,33 @@ export default function App() {
   function handlePaste(e: ClipboardEvent) {
     const items = e.clipboardData?.items
     if (!items) return
+    let hasImage = false
     for (const item of items) {
       if (item.kind === "file" && item.type.startsWith("image/")) {
+        hasImage = true
         e.preventDefault()
+        // K-MultiModel：拦截 — 不调 handleImageFile（虽然里头也会再拦一次，但提前 short-circuit 更干净）
+        if (!currentModelAllowsImage()) {
+          rejectImageWithToast()
+          return
+        }
         const file = item.getAsFile()
         if (file) handleImageFile(file)
       }
     }
+    void hasImage  // 标记防 lint，行为没变
   }
 
   function handleDrop(e: DragEvent) {
     e.preventDefault()
     const files = e.dataTransfer?.files
     if (!files) return
+    // K-MultiModel：当前模型不支持视觉 → 一并拦截
+    const hasImage = Array.from(files).some(f => f.type.startsWith("image/"))
+    if (hasImage && !currentModelAllowsImage()) {
+      rejectImageWithToast()
+      return
+    }
     for (const file of files) {
       if (file.type.startsWith("image/")) handleImageFile(file)
     }
@@ -4723,25 +4914,34 @@ export default {
                             onSelectMode={onSelectComposerMode}
                           />
                         </Show>
-                        {/* 图片上传按钮 */}
-                        <label class="attach-image-btn" title="附加图片 (也可直接粘贴)">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-                            <circle cx="8.5" cy="8.5" r="1.5"/>
-                            <polyline points="21 15 16 10 5 21"/>
-                          </svg>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            style="display:none"
-                            onChange={(e) => {
-                              const files = e.currentTarget.files
-                              if (files) for (const f of files) handleImageFile(f)
-                              e.currentTarget.value = ""
-                            }}
-                          />
-                        </label>
+                        {/* K-MultiModel (v0.2.25)：模型选择器，跟 ModeSelector 并排 */}
+                        <ModelSelector
+                          models={availableModels}
+                          currentModel={currentSessionModel}
+                          loading={modelsLoading}
+                          onSelect={switchModel}
+                        />
+                        {/* 图片上传按钮 — 仅当模型支持视觉 / 或未选模型走默认时显示 */}
+                        <Show when={currentModelMeta() === null || currentModelMeta()?.supportVision === 1}>
+                          <label class="attach-image-btn" title="附加图片 (也可直接粘贴)">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                              <circle cx="8.5" cy="8.5" r="1.5"/>
+                              <polyline points="21 15 16 10 5 21"/>
+                            </svg>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              style="display:none"
+                              onChange={(e) => {
+                                const files = e.currentTarget.files
+                                if (files) for (const f of files) handleImageFile(f)
+                                e.currentTarget.value = ""
+                              }}
+                            />
+                          </label>
+                        </Show>
                         <span class="composer-hint">
                           <Show when={vimEnabled()}>
                             <span class={`vim-mode-indicator vim-mode-${vimMode()}`}>
@@ -5101,6 +5301,15 @@ export default {
           onClose={() => setShowKeybindHelp(false)}
         />
       </Show>
+
+      {/* K-MultiModel：切模型上下文超额对话框 */}
+      <ModelSwitchOverflowDialog
+        open={() => overflowDialog().open}
+        currentTokens={() => overflowDialog().currentTokens}
+        targetDisplayName={() => overflowDialog().targetDisplayName}
+        targetContextWindow={() => overflowDialog().targetContextWindow}
+        onDecision={(d) => overflowDialog().resolve(d)}
+      />
 
       {/* 全局命令面板（⌘P） */}
       <Show when={showCmdPalette()}>

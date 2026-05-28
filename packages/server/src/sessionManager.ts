@@ -42,6 +42,8 @@ export interface StoredMessage {
 	role: 'user' | 'assistant' | 'system' | 'error' | 'tool' | 'reasoning';
 	content: string;
 	createdAt: number;
+	/** K-ImageHistory (v0.2.25)：附加元数据，目前用于 images（图片 dataUrl 数组），切会话后还原缩略图 */
+	metadata?: { images?: string[] } | null;
 }
 
 /** API 历史条目 — 存储层（content 可能是纯文本或 JSON 序列化的 ContentBlock[]） */
@@ -73,6 +75,7 @@ interface SessionRow {
 	ui_mode:       string;
 	archived:      number;
 	pinned:        number;
+	model:         string | null;
 }
 
 interface MessageRow {
@@ -90,6 +93,20 @@ interface HistoryRow {
 	position:   number;
 }
 
+/**
+ * K-ImageHistory：把无前缀 base64 还原成可直接 <img src> 的 dataUrl。
+ * 按 base64 头部魔数嗅探常见图片格式（跟 cli.ts 发图时的检测一致）。
+ */
+function base64ToDataUrl(b64: string): string {
+	if (b64.startsWith('data:')) return b64;   // 已是 dataUrl
+	const mediaType = b64.startsWith('/9j/')   ? 'image/jpeg'
+		: b64.startsWith('iVBOR')              ? 'image/png'
+		: b64.startsWith('R0lGOD')             ? 'image/gif'
+		: b64.startsWith('UklGR')              ? 'image/webp'
+		: 'image/jpeg';
+	return `data:${mediaType};base64,${b64}`;
+}
+
 function rowToSummary(row: SessionRow): SessionSummary {
 	return {
 		id:           row.id,
@@ -104,6 +121,7 @@ function rowToSummary(row: SessionRow): SessionSummary {
 		uiMode:       (row.ui_mode ?? 'code') as 'code' | 'chat',
 		archived:     !!(row.archived ?? 0),
 		pinned:       !!(row.pinned ?? 0),
+		model:        (row as any).model ?? null,
 	};
 }
 
@@ -500,6 +518,22 @@ export class SessionManager {
 		return { deletedMessages: before1, deletedHistory: before2 };
 	}
 
+	/**
+	 * K-MultiModel (v0.2.25)：设置会话绑定的模型名。
+	 *
+	 * 模型名对应后端 ai_business_scene_model.model 字段。AI 调用时 sidecar 会
+	 * 透传到 chat/completions 请求体的 model 字段，后端 resolveModel(businessCode,
+	 * model) 据此锁定具体行（绕过 priority/默认）；找不到时后端宽容 fallback
+	 * 到该 businessCode 默认模型。
+	 *
+	 * @param model 模型名（如 "claude-sonnet-4-5"）；传 null 清空 → 走默认
+	 */
+	async setSessionModel(id: string, model: string | null): Promise<void> {
+		const db = getDb();
+		db.prepare('UPDATE sessions SET model = ?, updated_at = ? WHERE id = ?')
+			.run(model, Date.now(), id);
+	}
+
 	// ─── SSE 订阅 ─────────────────────────────────────────────────────────
 
 	subscribe(id: string, handler: (event: MaxianEvent) => void | Promise<void>): () => void {
@@ -579,9 +613,10 @@ export class SessionManager {
 	/** 追加一条 UI 消息 */
 	async appendMessage(sessionId: string, msg: StoredMessage): Promise<void> {
 		const db = getDb();
+		const metaJson = msg.metadata ? JSON.stringify(msg.metadata) : null;
 		db.prepare(
-			'INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)'
-		).run(msg.id, sessionId, msg.role, msg.content, msg.createdAt);
+			'INSERT INTO messages (id, session_id, role, content, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?)'
+		).run(msg.id, sessionId, msg.role, msg.content, msg.createdAt, metaJson);
 	}
 
 	/** 读取会话 UI 消息列表 */
@@ -595,26 +630,33 @@ export class SessionManager {
 
 		// 取最新 N+1 条（多取 1 条判断是否有更多）
 		const sql = before
-			? `SELECT id, role, content, created_at FROM messages
+			? `SELECT id, role, content, created_at, metadata FROM messages
 			   WHERE session_id = ? AND created_at < ?
 			   ORDER BY created_at DESC LIMIT ?`
-			: `SELECT id, role, content, created_at FROM messages
+			: `SELECT id, role, content, created_at, metadata FROM messages
 			   WHERE session_id = ?
 			   ORDER BY created_at DESC LIMIT ?`;
 		const params = before ? [sessionId, before, limit + 1] : [sessionId, limit + 1];
 		const rows = db.prepare(sql).all(...params) as Array<{
-			id: string; role: string; content: string; created_at: number
+			id: string; role: string; content: string; created_at: number; metadata: string | null
 		}>;
 
 		const hasMore = rows.length > limit;
 		const slice = rows.slice(0, limit).reverse(); // 反转回时间正序
 		return {
-			messages: slice.map(r => ({
-				id: r.id,
-				role: r.role as StoredMessage['role'],
-				content: r.content,
-				createdAt: r.created_at,
-			})),
+			messages: slice.map(r => {
+				let metadata: StoredMessage['metadata'] = null;
+				if (r.metadata) {
+					try { metadata = JSON.parse(r.metadata); } catch { /* 损坏的 JSON 忽略 */ }
+				}
+				return {
+					id: r.id,
+					role: r.role as StoredMessage['role'],
+					content: r.content,
+					createdAt: r.created_at,
+					metadata,
+				};
+			}),
 			hasMore,
 		};
 	}
@@ -918,10 +960,16 @@ export class SessionManager {
 			WHERE id = ?
 		`).run(now, id);
 
-		// 持久化用户消息
+		// 持久化用户消息（K-ImageHistory：图片 base64 → dataUrl 存进 metadata，
+		// 切会话/重开后还原缩略图）
+		let userMetadata: string | null = null;
+		if (opts.images && opts.images.length > 0) {
+			const dataUrls = opts.images.map(b64 => base64ToDataUrl(b64));
+			userMetadata = JSON.stringify({ images: dataUrls });
+		}
 		db.prepare(
-			'INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)'
-		).run(messageId, id, 'user', opts.content, now);
+			'INSERT INTO messages (id, session_id, role, content, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?)'
+		).run(messageId, id, 'user', opts.content, now, userMetadata);
 
 		// 触发处理器（snapshot 防迭代期间新增 handler 也被本次调用，与 emitEvent 同样动机）
 		const sendHandlers = Array.from(this.onSendMessageHandlers);

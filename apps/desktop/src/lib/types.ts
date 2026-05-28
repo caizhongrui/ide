@@ -72,4 +72,6 @@ export interface ChatMessage {
 	liveOutput?:  string                    // 流式工具实时输出（bash 的 stdout/stderr）
 	/** 思考过程专属字段 */
 	charCount?:   number                    // 完成时的字符数
+	/** K-ImageHistory (v0.2.25)：附加元数据，images = 图片 dataUrl 数组（用户消息缩略图） */
+	metadata?:    Record<string, unknown>
 }

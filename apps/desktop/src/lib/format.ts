@@ -91,5 +91,7 @@ export function storedToChatMessage(m: StoredMessage): ChatMessage {
 		content:   m.content,
 		isPartial: false,
 		createdAt: m.createdAt,
+		// K-ImageHistory：回填图片元数据，让历史会话切回来也能看到缩略图
+		...(m.metadata ? { metadata: m.metadata as Record<string, unknown> } : {}),
 	}
 }

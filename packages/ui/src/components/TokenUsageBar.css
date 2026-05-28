@@ -1,29 +1,49 @@
 /* ══════════════════════════════════════════════════════════════════════════
-   TokenUsageBar — K10c 抽离自 desktop styles.css
+   TokenUsageBar — Claude Code 风格：纯文本上下文用量（无进度条，v0.2.25 from jiusi）
 ═══════════════════════════════════════════════════════════════════════════ */
 
 .token-usage-row {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	padding: 2px 2px;
+	font-size: 11.5px;
+	line-height: 1.4;
+	color: var(--text-muted, #94a3b8);
+	user-select: none;
 }
 
-.token-usage-bar {
-	height: 2px;
-	background: var(--bg-muted);
-	border-radius: 1px;
-	overflow: hidden;
-	margin: 0;
-	flex-grow: 1;
-	flex-shrink: 1;
+.token-usage-spacer {
+	flex: 1 1 auto;
+	min-width: 0;
 }
 
-.token-usage-fill {
-	height: 100%;
-	border-radius: 1px;
-	transition: width 500ms ease, background 500ms ease;
+.token-usage-text {
+	display: inline-flex;
+	align-items: baseline;
+	gap: 4px;
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
 }
 
+.token-usage-label {
+	color: var(--text-muted, #94a3b8);
+	font-weight: 500;
+}
+
+.token-usage-numbers {
+	color: var(--text-default, #cbd5e1);
+}
+
+.token-usage-pct {
+	font-weight: 500;
+}
+
+.token-usage-pct[data-level="ok"]       { color: #22c55e; }
+.token-usage-pct[data-level="warn"]     { color: #f59e0b; }
+.token-usage-pct[data-level="critical"] { color: #ef4444; }
+
+/* 压缩按钮 ────────────────────────────────────────────── */
 .token-compact-btn {
 	font-size: 11px;
 	padding: 2px 8px;

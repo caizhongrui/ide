@@ -154,7 +154,10 @@ fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
 }
 
 fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
-    let configured = read_env_or_default("MAXIAN_PORT", "4096");
+    // 默认端口 4096 → 51847：避开 Node dev 工具（Vite 5173 / CRA 3000 / webpack 8080 等）
+    // 常用范围，落在动态/私有端口区（49152+）。与 jiusi(51823) 错开，避免同机两端互撞。
+    // 用户可用 MAXIAN_PORT 环境变量覆盖；被占时仍走下方 find_free_port 自动让步。
+    let configured = read_env_or_default("MAXIAN_PORT", "51847");
     let user = read_env_or_default("MAXIAN_USER", "maxian");
     let pass = read_env_or_default("MAXIAN_PASS", "test123");
 
@@ -169,9 +172,9 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         return Err("__REUSE_EXISTING__".into());
     }
 
-    // K-Port：端口被别的服务占（如 Node dev server 抢了 4096）→ 自动找空闲端口
+    // K-Port：端口被别的服务占（如其他 Node dev server 抢了 51847）→ 自动找空闲端口
     // jiusi 0.7.1 经验：用户多端开发常撞这种冲突，自动让步比报错强。
-    let configured_port: u16 = configured.parse().unwrap_or(4096);
+    let configured_port: u16 = configured.parse().unwrap_or(51847);
     let port_num: u16 = {
         use std::net::TcpListener;
         if TcpListener::bind(("127.0.0.1", configured_port)).is_ok() {
@@ -304,7 +307,7 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
 
 #[tauri::command]
 fn server_info(server_port: tauri::State<'_, ServerPort>) -> serde_json::Value {
-    // K-Port：优先读 spawn_server 写入的实际端口；fallback 到 env / 4096 默认
+    // K-Port：优先读 spawn_server 写入的实际端口；fallback 到 env / 51847 默认
     let port: u16 = server_port
         .0
         .lock()
@@ -314,7 +317,7 @@ fn server_info(server_port: tauri::State<'_, ServerPort>) -> serde_json::Value {
             std::env::var("MAXIAN_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(4096)
+                .unwrap_or(51847)
         });
     serde_json::json!({
         "baseUrl": format!("http://127.0.0.1:{}", port),

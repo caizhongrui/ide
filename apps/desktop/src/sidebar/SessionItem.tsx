@@ -111,6 +111,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
 					class="item-action-btn"
 					onClick={(e) => { e.stopPropagation(); props.onTogglePin(s().id, !s().pinned) }}
 					title={s().pinned ? '取消置顶' : '置顶'}
+					data-tip={s().pinned ? '取消置顶' : '置顶'}
 				>
 					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={s().pinned ? 'var(--accent)' : 'currentColor'} stroke-width="2">
 						<line x1="12" y1="17" x2="12" y2="22" />
@@ -121,6 +122,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
 					class="item-action-btn"
 					onClick={(e) => { e.stopPropagation(); props.onToggleArchive(s().id, !s().archived) }}
 					title={s().archived ? '取消归档' : '归档'}
+					data-tip={s().archived ? '取消归档' : '归档'}
 				>
 					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 						<polyline points="21 8 21 21 3 21 3 8" />
@@ -132,6 +134,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
 					class="item-action-btn"
 					onClick={(e) => props.onStartRename(e, s())}
 					title="重命名"
+					data-tip="重命名"
 				>
 					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 						<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -142,6 +145,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
 					class="item-action-btn del"
 					onClick={(e) => props.onDelete(e, s().id)}
 					title="删除"
+					data-tip="删除"
 				>
 					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 						<polyline points="3 6 5 6 21 6" />

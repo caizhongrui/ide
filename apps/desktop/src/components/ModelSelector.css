@@ -1,0 +1,113 @@
+/* K-MultiModel (v0.2.25)：ModelSelector 样式 ─────────────────────────────
+   挂 composer 上方，跟 ModeSelector 并排。配色对齐 maxian 主题变量。 */
+
+.model-selector {
+  position: relative;
+  display: inline-flex;
+}
+
+.model-selector-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-base);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 100ms, border-color 100ms;
+  max-width: 240px;
+}
+.model-selector-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.model-selector-btn-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-selector-btn-caret {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 120ms;
+}
+.model-selector-btn.open .model-selector-btn-caret {
+  transform: rotate(180deg);
+}
+
+.model-selector-panel {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  min-width: 280px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  padding: 4px;
+}
+.model-selector-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 80ms;
+  font-size: 12px;
+}
+.model-selector-item:hover {
+  background: var(--bg-hover);
+}
+.model-selector-item.active {
+  background: var(--accent-faint);
+  color: var(--accent);
+}
+.model-selector-item.default-marker::before {
+  content: '★';
+  color: var(--accent);
+  font-size: 10px;
+  margin-right: 2px;
+}
+.model-selector-item-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-selector-item-provider {
+  font-size: 10px;
+  padding: 1px 5px;
+  background: var(--bg-muted);
+  border-radius: 3px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.model-selector-item-ctx {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.model-selector-item-vision {
+  color: #67c23a;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+.model-selector-loading,
+.model-selector-empty {
+  padding: 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}

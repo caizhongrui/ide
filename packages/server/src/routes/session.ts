@@ -160,6 +160,18 @@ export function SessionRoutes(sessionManager: SessionManager) {
 		return c.json({ ok: true, ...result });
 	});
 
+	// K-MultiModel (v0.2.25)：设置会话绑定的模型名（用户面选择）。
+	// body: { model: string | null } — null 表示清空（走默认）
+	app.patch('/sessions/:id/model',
+		zValidator('json', z.object({ model: z.string().nullable() })),
+		async (c) => {
+			const id = c.req.param('id');
+			const { model } = c.req.valid('json');
+			await sessionManager.setSessionModel(id, model);
+			return c.json({ ok: true });
+		},
+	);
+
 	// 发送消息到会话（非流式 —— 异步触发，通过 SSE 接收结果）
 	app.post(
 		'/sessions/:id/messages',

@@ -366,7 +366,8 @@
   }
   .sidebar-search-input {
     width: 100%;
-    padding: 5px 22px 5px 28px;
+    /* 右侧留出空间给：删除多选(right:64) + 归档切换(right:38) + 清除(right:15) 三个绝对定位按钮 */
+    padding: 5px 88px 5px 28px;
     font-size: 12px;
     background: var(--bg-base);
     color: var(--text-base);
@@ -383,7 +384,8 @@
   }
   .sidebar-search-clear {
     position: absolute;
-    right: 15px;
+    /* 挪到删除(38)/归档(12)两个常驻按钮左侧，仅搜索时出现 */
+    right: 64px;
     top: 50%;
     transform: translateY(-50%);
     width: 16px;
@@ -486,7 +488,7 @@
     border-radius: 5px;
     border: none;
     background: transparent;
-    color: var(--text-faint);
+    color: var(--text-muted);
     cursor: pointer;
     transition: background 100ms, color 100ms;
     flex-shrink: 0;
@@ -594,7 +596,7 @@
     border-radius: 4px;
     border: none;
     background: transparent;
-    color: var(--text-faint);
+    color: var(--text-muted);
     cursor: pointer;
     transition: background 100ms, color 100ms;
     flex-shrink: 0;
@@ -602,6 +604,38 @@
   .item-action-btn:hover { background: rgba(255,255,255,0.08); color: var(--text-base); }
   .item-action-btn.del:hover { background: rgba(239,68,68,0.12); color: var(--error); }
   html[data-theme="light"] .item-action-btn:hover { background: rgba(0,0,0,0.06); }
+
+  /* ─── 即时 tooltip（data-tip）──────────────────────────────────────────
+   * 侧边栏会话列表是 overflow-y:auto，向下/向右展开的气泡会被裁切，
+   * 因此 tooltip 一律向【左】浮现：右缘贴按钮左侧、垂直居中，
+   * 横向不超出容器左边界、纵向只占一行高度，规避滚动容器裁切。
+   * 鼠标悬停 ~300ms 才出现，避免扫过时闪烁；原生 title 仍保留作兜底。*/
+  [data-tip] { position: relative; }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    right: calc(100% + 6px);
+    top: 50%;
+    transform: translateY(-50%) translateX(4px);
+    z-index: 2000;
+    padding: 3px 7px;
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: #fff;
+    background: rgba(28, 32, 42, 0.97);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease, transform 120ms ease;
+  }
+  [data-tip]:hover::after {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+    transition-delay: 300ms;
+  }
 
   /* ─── Rename inline input ───────────────────────────────── */
   .rename-input {
@@ -1749,121 +1783,201 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ─── Login Screen ─────────────────────────────────────── */
-  .login-screen {
+  /* ─── Login Screen（沉浸式深色门面 · Code Aurora，参照九思）──── */
+  /* 固定深色，不跟随浅色主题；纯色 + 模糊营造氛围 */
+  .auth-screen {
+    position: relative;
     height: calc(100vh - 38px);
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--bg-base);
-    background-image:
-      linear-gradient(var(--border) 1px, transparent 1px),
-      linear-gradient(90deg, var(--border) 1px, transparent 1px);
-    background-size: 32px 32px;
-  }
-
-  .login-card {
-    width: 400px;
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-strong);
-    border-radius: 16px;
+    background: #080b1b;
     overflow: hidden;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.4);
   }
 
-  .login-hero {
-    padding: 32px 32px 24px;
-    display: flex;
-    flex-direction: column;
+  /* Aurora 背景层（静态柔光，适中 blur） */
+  .auth-bg { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .auth-bg-aurora { position: absolute; border-radius: 50%; filter: blur(60px); }
+  .auth-bg-aurora-1 { width: 420px; height: 420px; top: -120px; left: -120px; background: #6366f1; opacity: 0.30; }
+  .auth-bg-aurora-2 { width: 360px; height: 360px; bottom: -120px; right: -100px; background: #8b5cf6; opacity: 0.28; }
+  .auth-bg-aurora-3 { width: 320px; height: 320px; top: 30%; right: 22%; background: #06b6d4; opacity: 0.14; }
+
+  /* 网格 mask 叠加 */
+  .auth-grid {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(165, 180, 252, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(165, 180, 252, 0.05) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(ellipse 70% 70% at center, #000 0%, transparent 75%);
+            mask-image: radial-gradient(ellipse 70% 70% at center, #000 0%, transparent 75%);
+  }
+
+  /* 漂浮代码片段卡片（静态轻微倾斜） */
+  .auth-snippet {
+    position: absolute;
+    width: 200px;
+    background: rgba(15, 23, 42, 0.7);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: ui-monospace, "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: #cbd5e1;
+    line-height: 1.7;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+    z-index: 2;
+    pointer-events: none;
+    user-select: none;
+  }
+  .auth-snippet-1 { top: 15%; left: 7%; transform: rotate(-3deg); }
+  .auth-snippet-2 { bottom: 15%; right: 7%; transform: rotate(3deg); }
+  .auth-snippet-bar { display: flex; gap: 5px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid rgba(99, 102, 241, 0.15); }
+  .auth-snippet-dot { width: 8px; height: 8px; border-radius: 50%; opacity: 0.7; }
+  .auth-snippet-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cm-kw  { color: #c4b5fd; }
+  .cm-fn  { color: #93c5fd; }
+  .cm-var { color: #e2e8f0; }
+  .cm-str { color: #6ee7b7; }
+  .cm-com { color: #64748b; font-style: italic; }
+
+  /* 齿轮：右上角 */
+  .auth-gear {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
     align-items: center;
-    gap: 10px;
-    background: linear-gradient(160deg, rgba(37,99,235,0.10) 0%, transparent 60%);
-    border-bottom: 1px solid var(--border);
+    justify-content: center;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(165, 180, 252, 0.18);
+    border-radius: 50%;
+    color: #a5b4fc;
+    cursor: pointer;
+    transition: background 180ms, color 180ms, border-color 180ms, transform 180ms;
+    z-index: 20;
+  }
+  .auth-gear:hover { background: rgba(99, 102, 241, 0.18); border-color: rgba(165, 180, 252, 0.4); color: #e0e7ff; transform: rotate(60deg); }
+  .auth-gear.is-active { background: rgba(99, 102, 241, 0.8); color: #fff; border-color: #a5b4fc; transform: rotate(90deg); box-shadow: 0 0 18px rgba(99, 102, 241, 0.5); }
+
+  /* 中央卡片 */
+  .auth-card {
+    position: relative;
+    z-index: 10;
+    width: 400px;
+    background: rgba(15, 23, 42, 0.96);
+    border: 1px solid rgba(165, 180, 252, 0.22);
+    border-radius: 20px;
+    box-shadow:
+      0 32px 80px rgba(0, 0, 0, 0.55),
+      0 0 60px rgba(99, 102, 241, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+    animation: authCardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes authCardIn {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 
-  .login-avatar {
+  /* 头部 */
+  .auth-head { padding: 36px 40px 22px; display: flex; flex-direction: column; align-items: center; text-align: center; position: relative; }
+  .auth-logo-wrap { position: relative; margin-bottom: 18px; }
+  .auth-logo {
+    position: relative;
+    z-index: 2;
     width: 72px;
     height: 72px;
     object-fit: contain;
-    margin-bottom: 4px;
-    filter: drop-shadow(0 8px 20px rgba(37,99,235,0.3));
+    border-radius: 18px;
+    box-shadow: 0 12px 32px rgba(99, 102, 241, 0.5), 0 0 0 1px rgba(165, 180, 252, 0.2);
   }
-  .login-brand { font-size: 20px; font-weight: 700; color: var(--text-base); }
-  .login-sub   { font-size: 12px; color: var(--text-muted); }
+  .auth-logo-glow { position: absolute; inset: 6px; border-radius: 50%; background: #8b5cf6; opacity: 0.55; filter: blur(22px); pointer-events: none; }
+  .auth-brand { position: relative; font-size: 26px; font-weight: 700; letter-spacing: 3px; margin-bottom: 8px; color: #e0e7ff; text-shadow: 0 0 24px rgba(165, 180, 252, 0.3); }
+  .auth-tagline { display: inline-flex; align-items: center; gap: 8px; font-size: 11.5px; color: #94a3b8; letter-spacing: 0.5px; }
+  .auth-tagline-dot { width: 4px; height: 4px; border-radius: 50%; background: #a5b4fc; opacity: 0.7; }
 
-  .login-form {
-    padding: 24px 32px 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
+  /* 表单区 */
+  .auth-body { padding: 4px 40px 32px; display: flex; flex-direction: column; gap: 14px; }
+  .auth-field { display: flex; flex-direction: column; gap: 6px; }
+  .auth-server-field { animation: authSlideDown 280ms cubic-bezier(0.16, 1, 0.3, 1); }
+  @keyframes authSlideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+  .auth-label { font-size: 11.5px; font-weight: 500; color: #94a3b8; letter-spacing: 0.4px; }
 
-  .login-field  { display: flex; flex-direction: column; gap: 6px; }
-  .login-label  { font-size: 12px; font-weight: 500; color: var(--text-muted); }
-
-  .login-input {
+  .auth-input-wrap { position: relative; }
+  .auth-input-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #64748b; pointer-events: none; z-index: 1; transition: color 180ms; }
+  .auth-input-wrap:focus-within .auth-input-icon { color: #a5b4fc; }
+  .auth-input {
     width: 100%;
-    background: var(--bg-muted);
-    border: 1px solid var(--border-strong);
-    border-radius: 8px;
-    padding: 9px 12px;
-    font-size: 13px;
-    color: var(--text-base);
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(165, 180, 252, 0.15);
+    border-radius: 10px;
+    padding: 11px 14px;
+    font-size: 14px;
+    color: #e2e8f0;
     font-family: var(--font-sans);
     outline: none;
-    transition: border-color 150ms, box-shadow 150ms;
+    transition: all 200ms;
+    box-sizing: border-box;
   }
-  .login-input::placeholder { color: var(--text-faint); }
-  .login-input:focus { border-color: color-mix(in srgb, var(--accent) 70%, transparent); box-shadow: 0 0 0 3px var(--accent-faint); }
-  .login-input:disabled { opacity: 0.5; cursor: not-allowed; }
+  .auth-input.has-icon { padding-left: 36px; }
+  .auth-input::placeholder { color: #475569; }
+  .auth-input:hover:not(:disabled) { border-color: rgba(165, 180, 252, 0.3); background: rgba(15, 23, 42, 0.8); }
+  .auth-input:focus { border-color: rgba(165, 180, 252, 0.7); background: rgba(15, 23, 42, 0.9); box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.18); }
+  .auth-input:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .login-remember {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-muted);
-    cursor: pointer;
-    user-select: none;
-  }
-  .login-remember input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+  .auth-remember { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #94a3b8; cursor: pointer; user-select: none; margin-top: 2px; }
+  .auth-remember input[type="checkbox"] { width: 14px; height: 14px; accent-color: #818cf8; cursor: pointer; }
 
-  .login-btn {
+  /* 登录按钮 */
+  .auth-btn {
+    position: relative;
     width: 100%;
-    padding: 10px;
-    background: var(--accent);
+    margin-top: 8px;
+    padding: 13px;
+    background: #6366f1;
     color: #fff;
-    border: none;
-    border-radius: 8px;
+    border: 1px solid rgba(165, 180, 252, 0.35);
+    border-radius: 10px;
     font-size: 14px;
     font-weight: 600;
+    letter-spacing: 8px;
+    text-indent: 8px;
     cursor: pointer;
-    transition: background 150ms, opacity 150ms;
+    transition: all 200ms;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
     font-family: var(--font-sans);
+    box-shadow: 0 8px 24px rgba(99, 102, 241, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    overflow: hidden;
   }
-  .login-btn:hover:not(:disabled) { background: var(--accent-hover); }
-  .login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .auth-btn:hover:not(:disabled) { background: #7c7ff5; transform: translateY(-2px); box-shadow: 0 14px 32px rgba(99, 102, 241, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.22); }
+  .auth-btn:active:not(:disabled) { background: #5558e3; transform: translateY(0); }
+  .auth-btn:disabled { background: #475569; border-color: transparent; opacity: 0.45; cursor: not-allowed; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
 
-  .login-error {
-    background: rgba(239,68,68,0.1);
-    border: 1px solid rgba(239,68,68,0.25);
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 12px;
-    color: #fca5a5;
-    line-height: 1.5;
+  .auth-error { display: flex; align-items: center; gap: 8px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: #fca5a5; line-height: 1.5; }
+  .auth-error svg { flex-shrink: 0; }
+
+  .auth-foot { margin-top: 6px; font-size: 11.5px; color: #64748b; text-align: center; letter-spacing: 0.3px; }
+
+  .auth-copyright { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 10.5px; color: #475569; letter-spacing: 1.5px; z-index: 5; }
+
+  /* 窗口太窄时隐藏代码片段装饰 */
+  @media (max-width: 900px) {
+    .auth-snippet { display: none; }
   }
-
-  .login-footer {
-    padding: 12px 32px;
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text-faint);
-    text-align: center;
+  /* 尊重"减少动态效果"系统设置 */
+  @media (prefers-reduced-motion: reduce) {
+    .auth-card,
+    .auth-server-field { animation: none; }
+    .auth-btn:hover:not(:disabled),
+    .auth-gear:hover { transform: none; }
   }
 }
 
@@ -3598,7 +3712,7 @@
 /* 归档视图切换按钮 */
 .sidebar-archive-toggle {
   position: absolute;
-  right: 38px;
+  right: 12px;
   top: 50%;
   transform: translateY(-50%);
   width: 22px;
@@ -5870,9 +5984,9 @@ html[data-theme="system"] @media (prefers-color-scheme: light) {
 }
 .mcp-tool-mini {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
   font-size: 11px;
-  align-items: baseline;
 }
 
 /* Tool list */
@@ -5941,7 +6055,9 @@ html[data-theme="system"] @media (prefers-color-scheme: light) {
   font-size: 11.5px;
   color: var(--accent);
   font-weight: 600;
-  word-break: break-all;
+  /* 优先整体显示，放不下才在合理处换行（不再逐字符断，避免工具名竖排） */
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .mcp-tool-desc {
   font-size: 11px;
@@ -6278,7 +6394,12 @@ html[data-theme="dark"] .browser-cors-warn { color: #fbbf24; }
  * ════════════════════════════════════════════════════════════════════════ */
 
 /* 搜索栏里的"批量删除"切换按钮 —— 复用 .sidebar-archive-toggle 的尺寸/边框,
- * 但 active 时是红色而不是 accent 蓝（区分归档与删除两个不同语义）*/
+ * 但 active 时是红色而不是 accent 蓝（区分归档与删除两个不同语义）。
+ * 归档切换固定在 right:38px，这里必须左移避免两个按钮叠在同一位置
+ * （否则后渲染的删除按钮会盖住归档按钮，导致看不到"显示归档"入口）。*/
+.sidebar-bulk-toggle {
+  right: 38px;
+}
 .sidebar-bulk-toggle.active {
   background: color-mix(in srgb, #ef4444 18%, transparent) !important;
   border-color: rgba(239, 68, 68, 0.40) !important;
