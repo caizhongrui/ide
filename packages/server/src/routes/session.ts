@@ -152,6 +152,14 @@ export function SessionRoutes(sessionManager: SessionManager) {
 		return c.json({ ok: true });
 	});
 
+	// K-Clear (v0.2.24)：清空会话内容（messages + history_entries），保留 session
+	// 行。给桌面端 /clear 命令用，避免清空 UI 后 sidecar 仍带历史喂给 LLM。
+	app.post('/sessions/:id/clear', async (c) => {
+		const id = c.req.param('id');
+		const result = await sessionManager.clearSessionContent(id);
+		return c.json({ ok: true, ...result });
+	});
+
 	// 发送消息到会话（非流式 —— 异步触发，通过 SSE 接收结果）
 	app.post(
 		'/sessions/:id/messages',

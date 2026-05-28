@@ -318,6 +318,14 @@ export class MaxianClient {
 		await this.request('DELETE', `/sessions/${id}`);
 	}
 
+	/**
+	 * 清空会话内容（messages + history_entries），保留 session 本身。
+	 * 给 /clear 命令用——清空后继续聊，AI 不再"记得"之前内容。
+	 */
+	async clearSessionContent(id: string): Promise<{ ok: boolean; deletedMessages: number; deletedHistory: number }> {
+		return this.request('POST', `/sessions/${id}/clear`);
+	}
+
 	async sendMessage(sessionId: string, opts: { content: string; images?: string[] }): Promise<{ messageId: string }> {
 		return this.request('POST', `/sessions/${sessionId}/messages`, opts);
 	}

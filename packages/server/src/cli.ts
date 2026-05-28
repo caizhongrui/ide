@@ -85,6 +85,7 @@ async function loadPty(): Promise<PtyModule> {
 }
 import { getDb } from './database.js';
 import { AiProxyHandler } from '@maxian/core/api/aiproxy';
+import { buildRepoMapDigest } from './repoMapDigest.js';
 import {
 	readFileTool,
 	writeToFileTool,
@@ -3013,6 +3014,9 @@ OBJECTIVE
 		ctx.currentWorkspaceId   = workspacePath;
 		// B4: 注入代码库索引
 		ctx.codebaseIndex        = server.sessionManager.codebaseIndex;
+		// K-RepoMap：检查 codebase index 是否需要后台重建（>24h 或不存在 → 异步触发）
+		// 不 await，不阻塞主对话。本轮仍用旧 snapshot 生成 digest，下轮可见新 snapshot。
+		void server.sessionManager.ensureCodebaseIndex(ctx.currentWorkspaceId, workspacePath);
 		// Doom-loop 检测器（每次 runAgentLoop 独立实例）
 		const repetitionDetector = new ToolRepetitionDetector(3, workspacePath);
 		let   allText        = '';   // 所有迭代累积文本（用于兜底 return）
@@ -3045,9 +3049,27 @@ OBJECTIVE
 			? `\n\n====\n\nPROJECT CUSTOM PROMPT（.maxian/config.json）\n\n${projectCfg.additionalSystemPrompt}`
 			: '';
 
+		// K-RepoMap (v0.2.24, from jiusi 0.6.3)：把项目结构概览注入 system prompt 尾部，
+		// 让 AI 首轮就知道项目骨架，不用 grep / glob 摸瞎。
+		// 放在 dynamic 段最后是有意：
+		//   ① digest 会随项目文件 mtime 变，放最前会让上游 cache 命中失效；
+		//   ② 放最后只让自己不命中，静态层仍命中。
+		// digest 内部已经过滤了所有时间戳字段（避免 cache 99% → 0%）。
+		// 若 snapshot 不存在或异常 → 返回空串，不影响主流程。
+		let repoMapDigest = '';
+		try {
+			const t0 = Date.now();
+			repoMapDigest = await buildRepoMapDigest(ctx.codebaseIndex, ctx.currentWorkspaceId);
+			if (repoMapDigest.length > 0) {
+				console.log(`[repo-map] digest 长度=${repoMapDigest.length} chars (${Date.now() - t0}ms)`);
+			}
+		} catch (e) {
+			console.warn('[repo-map] digest 生成失败，跳过:', (e as Error).message);
+		}
+
 		const dynamicSuffix = composeDynamicSuffix(
 			workspacePath,
-			projectInstructions + skillsList + additionalSystemPrompt,
+			projectInstructions + skillsList + additionalSystemPrompt + repoMapDigest,
 		);
 
 		// B2: 把当前 MCP server 列表 + activeMcpTools 渲染成 prompt section，加到动态尾部

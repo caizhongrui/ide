@@ -6385,3 +6385,105 @@ html[data-theme="dark"] .browser-cors-warn { color: #fbbf24; }
 .session-item-selectmode.active::before {
   display: none;
 }
+
+/* ─── K-RightTabBar (v0.2.24, from jiusi 0.3.2) ─────────────────────────────
+   右侧 40px 竖向 tab 条，承载所有功能按钮的互斥开关。
+   颜色对齐 maxian 主题：背景跟 sidebar 同 --bg-subtle，符号同 --text-faint。 */
+.right-tab-bar {
+  flex: 0 0 40px;
+  width: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 0;
+  background: var(--bg-subtle);
+  border-left: 1px solid var(--border);
+  overflow: visible;   /* 不能 hidden —— 会裁掉左侧弹出的 tooltip / filter-menu */
+  z-index: 5;
+}
+
+.right-tab-btn {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 100ms, color 100ms, border-color 100ms;
+  flex-shrink: 0;
+  padding: 0;
+}
+.right-tab-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-base);
+}
+.right-tab-btn.active {
+  background: var(--accent-faint);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+}
+.right-tab-action { margin-bottom: 0; }
+.right-tab-divider {
+  width: 24px;
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+  flex-shrink: 0;
+}
+.right-tab-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 7px;
+  line-height: 1;
+}
+
+/* 即时 tooltip：从按钮左边弹出（屏幕右边缘的按钮，向右弹会被裁切）
+   原生 title="..." 有 ~700ms 浏览器延迟，用户体验差；用 data-tooltip + CSS ::after
+   做 80ms 即时显示。 */
+.right-tab-btn[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 8px);
+  transform: translateY(-50%);
+  padding: 5px 9px;
+  background: var(--bg-muted);
+  color: var(--text-base);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 9999;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  transition: opacity 80ms 120ms;
+}
+.right-tab-btn[data-tooltip]:hover::after { opacity: 1; }
+
+/* 消息过滤浮层从 RightTabBar 左侧展开（取代之前嵌在 chat-header 里的 dropdown） */
+.filter-menu-rightbar {
+  position: fixed;
+  right: 48px;
+  top: 90px;
+  z-index: 50;
+}

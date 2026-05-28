@@ -38,6 +38,7 @@ import { RevertDock } from "./panels/RevertDock"
 import { CompactingBanner, RateLimitBanner } from "./panels/StatusBanners"
 import { Sidebar } from "./sidebar/Sidebar"
 import { AnimatedNumber } from "./components/AnimatedNumber"
+import { RightTabBar } from "./components/RightTabBar"
 import { ToastHost, type ToastItem } from "./components/ToastHost"
 import { GlobalCommandPalette, type PaletteItem } from "./components/GlobalCommandPalette"
 import { KeybindHelpModal } from "./components/KeybindHelpModal"
@@ -235,8 +236,35 @@ export default function App() {
   // ── 权限审批对话框 ─────────────────────────────────────────────────────────
   const [approvalRequest, setApprovalRequest] = createSignal<ApprovalRequest | null>(null)
 
+  // ─── K-RightTabBar (v0.2.24, from jiusi 0.3.2) ────────────────────────────
+  // 右侧 11 个功能面板共享一个 activeRightPanel signal，**任意时刻最多一个面板**。
+  // 顶部按钮全部移除，统一收编到右侧 40px 竖向 tab 条。
+  //
+  // makePanelSignal(k) 返回跟 createSignal<boolean>() 签名一致的 [getter, setter]，
+  // 内部按 activeRightPanel === k 判断，setter 会让设为 true 时切换、设为 false 时关闭。
+  // 这样现有的 showXxxPanel() 和 setShowXxxPanel() 调用零改动，自动获得互斥语义。
+  type RightPanelKey =
+    | 'context'   | 'revert'   | 'filter'    | 'explorer'
+    | 'skills'    | 'memory'   | 'codebase'  | 'browser'
+    | 'mcp'       | 'subagent' | 'filetree'
+  const [activeRightPanel, setActiveRightPanel] = createSignal<RightPanelKey | null>(null)
+
+  function makePanelSignal(k: RightPanelKey): [() => boolean, (v: boolean | ((p: boolean) => boolean)) => void] {
+    const get = (): boolean => activeRightPanel() === k
+    const set = (v: boolean | ((p: boolean) => boolean)): void => {
+      const next = typeof v === 'function' ? v(get()) : v
+      if (next) setActiveRightPanel(k)
+      else if (get()) setActiveRightPanel(null)
+    }
+    return [get, set]
+  }
+
+  function toggleRightPanel(k: RightPanelKey): void {
+    setActiveRightPanel(prev => prev === k ? null : k)
+  }
+
   // ── 文件变更树面板 ─────────────────────────────────────────────────────────
-  const [showFileTree, setShowFileTree] = createSignal(false)
+  const [showFileTree, setShowFileTree] = makePanelSignal('filetree')
   const [changedFiles, setChangedFiles] = createSignal<Map<string, FileChangeEntry>>(new Map())
 
   // ── 右侧预览面板 ──────────────────────────────────────────────────────────
@@ -246,7 +274,7 @@ export default function App() {
   const [previewWidth, setPreviewWidth] = createSignal(520)
 
   // ── 工作区文件浏览器面板 ──────────────────────────────────────────────────
-  const [showExplorer, setShowExplorer] = createSignal(false)
+  const [showExplorer, setShowExplorer] = makePanelSignal('explorer')
   const [explorerSearch, setExplorerSearch] = createSignal("")
 
   // ── Diff 视图模式（P1-12）: unified / split ─────────────────────────────
@@ -267,11 +295,11 @@ export default function App() {
   const [rateLimit, setRateLimit] = createSignal<RateLimitState>({ active: false, resetAt: 0, attempt: 0, message: '' })
 
   // ── Context 标签页（P1-10） ─────────────────────────────────────────────
-  const [showContextPanel, setShowContextPanel] = createSignal(false)
+  const [showContextPanel, setShowContextPanel] = makePanelSignal('context')
   // contextFiles memo 移到 messages 信号声明之后，避免 TDZ
 
   // ── Session revert dock（P1-11） ────────────────────────────────────────
-  const [showRevertDock, setShowRevertDock] = createSignal(false)
+  const [showRevertDock, setShowRevertDock] = makePanelSignal('revert')
 
   // ── Agent 提问 / 上下文压缩 / Plan Exit 状态 —— 类型已抽到 lib/chatEventTypes ──
   const [questionRequest, setQuestionRequest]   = createSignal<QuestionRequest | null>(null)
@@ -310,7 +338,7 @@ export default function App() {
     source:      'workspace-maxian' | 'workspace-claude' | 'user-maxian' | 'user-claude'
     size:        number
   }
-  const [showSkillsPanel, setShowSkillsPanel] = createSignal(false)
+  const [showSkillsPanel, setShowSkillsPanel] = makePanelSignal('skills')
   // K11d：推荐技能库选择对话框可见性
   const [showRecommendedSkills, setShowRecommendedSkills] = createSignal(false)
 
@@ -366,7 +394,7 @@ export default function App() {
   }
 
   // ── B5: 浏览器预览面板 ────────────────────────────────────────────────
-  const [showBrowserPanel, setShowBrowserPanel] = createSignal(false)
+  const [showBrowserPanel, setShowBrowserPanel] = makePanelSignal('browser')
   const [browserUrl, setBrowserUrl] = createSignal('')
   const [browserConsoleLogs, setBrowserConsoleLogs] = createSignal<import('./panels/BrowserPreviewPanel').BrowserConsoleEntry[]>([])
   const [browserNetwork, setBrowserNetwork] = createSignal<import('./panels/BrowserPreviewPanel').BrowserNetworkEntry[]>([])
@@ -528,7 +556,7 @@ export default function App() {
   })
 
   // ── B2: MCP 工具索引面板 ──────────────────────────────────────────────
-  const [showMcpPanel, setShowMcpPanel] = createSignal(false)
+  const [showMcpPanel, setShowMcpPanel] = makePanelSignal('mcp')
   const [mcpServers, setMcpServers] = createSignal<import('./panels/McpToolPanel').McpServerRuntime[]>([])
   const [mcpTools, setMcpTools] = createSignal<import('./panels/McpToolPanel').McpToolEntry[]>([])
   const [mcpLoading, setMcpLoading] = createSignal(false)
@@ -576,7 +604,7 @@ export default function App() {
   })
 
   // ── B1: 子代理任务编排面板 ────────────────────────────────────────────
-  const [showSubagentPanel, setShowSubagentPanel] = createSignal(false)
+  const [showSubagentPanel, setShowSubagentPanel] = makePanelSignal('subagent')
   const [subagentRecords, setSubagentRecords] = createSignal<import('@maxian/sdk').SubagentRecord[]>([])
   const [subagentLoading, setSubagentLoading] = createSignal(false)
   const [subagentStatusFilter, setSubagentStatusFilter] = createSignal<import('@maxian/sdk').SubagentStatus | 'all'>('all')
@@ -629,7 +657,7 @@ export default function App() {
   })
 
   // ── B4: 项目知识库面板 ─────────────────────────────────────────────────
-  const [showCodebasePanel, setShowCodebasePanel] = createSignal(false)
+  const [showCodebasePanel, setShowCodebasePanel] = makePanelSignal('codebase')
   const [codebaseSnapshot, setCodebaseSnapshot] = createSignal<import('@maxian/sdk').CodebaseIndexSnapshot | null>(null)
   const [codebaseLoading, setCodebaseLoading] = createSignal(false)
   const [codebaseProgress, setCodebaseProgress] = createSignal('')
@@ -724,7 +752,7 @@ export default function App() {
   })
 
   // ── B3: 记忆面板 ──────────────────────────────────────────────────────
-  const [showMemoryPanel, setShowMemoryPanel] = createSignal(false)
+  const [showMemoryPanel, setShowMemoryPanel] = makePanelSignal('memory')
   const [memoryRecords, setMemoryRecords] = createSignal<import('@maxian/sdk').MemoryRecord[]>([])
   const [memoryLoading, setMemoryLoading] = createSignal(false)
   const [memoryScopeFilter, setMemoryScopeFilter] = createSignal<import('@maxian/sdk').MemoryScope | 'all'>('all')
@@ -995,7 +1023,7 @@ export default function App() {
     (() => { try { return JSON.parse(localStorage.getItem(FILTER_STORAGE_KEY) || '') } catch { return null } })()
       ?? { hideTodos: false, hideReasoning: false, hideInternalTools: false }
   )
-  const [showFilterMenu, setShowFilterMenu] = createSignal(false)
+  const [showFilterMenu, setShowFilterMenu] = makePanelSignal('filter')
   /** 强制展开所有 reasoning（"展开全部思考"按钮联动） */
   const [expandAllReasoning, setExpandAllReasoning] = createSignal(false)
   function updateMsgFilter(patch: Partial<MsgFilter>) {
@@ -2669,10 +2697,31 @@ export default function App() {
       return
     }
     switch (name) {
-      case "clear":
+      case "clear": {
+        // K-Clear (v0.2.24)：之前只清前端 messages signal，server 端 history_entries
+        // 还在，下次发消息 AI 仍带完整历史 → 表现是"清空了会话，但 AI 还记得"。
+        // 现在调 server /sessions/:id/clear 一并清掉 messages + history_entries +
+        // 重置 token 用量；前端再清 UI 状态。
+        const sid = activeSessionId()
+        if (sid) {
+          try {
+            const c = await getClient()
+            const r = await c.clearSessionContent(sid)
+            showToast({
+              message: `已清空 (${r.deletedMessages} 条消息 / ${r.deletedHistory} 条历史)`,
+              kind: 'success', duration: 2000,
+            })
+          } catch (e) {
+            showToast({ message: '清空失败：' + (e as Error).message, kind: 'error' })
+            break
+          }
+        }
         setMessages([])
         setChangedFiles(new Map())
+        setTodos([])
+        setTokenUsed(0)
         break
+      }
       case "new":
         await createSession()
         break
@@ -4262,233 +4311,8 @@ export default {
                     </span>
                   </Show>
                 </div>
-                <div class="chat-header-right">
-                  {/* Context 标签页（P1-10） */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showContextPanel() }}
-                    onClick={() => setShowContextPanel(v => !v)}
-                    title="会话上下文"
-                    style="position:relative"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M20 7h-3V4a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/>
-                      <line x1="8" y1="12" x2="16" y2="12"/>
-                    </svg>
-                    <Show when={contextFiles().length > 0 || attachedImages().length > 0}>
-                      <span class="file-badge">{contextFiles().length + attachedImages().length}</span>
-                    </Show>
-                  </button>
-                  {/* Session revert dock（P1-11） */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showRevertDock() }}
-                    onClick={() => setShowRevertDock(v => !v)}
-                    title="回退对话"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <polyline points="1 4 1 10 7 10"/>
-                      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
-                    </svg>
-                  </button>
-                  {/* 消息过滤器（P1-13） */}
-                  <div style="position:relative">
-                    <button
-                      class="icon-btn"
-                      classList={{ active: msgFilter().hideTodos || msgFilter().hideReasoning || msgFilter().hideInternalTools }}
-                      onClick={() => setShowFilterMenu(v => !v)}
-                      title="消息过滤"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
-                      </svg>
-                    </button>
-                    <Show when={showFilterMenu()}>
-                      <div class="filter-menu" onClick={(e) => e.stopPropagation()}>
-                        <div class="filter-menu-title">消息过滤</div>
-                        <label class="filter-menu-item">
-                          <input type="checkbox" checked={msgFilter().hideReasoning}
-                            onChange={(e) => updateMsgFilter({ hideReasoning: e.currentTarget.checked })} />
-                          <span>隐藏思考过程（reasoning）</span>
-                        </label>
-                        <label class="filter-menu-item">
-                          <input type="checkbox" checked={msgFilter().hideTodos}
-                            onChange={(e) => updateMsgFilter({ hideTodos: e.currentTarget.checked })} />
-                          <span>隐藏待办工具调用</span>
-                        </label>
-                        <label class="filter-menu-item">
-                          <input type="checkbox" checked={msgFilter().hideInternalTools}
-                            onChange={(e) => updateMsgFilter({ hideInternalTools: e.currentTarget.checked })} />
-                          <span>隐藏内部工具（load_skill 等）</span>
-                        </label>
-                      </div>
-                    </Show>
-                  </div>
-                  {/* 全部展开 / 折叠思考 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: expandAllReasoning() }}
-                    onClick={() => setExpandAllReasoning(v => !v)}
-                    title={expandAllReasoning() ? '折叠所有思考' : '展开所有思考'}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <Show when={expandAllReasoning()} fallback={
-                        <>
-                          <polyline points="6 9 12 15 18 9"/>
-                          <polyline points="6 4 12 10 18 4" opacity="0.4"/>
-                        </>
-                      }>
-                        <polyline points="18 15 12 9 6 15"/>
-                        <polyline points="18 20 12 14 6 20" opacity="0.4"/>
-                      </Show>
-                    </svg>
-                  </button>
-                  {/* 集成终端切换按钮 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showTerminal() }}
-                    onClick={() => {
-                      if (!showTerminal()) {
-                        void addTerminalTab()
-                      } else {
-                        setShowTerminal(v => !v)
-                      }
-                    }}
-                    title="终端 (⌘`)"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
-                    </svg>
-                  </button>
-                  {/* 工作区文件浏览器（预览任意文件） */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showExplorer() }}
-                    onClick={() => setShowExplorer(v => !v)}
-                    title="文件浏览器"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/>
-                    </svg>
-                  </button>
-                  {/* Skills 面板 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showSkillsPanel() }}
-                    onClick={() => setShowSkillsPanel(v => !v)}
-                    title="Skills 技能文档"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M12 2l2.5 7.5H22l-6 4.5 2.5 7.5L12 17l-6.5 4.5L8 14 2 9.5h7.5z"/>
-                    </svg>
-                  </button>
-                  {/* B3: AI 记忆面板 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showMemoryPanel() }}
-                    onClick={() => setShowMemoryPanel(v => !v)}
-                    title="AI 记忆（跨会话偏好/约定）"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M9 12l2 2 4-4"/>
-                      <path d="M21 12c.552 0 1.005-.45.95-1A10 10 0 0 0 12 2c-5.523 0-10 4.477-10 10 0 5.523 4.477 10 10 10a10 10 0 0 0 9-5.95c.05-.55-.398-1-.95-1z"/>
-                    </svg>
-                  </button>
-                  {/* B4: 项目知识库面板 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showCodebasePanel() }}
-                    onClick={() => setShowCodebasePanel(v => !v)}
-                    title="项目知识库（架构 / 模块 / API 索引）"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <polyline points="16 18 22 12 16 6"/>
-                      <polyline points="8 6 2 12 8 18"/>
-                    </svg>
-                  </button>
-                  {/* B5: 浏览器预览面板 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showBrowserPanel() }}
-                    onClick={() => setShowBrowserPanel(v => !v)}
-                    title="浏览器预览（dev server / localhost）"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="12" cy="12" r="10"/>
-                      <line x1="2" y1="12" x2="22" y2="12"/>
-                      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-                    </svg>
-                  </button>
-                  {/* K-Pet: 桌面豹子宠物 —— 暂屏蔽（等动效素材完成后再启用） */}
-                  <Show when={false}>
-                    <button
-                      class="icon-btn"
-                      classList={{ active: petVisible() }}
-                      onClick={() => void togglePet()}
-                      title="桌面豹子（agent 状态指示宠物）"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M6 6 L4.5 3.5 L8.5 5 Z" />
-                        <path d="M18 6 L19.5 3.5 L15.5 5 Z" />
-                        <circle cx="12" cy="13" r="6.5" />
-                        <circle cx="9.7" cy="12" r="0.7" fill="currentColor" />
-                        <circle cx="14.3" cy="12" r="0.7" fill="currentColor" />
-                        <path d="M11 15 L12 16 L13 15" />
-                      </svg>
-                    </button>
-                  </Show>
-                  {/* B2: MCP 工具索引面板 — 插头图标，象征"插入外部工具" */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showMcpPanel() }}
-                    onClick={() => setShowMcpPanel(v => !v)}
-                    title="MCP 工具索引（已挂载 server / 工具列表 / 语义搜索）"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M9 2v6"/>
-                      <path d="M15 2v6"/>
-                      <path d="M6 8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>
-                      <path d="M12 17v5"/>
-                    </svg>
-                  </button>
-                  {/* B1: 子代理任务编排面板 — 网络分支图标，象征"父代理派生多个子代理" */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showSubagentPanel() }}
-                    onClick={() => setShowSubagentPanel(v => !v)}
-                    title="子代理任务编排（task() 派出的并行子代理）"
-                    style="position:relative"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <circle cx="12" cy="4" r="2"/>
-                      <circle cx="5" cy="20" r="2"/>
-                      <circle cx="19" cy="20" r="2"/>
-                      <path d="M12 6v3"/>
-                      <path d="M12 9l-7 9"/>
-                      <path d="M12 9l7 9"/>
-                    </svg>
-                    <Show when={subagentRecords().filter(r => r.status === 'running').length > 0}>
-                      <span class="file-badge" style="background:#3b82f6;color:#fff">
-                        {subagentRecords().filter(r => r.status === 'running').length}
-                      </span>
-                    </Show>
-                  </button>
-                  {/* 变更记录按钮（有变更时显示角标），点击在右侧打开 */}
-                  <button
-                    class="icon-btn"
-                    classList={{ active: showFileTree() }}
-                    onClick={() => setShowFileTree(v => !v)}
-                    title="变更记录"
-                    style="position:relative"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                    </svg>
-                    <Show when={changedFiles().size > 0}>
-                      <span class="file-badge"><AnimatedNumber value={changedFiles().size} duration={300} /></span>
-                    </Show>
-                  </button>
-                </div>
+                {/* K-RightTabBar (v0.2.24)：所有功能按钮（11 个面板 + 终端 + 展开思考）
+                    均已迁移到右侧竖向 tab 条，chat-header-right 不再需要。 */}
               </div>
 
               <Show when={sending()}>
@@ -5224,6 +5048,48 @@ export default {
               />
             </Show>
           </div>
+
+          {/* K-RightTabBar (v0.2.24)：常驻右侧 40px 竖向 tab 条，管 11 个功能面板
+              的互斥单开（任意时刻最多一个面板）。顶部独立"展开思考"快捷动作。 */}
+          <RightTabBar
+            active={activeRightPanel}
+            onToggle={toggleRightPanel}
+            expandAllReasoning={expandAllReasoning}
+            onToggleExpandAll={() => setExpandAllReasoning(v => !v)}
+            terminalActive={showTerminal}
+            onToggleTerminal={() => {
+              if (!showTerminal()) {
+                void addTerminalTab()
+              } else {
+                setShowTerminal(v => !v)
+              }
+            }}
+            contextBadge={() => (contextFiles().length + attachedImages().length) || null}
+            subagentBadge={() => subagentRecords().filter(r => r.status === 'running').length || null}
+            filetreeBadge={() => changedFiles().size || null}
+          />
+
+          {/* 消息过滤浮层（点击 RightTabBar 的 filter tab 显示，挂在 app-shell 层） */}
+          <Show when={showFilterMenu()}>
+            <div class="filter-menu filter-menu-rightbar" onClick={(e) => e.stopPropagation()}>
+              <div class="filter-menu-title">消息过滤</div>
+              <label class="filter-menu-item">
+                <input type="checkbox" checked={msgFilter().hideReasoning}
+                  onChange={(e) => updateMsgFilter({ hideReasoning: e.currentTarget.checked })} />
+                <span>隐藏思考过程（reasoning）</span>
+              </label>
+              <label class="filter-menu-item">
+                <input type="checkbox" checked={msgFilter().hideTodos}
+                  onChange={(e) => updateMsgFilter({ hideTodos: e.currentTarget.checked })} />
+                <span>隐藏待办工具调用</span>
+              </label>
+              <label class="filter-menu-item">
+                <input type="checkbox" checked={msgFilter().hideInternalTools}
+                  onChange={(e) => updateMsgFilter({ hideInternalTools: e.currentTarget.checked })} />
+                <span>隐藏内部工具（load_skill 等）</span>
+              </label>
+            </div>
+          </Show>
         </div>
       </Show>
 

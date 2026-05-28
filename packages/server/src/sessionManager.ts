@@ -174,6 +174,39 @@ export class SessionManager {
 		return this._codebaseIndex;
 	}
 
+	/**
+	 * K-RepoMap (v0.2.24, from jiusi 0.6.3)：在 runAgentLoop 入口调一次，
+	 * 检查 codebase index snapshot 是否需要重建。
+	 *
+	 * 策略：
+	 *   - snapshot 不存在 → 全量重建
+	 *   - snapshot 存在但 lastIndexedAt > 24h → 增量重建
+	 *   - 否则跳过
+	 *
+	 * 重建走 fire-and-forget（不 await，不阻塞主对话）。重建期间 buildRepoMapDigest
+	 * 仍能读到旧 snapshot，对话照常进行；下次进会话时新 snapshot 已落地。
+	 *
+	 * 设计取舍：jiusi 0.6.3 曾用 chokidar 实时监听项目文件变化触发重建，但在大项目
+	 * （node_modules 多、磁盘共享、网络盘）会让客户端"没反应"，最终回退到这种
+	 * "每会话入口检查 24h staleness + 后台重建"的轻量方案。我们采用同样路径。
+	 */
+	async ensureCodebaseIndex(workspaceId: string, workspacePath: string): Promise<void> {
+		try {
+			const snap = await this._codebaseIndex.getSnapshot(workspaceId);
+			const STALE_MS = 24 * 60 * 60 * 1000;
+			const stale = !snap || (Date.now() - snap.lastIndexedAt > STALE_MS);
+			if (!stale) return;
+			const reason = !snap ? '首次建索引' : `snapshot 超过 24 小时未刷新`;
+			console.log(`[codebase] ws=${workspaceId.slice(0, 8)} 触发后台重建（${reason}）`);
+			// fire-and-forget：不 await，不阻塞主线程
+			void this._codebaseIndex
+				.rebuild(workspaceId, workspacePath, { incremental: !!snap })
+				.catch(e => console.warn('[codebase] 后台重建失败:', (e as Error).message));
+		} catch (e) {
+			console.warn('[codebase] ensureCodebaseIndex 异常:', (e as Error).message);
+		}
+	}
+
 	// ─── 初始化 ─────────────────────────────────────────────────────────────
 
 	/**
@@ -429,6 +462,42 @@ export class SessionManager {
 		const db = getDb();
 		// ON DELETE CASCADE 会自动删除 messages 和 history_entries
 		db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+	}
+
+	/**
+	 * K-Clear (v0.2.24)：清空会话内容但保留会话本身（供 /clear 命令用）。
+	 *
+	 * 删除：
+	 *   - messages 表中该 sessionId 的所有 UI 消息
+	 *   - history_entries 表中该 sessionId 的所有 API 对话历史（**关键**——下次发
+	 *     消息时 sidecar 不会再带旧上下文喂给 LLM）
+	 *   - FileTime 文件时间跟踪
+	 *
+	 * 保留：
+	 *   - sessions 表中该会话行（title / workspacePath / mode / 等），可继续聊
+	 *   - runtime（pendingApprovals / subscribers）—— 用户可能在清空时 SSE 还连着
+	 *
+	 * 修复 bug：之前 /clear 只清前端 messages signal，server 历史还在 → AI"记得"
+	 * 之前对话。
+	 */
+	async clearSessionContent(id: string): Promise<{ deletedMessages: number; deletedHistory: number }> {
+		const db = getDb();
+		const before1 = (db.prepare('SELECT COUNT(*) AS c FROM messages WHERE session_id = ?').get(id) as { c: number }).c;
+		const before2 = (db.prepare('SELECT COUNT(*) AS c FROM history_entries WHERE session_id = ?').get(id) as { c: number }).c;
+		const txn = db.transaction(() => {
+			db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
+			db.prepare('DELETE FROM history_entries WHERE session_id = ?').run(id);
+			// 重置 token 用量
+			db.prepare(
+				'UPDATE sessions SET input_tokens = 0, output_tokens = 0, message_count = 0, updated_at = ? WHERE id = ?'
+			).run(Date.now(), id);
+		});
+		txn();
+		try {
+			const { FileTime } = await import('@maxian/core/file/FileTime');
+			FileTime.clearSession(id);
+		} catch { /* ignore */ }
+		return { deletedMessages: before1, deletedHistory: before2 };
 	}
 
 	// ─── SSE 订阅 ─────────────────────────────────────────────────────────

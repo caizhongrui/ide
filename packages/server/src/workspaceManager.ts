@@ -119,7 +119,9 @@ export class WorkspaceManager {
 	}
 
 	private recordChange(wsId: string, wsPath: string, absPath: string, kind: 'added' | 'removed'): void {
-		const rel = path.relative(wsPath, absPath);
+		// K-Win：归一化为 POSIX 风格 '/'，跟 listFiles() 输出格式一致，否则 Windows 上
+		// 前端 wsFileCache 既有 '\' 又有 '/' 路径，去重 Set 会出双份。
+		const rel = path.relative(wsPath, absPath).split(path.sep).join('/');
 		// 排除工作区外（chokidar 偶尔会推出 root 路径自身）
 		if (!rel || rel.startsWith('..')) return;
 		let pending = this.pendingByWs.get(wsId);
@@ -270,7 +272,11 @@ export class WorkspaceManager {
 			if (entry.name.startsWith('.')) continue;
 			if (WorkspaceManager.IGNORED_DIRS.has(entry.name)) continue;
 			const full = path.join(current, entry.name);
-			const rel = path.relative(root, full);
+			// K-Win (v0.2.24)：path.relative() 在 Windows 返回反斜杠 (a\b\c.java)，
+			// 前端的 buildFileTree() 用 '/'.split() 切路径建树会失败，导致整个文件
+			// 列表在 Windows 上变成一长串扁平节点（看不到树形结构）。
+			// 统一归一化为 POSIX 风格 '/'，与 listFiles() 全链路约定一致。
+			const rel = path.relative(root, full).split(path.sep).join('/');
 			if (entry.isDirectory()) {
 				await this.walkDir(root, full, out, depth + 1, maxDepth);
 			} else {
