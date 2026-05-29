@@ -10,8 +10,7 @@ description: 当用户已经确认了一个实施计划（来自 writing-plans �
 满足**任一**时调用：
 
 1. 用户已经认可一份实施计划，说"开始做"
-2. Plan 模式切到 Code 模式，准备落地
-3. 收到一份多步任务列表（编号清单）
+2. 收到一份多步任务列表（编号清单），准备落地
 
 ## 核心原则
 
@@ -23,23 +22,29 @@ description: 当用户已经确认了一个实施计划（来自 writing-plans �
 
 ## 执行流程
 
-### 第 1 步：复述计划
+### 第 1 步：用 `plan_exit` 工具呈现计划等待审批
 
-开始前把当前要做的步骤**列给用户**，让用户确认：
+不要把计划塞进 chat text 然后等用户口头说 "好"。码弦 提供 `plan_exit` 工具:调用后会弹窗给用户审批,**审批前 dispatcher 强制冻结所有写入工具(edit / apply_patch / bash 等)**,所以你不会"偷跑"。
 
-```markdown
-我即将按以下顺序执行：
+```text
+调用 plan_exit,payload 例如:
+
+我即将按以下顺序执行:
 
 1. 在 src/foo.ts 新增 parseX 函数
 2. 在 src/bar.ts 调用 parseX 替代 inline 逻辑
 3. 添加 tests/foo.test.ts 单元测试
 
-每步完成后我会跑 typecheck，确认无误再进入下一步。
+每步完成后我会跑 typecheck,确认无误再进入下一步。
 ```
 
-**等用户说 "好"** 再开干。如果用户没看到计划就动手，AI 容易跑偏。
+用户在弹窗点"批准"后,写入工具自动解锁,继续第 2 步。
 
 ### 第 2 步：逐步执行（**关键**）
+
+#### 2.0 用 `todo_write` 建立 todo 列表
+
+进入第 2 步前,调用 `todo_write` 工具把计划里的每个步骤建成一条 todo。码弦 前端会渲染 todo 列表,用户可以实时看到进度;执行中每完成一步就再次 `todo_write` 把对应项标为 completed。
 
 #### 2.1 在新一步开始时
 
@@ -79,18 +84,18 @@ description: 当用户已经确认了一个实施计划（来自 writing-plans �
 
 1. **不要硬着头皮按计划做**
 2. 立即停下来告诉用户：
+   用 `question` 工具呈现选项,让用户一键点选(不要在 chat 里写 "A/B" 让用户文字回答):
+   ```json
+   {
+     "question": "步骤 2 遇到偏差:计划假设 src/bar.ts 里有 inline parseX 逻辑,但实际看到 src/bar.ts:45 调用的是已存在的 utils/parse.ts。怎么处理?",
+     "options": [
+       "A. 修改 utils/parse.ts 直接增强(更小改动)",
+       "B. 按原计划新建 parseX 然后让 utils/parse.ts 调它"
+     ],
+     "multiple": false
+   }
    ```
-   ⚠️ 步骤 2 遇到偏差：
-   计划假设 src/bar.ts 里有 inline parseX 逻辑，
-   但实际看到 src/bar.ts:45 调用的是已存在的 utils/parse.ts。
-   
-   两种处理方案：
-   A. 修改 utils/parse.ts 直接增强（更小改动）
-   B. 按原计划新建 parseX 然后让 utils/parse.ts 调它
-   
-   你想走哪个？
-   ```
-3. 等用户决策再继续
+3. 等用户在按钮上选择,再继续
 
 ### 第 4 步：全部完成后总结
 

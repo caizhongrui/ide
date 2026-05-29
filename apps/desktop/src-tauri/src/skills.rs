@@ -16,8 +16,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-/// 标志位文件版本号 —— 当 manifest 增减 core skill 时 +1，会触发新增的 skill 补装
-const INSTALLED_FLAG_VERSION: u32 = 1;
+/// 标志位文件版本号 —— 当 manifest 增减 core skill **或更新内置 skill 内容**时 +1，
+/// 触发重装。注意：升级时 auto_install 用 overwrite=true 覆盖旧内置 skill，
+/// 确保用户拿到最新版（如本次对齐 jiusi 的中文/交互优化）。
+/// v2: 同步 jiusi 中文优化（question 逐个发问 + options、todo_write 分阶段等）。
+const INSTALLED_FLAG_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SkillEntry {
@@ -179,7 +182,9 @@ pub fn auto_install_core_skills_on_first_launch(app: &AppHandle) {
             continue;
         }
         for skill in &group.skills {
-            match install_one(&bundled_dir, skill, &target_dir, false) {
+            // overwrite=true：版本升级时覆盖旧内置 skill（maxian-builtin/ 是内置目录，
+            // 用户自定义技能应放 ~/.maxian/skills/ 根或 .claude/skills/，不受影响）。
+            match install_one(&bundled_dir, skill, &target_dir, true) {
                 Ok(true) => installed_count += 1,
                 Ok(false) => skipped_count += 1,
                 Err(e) => eprintln!("[skills] 安装 {} 失败: {}", skill.id, e),

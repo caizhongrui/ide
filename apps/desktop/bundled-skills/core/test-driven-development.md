@@ -24,6 +24,8 @@ description: 当用户说"写测试 / 加单元测试 / 测试一下 / 我要 TD
 
 ## 完整流程
 
+> **提示**:多个测试用例的 TDD 循环建议先调用 `todo_write` 工具建立 todo 列表(每个用例一条:"用例 X — RED/GREEN/REFACTOR"),执行中实时勾选,方便前端展示进度。
+
 ### 第 0 步：选定"一个"行为
 
 不要一次写 10 个测试。**一次只做一个测试用例**。
@@ -38,7 +40,7 @@ description: 当用户说"写测试 / 加单元测试 / 测试一下 / 我要 TD
 
 ```ts
 // parseDate.test.ts
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect } from 'vitest';
 import { parseDate } from './parseDate.js';
 
 describe('parseDate', () => {
@@ -146,11 +148,11 @@ it('xxx', () => {
 
 | 项目类型 | 测试框架 |
 |---|---|
-| Bun + TS | `bun:test`（内置） |
+| **码弦(pnpm workspace + TS)** | **`vitest`**(注意:部分子包未安装 vitest,需先看子包 `package.json`) |
 | Node + TS | `vitest` 或 `jest` |
 | Java + Maven | `JUnit 5` + `Mockito` |
 | Python | `pytest` |
-| Rust | `cargo test`（内置） |
+| Rust | `cargo test`(内置) |
 
 ## 与其他技能的关系
 

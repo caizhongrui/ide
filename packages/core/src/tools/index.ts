@@ -56,6 +56,9 @@ export * from './ToolResultCache.js';
 // 循环检测
 export * from './ToolRepetitionDetector.js';
 
+// 工具调用参数修复（截断 JSON 补全，B2）
+export * from './repairToolCall.js';
+
 // 各工具实现
 export * from './readFileTool.js';
 export * from './writeToFileTool.js';

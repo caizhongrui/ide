@@ -5,6 +5,10 @@ description: 当一个功能分支 / 任务分支即将合入 main 或被废弃�
 
 # 收尾开发分支 — 合并、清理、归档
 
+> ⚠️ **码弦项目提示**:码弦是**单一 git 仓库的 pnpm monorepo**(根目录即仓库根),`packages/*`(core / server / sdk / ui 等)与 `apps/*`(desktop / web 等)同处一个仓库。
+> - git 命令在仓库根目录执行即可
+> - 一个功能即使跨多个包,也**走一次收尾流程**(统一 rebase / merge / 删分支)
+
 ## 适用场景
 
 满足**任一**时调用：
@@ -21,6 +25,16 @@ description: 当一个功能分支 / 任务分支即将合入 main 或被废弃�
 收尾 = 把脏活累活做完，让 main 始终保持「干净 + 可发布」。
 
 ## 收尾决策树
+
+先用 `question` 工具问用户走哪条路(不要在 chat 里写"合并 / 废弃"让用户文字回答):
+
+```json
+{
+  "question": "这个分支怎么处理?",
+  "options": ["合并进 main", "废弃(已经不需要)"],
+  "multiple": false
+}
+```
 
 ```
 功能分支完成
@@ -55,6 +69,20 @@ git rebase origin/main
 - **解决冲突后必须重跑 typecheck / test**——rebase 后代码可能编译不过
 
 ### 第 3 步：选合并策略
+
+用 `question` 工具让用户一键选(不要让用户文字输入"squash"):
+
+```json
+{
+  "question": "用哪种合并策略?",
+  "options": [
+    "Squash merge — 多次 commit 但只是同一件事的迭代(推荐)",
+    "Rebase merge — 每个 commit 都有独立意义",
+    "Merge commit — 想保留分支历史结构(不推荐)"
+  ],
+  "multiple": false
+}
+```
 
 | 策略 | 适用 | 命令 |
 |---|---|---|

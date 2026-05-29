@@ -12,7 +12,6 @@ description: 在你（AI）准备说"我已完成 / 修好了 / 已实现"之前
 - "Bug 修复完成"
 - "功能已上线"
 - "代码已提交"
-- 调用 `attempt_completion` 工具之前
 
 ## 核心原则
 
@@ -34,6 +33,9 @@ LLM 倾向于"输出完成结论"显得高效，但用户拿到的代码可能�
 | 项目类型 | 命令 | 必须 |
 |---|---|---|
 | TypeScript | `pnpm typecheck` 或 `tsc --noEmit` | ✅ 0 错误 |
+
+> **码弦工程注意**:码弦是 pnpm workspace 多包结构,根目录跑 `pnpm typecheck` 不会递归到所有子包;用 `pnpm --filter @maxian/<包名> run typecheck`(如 `@maxian/core` / `@maxian/server` / `@maxian/desktop`)按包运行,部分子包可能未配置 typecheck 脚本。
+
 | Rust | `cargo check` | ✅ 0 错误（warning 可接受） |
 | Java | `mvn compile` 或 `mvn test-compile` | ✅ 0 错误 |
 | Python (有类型) | `mypy .` 或 `pyright` | ✅ 0 错误 |
@@ -45,11 +47,13 @@ LLM 倾向于"输出完成结论"显得高效，但用户拿到的代码可能�
 
 | 类型 | 命令 |
 |---|---|
-| 单元测试 | `pnpm test` / `bun test` / `mvn test` / `pytest` |
+| 单元测试 | `pnpm test`(码弦用 vitest)/ `mvn test` / `pytest` |
 | 集成测试 | 如果项目有 |
 | Lint | `pnpm lint` 如果项目有 |
 
 至少**新加的功能 / 修过的 bug 有测试覆盖**。
+
+> **码弦工程注意**:测试框架是 **vitest**(不是 bun:test);pnpm workspace 中**部分包未安装 vitest**,跑测试前先 `cat package.json` 确认 `scripts.test` 存在;或用 `pnpm --filter` 按包跑。
 
 ### C. 手动 smoke test
 
@@ -90,6 +94,8 @@ LLM 倾向于"输出完成结论"显得高效，但用户拿到的代码可能�
 - `git status` 看一遍，没有意外文件
 - 没有提交 secrets / `.env` / 大二进制
 - diff 自己看一遍，没有 typo / 注释里的 TODO 没清掉
+
+> **码弦工程注意**：码弦是单一 git 仓库的 pnpm monorepo（根目录即仓库根）。在仓库根目录检查 git 状态即可；改动可能跨多个包，统一 commit。
 
 ## 输出格式
 

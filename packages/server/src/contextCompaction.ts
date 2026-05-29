@@ -90,11 +90,33 @@ const TOOL_KEEP_POLICY: Record<string, number> = {
 };
 const TOOL_KEEP_DEFAULT = 2;
 
-/** 估算一段 string/JSON 内容的 token 数（粗略 ~4 chars/token） */
+/**
+ * 估算一段 string/JSON 内容的 token 数。
+ *
+ * C2：区分 CJK 与非 CJK。DeepSeek / Qwen tokenizer 下中文约 1 字 ≈ 1 token，
+ * 而英文/代码约 4 字符 ≈ 1 token。旧实现统一 `length/4` 会把中文当 0.25 token/字，
+ * 对中文会话**严重低估**（偏差可达 ~4x）→ 实际上下文早已逼近/超出窗口但估算值偏小，
+ * 压缩触发过晚、token 预算失准。这里按字符类别分别折算，CJK 取 0.75 token/字（折中），
+ * 非 CJK 维持 4 字符/token。纯字符串计算、无外部依赖。
+ */
 export function estimateTokens(content: unknown): number {
 	if (content == null) return 0;
 	const str = typeof content === 'string' ? content : JSON.stringify(content);
-	return Math.ceil(str.length / 4);
+	let cjk = 0;
+	for (let i = 0; i < str.length; i++) {
+		const code = str.charCodeAt(i);
+		// CJK 统一表意(含扩展A)/假名/谚文/兼容表意/全角标点
+		if (
+			(code >= 0x3000 && code <= 0x9fff) ||
+			(code >= 0xac00 && code <= 0xd7a3) ||
+			(code >= 0xf900 && code <= 0xfaff) ||
+			(code >= 0xff00 && code <= 0xffef)
+		) {
+			cjk++;
+		}
+	}
+	const nonCjk = str.length - cjk;
+	return Math.ceil(cjk * 0.75 + nonCjk / 4);
 }
 
 /** 估算整个 history 的 token 数（含 system prompt 估算） */

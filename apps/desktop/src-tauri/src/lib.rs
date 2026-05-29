@@ -37,6 +37,8 @@ fn read_env_or_default(key: &str, default: &str) -> String {
 }
 
 /// K-Port：从 start 起最多试 50 个端口找空闲的。返回 None 表示全部被占。
+/// v0.2.28 起改为固定端口策略（不再让步换端口），此函数保留备用、暂不调用。
+#[allow(dead_code)]
 fn find_free_port(start: u16) -> Option<u16> {
     use std::net::TcpListener;
     for offset in 0..50u16 {
@@ -250,31 +252,24 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         std::thread::sleep(Duration::from_millis(600));  // 等端口释放再 bind
     }
 
-    // K-Port：端口被别的服务占（如其他 Node dev server 抢了 51847）→ 自动找空闲端口
-    // jiusi 0.7.1 经验：用户多端开发常撞这种冲突，自动让步比报错强。
+    // 固定端口策略（v0.2.28）：**不再** K-Port 让步换端口。
+    // 原因：让步后 sidecar 实际端口与前端探测端口（拿不到 server_info 时 fallback 51847）不一致，
+    // Windows 上高发——前端探 51847、sidecar 在 51848 → /health 连不上 → "启动失败"。
+    // 改为：端口被占时强杀占用进程（netstat/taskkill on Win，lsof/kill on unix），固定复用 51847。
+    // 宁可端口固定可预测（前后端永远一致、报错端口可信），也不悄悄换端口制造不一致。
     let configured_port: u16 = configured.parse().unwrap_or(51847);
-    let port_num: u16 = {
+    {
         use std::net::TcpListener;
-        if TcpListener::bind(("127.0.0.1", configured_port)).is_ok() {
-            configured_port
-        } else {
-            match find_free_port(configured_port.saturating_add(1)) {
-                Some(p) => {
-                    eprintln!(
-                        "[maxian-desktop] ⚠️ 端口 {} 被占用，自动改用空闲端口 {}",
-                        configured_port, p
-                    );
-                    p
-                }
-                None => {
-                    return Err(format!(
-                        "找不到空闲端口（从 {} 起试了 50 个都被占）",
-                        configured_port
-                    ));
-                }
-            }
+        if TcpListener::bind(("127.0.0.1", configured_port)).is_err() {
+            eprintln!(
+                "[maxian-desktop] 端口 {} 被占用，强杀占用进程后固定复用该端口（不让步换端口）",
+                configured_port
+            );
+            kill_process_on_port(&configured);
+            std::thread::sleep(Duration::from_millis(600)); // 等端口释放再 bind
         }
-    };
+    }
+    let port_num: u16 = configured_port;
     let port = port_num.to_string();
 
     // 把实际端口写入 state，供 server_info / 前端读取

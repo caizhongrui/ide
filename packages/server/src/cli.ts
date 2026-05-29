@@ -143,7 +143,7 @@ import type {
 	MaxianPlatform,
 } from '@maxian/core';
 import type { IToolExecutor } from '@maxian/core/tools';
-import { getTodoWriteList } from '@maxian/core/tools';   // 自动续跑：读会话 todo 状态判断是否还有未收尾项
+import { getTodoWriteList, repairTruncatedJson } from '@maxian/core/tools';   // 自动续跑 + 工具参数截断修复(B2)
 import type { MessageParam, ToolDefinition, ContentBlock } from '@maxian/core/api';
 
 // ─── CLI 参数 ─────────────────────────────────────────────────────────────────
@@ -2779,7 +2779,7 @@ async function main() {
 
 		if (skills.length === 0) return '';
 		const lines = skills.map(s => `- **${s.name}** (${s.source}): ${s.description || '无描述'}`).join('\n');
-		return `\n\n====\n\nAVAILABLE SKILLS（可用技能文档）\n\n你可以通过 \`load_skill\` 工具按需加载这些专业技能文档：\n\n${lines}\n\n**重要**：当任务属于某个技能覆盖的领域时，**务必**先 load_skill 读取对应文档再动手。`;
+		return `\n\n====\n\nAVAILABLE SKILLS（可用技能 — 行动前必须先对照）\n\n下面每条是一个可用 \`load_skill\` 加载的专业技能，名称后**括号里是来源、冒号后是它的适用场景**：\n\n${lines}\n\n**强制纪律（通用，不针对某个具体技能）**：\n- **任何任务动手前，先扫一遍上面这张表**。只要某条技能的「适用场景」跟当前任务沾边（哪怕只有几分可能），就**先 \`load_skill\` 加载它、按它的方法论去做**，再开始写代码 / 调用其他工具 / 输出计划。\n- "怎么做"类任务尤其要先查表，例如：需求模糊待澄清、排查 bug、写测试、做实施计划、代码审查、分支收尾——**别凭直觉硬上**，这些通常都有对应技能。\n- 一个任务可能先后用到多个技能（如先澄清需求 → 再做计划 → 最后验证），按需逐个加载。\n- ⚠️ 判断"该不该加载"**完全依据每条自己的「适用场景」描述**——这条规则对**以后新增的任何技能同样生效**，无需在别处逐一点名。拿不准就 load 一下看看，加载是廉价的。`;
 	}
 
 	// ═════════════════════════════════════════════════════════════════════
@@ -2891,19 +2891,26 @@ HARD RULES
 5. **工具失败后**：禁止立即用相同参数重试；下一步必须是 read_file 或 search_files 验证当前真实状态
 6. **编译/类型错误**：先 read_file 错误行 ±5 行，不要只看错误消息就改
 7. **禁止废话**：不要复述将要写的代码，不要以问题结尾
-8. **🔥 todo 收尾强制**：调 attempt_completion **之前**，必须先用一次 todo_write 把所有 todo 项目处理完毕：
+8. **🔥 todo 收尾强制**：准备结束本轮、**不再调用任何工具**（停止调用工具即视为任务完成）之前，必须先用一次 todo_write 把所有 todo 项目处理完毕：
    - 真做完了的 → status = "completed"
-   - 决定不做（用户没要求/不必要/超出范围）→ status = "cancelled"
-   - **不允许**留任何 in_progress 或 pending 的项目就调 attempt_completion
+   - 决定不做（用户没要求/不必要/超出范围）→ **从 todo 列表中移除该项**：todo_write 是全量替换，下次不包含它即可。⚠️ status 只有 \`pending\` / \`in_progress\` / \`completed\` 三个合法值，**没有 cancelled**，写 "cancelled" 会被直接拒绝、本轮工具失败
+   - **不允许**留任何 in_progress 或 pending 的项目就停止调用工具、结束本轮
    - 否则前端会显示 "X/Y（AI 提前结束，N 项未完成）"，用户视为任务失败
    - **🔥 执行纪律（防空转 / 防反复规划）**：3 步以上任务只需 todo_write 规划**一次**，之后**严禁反复"重新了解项目 / 重新规划"**；严格按清单顺序逐项推进——开始某项**前**先 todo_write 标它 in_progress（同时只能 1 个 in_progress），做完**立刻**标 completed 再开下一项；每轮系统会在 \`<current_todos>\` 里给你实时进度，以它为准照着往下做；**禁止连续多轮只 read_file/list_files 探索而不 edit/write**——缺什么读什么，读完立即动手改
 
 9. **🔥 完成前必须验证（Verify-before-done）**：声明任务"完成 / 修好 / done / 实现完毕"之前，必须满足以下至少一项作为客观证据：
    - **a) PostToolUse hook 全过**：edit/write 后 .maxian/config.json 配置的 hook（如 tsc --noEmit）退出码 0
    - **b) 显式跑过验证命令**：最近 1 轮内有 bash 或 execute_command 工具调用，结果显示 PASS（typecheck/build/test/lint 任一通过）
-   - **c) 任务范围内 todos 全 completed/cancelled**（且任务不涉及代码运行验证）
+   - **c) 任务范围内 todos 全 completed**（决定不做的项已从列表移除；且任务不涉及代码运行验证）
    - 都不满足 → **不要**说"完成了"，要么自己跑验证，要么明确告知用户"已写完未验证，建议你跑一次 X"
    - 严禁"我已经修好了"+ 实际没跑过 build/test 这种假完成
+
+10. **🔥 负面断言先验证**：在说"X 不存在 / 没有这个文件 / 找不到这个函数 / 没有定义 / 项目里没有"之前，**必须先用 search_files（regex）或 glob 或 list_files 实际查过**；严禁凭记忆或猜测下负面结论。未经验证的负面断言是严重错误——会误导用户、导致重复造轮子。验证后再下结论。
+
+11. **意图门槛（先判断要不要动文件）**：
+   - 用户只是**分析 / 解释 / 审查 / 提问 / 对比**（如"看看""分析下""为什么""是不是""怎么处理""讲讲"）→ **默认只读、不编辑任何文件**，给出结论即可
+   - 只有用户**明确要求修改 / 实现 / 修复 / 新增 / 重构**时，才编辑文件
+   - 拿不准是"问"还是"做"时，先用一句话确认意图，**不要擅自改代码**
 
 ====
 
@@ -2925,9 +2932,16 @@ TOOL SELECTION
 - 你没 read_file 就想 write_to_file 覆盖 → 拦截
 - 新内容删除行数远大于新增 → 拦截（防止覆盖用户/他人手改）
 
+**标准编辑作业流（照此节奏走，不要跳步）**：
+1. read_file 完整读目标文件；需要读多个**无依赖**文件 → **同一轮并行**调用 read_file
+2. edit / multiedit：old_string 从刚 read 到的内容**逐字节复制**（含空白/缩进/换行），取最小唯一上下文（通常 2-4 行）；多处匹配就扩上下文或设 replace_all=true
+3. 改完若 .maxian 配了 hook 或有可跑的验证命令 → execute_command 跑一次 tsc/build/test 确认通过
+4. edit 报 "not found" 或 "多处匹配" → **绝不原样重试**：先 read_file 看当前真实内容，再据此调整 old_string 或设 replace_all=true 后重试
+
 ====
 
 PLAN-FIRST 强制清单（满足任一项 → 必须先调 plan_exit 输出计划等用户确认 → 再开始 edit）
+（注意：进入本清单前，先按上面 AVAILABLE SKILLS 的纪律对照技能列表 —— 需求不清就先用对应技能澄清，需求清楚了才来做计划）
 
 1. **新增功能** —— "实现/添加 X 功能"、"做一个 X 模块"、"加上 X"
 2. **跨多文件修改** —— 预估要改 ≥ 3 个文件
@@ -3444,7 +3458,16 @@ OBJECTIVE
 			const activeTools = buildActiveTools();
 			// B2/B3: 每轮重算 final system prompt（拼上 mcp section + memory section）
 			const memorySuffix = await buildMemorySuffix();
-			const finalSystemPrompt = finalSystemPromptBase + buildMcpSuffix() + memorySuffix + buildTodoReminderSuffix();
+			// C1 cache-first：system prompt 只保留**稳定**部分（静态 prompt + MCP 工具说明），
+			// 把每轮必变的「记忆召回 + todo 进度提醒」从 system 末尾移到本轮 history 尾部的临时提醒消息。
+			// 原因：system 是 DeepSeek 前缀缓存的最前缀，只要它逐轮变化，整个 system+history 前缀缓存全部失效
+			//       （cached token 价≈未命中 1/10，长会话成本/延迟显著上升）。移到 history 尾后，前缀稳定、
+			//       仅末尾一条小提醒不命中。临时消息只用于本次 createMessage，不写入持久 history。
+			const finalSystemPrompt = finalSystemPromptBase + buildMcpSuffix();
+			const __ephemeralReminder = (memorySuffix + buildTodoReminderSuffix()).trim();
+			const historyForCall = __ephemeralReminder
+				? [...history, { role: 'user' as const, content: __ephemeralReminder }]
+				: history;
 
 			// ── 空转打断：连续多轮只读探索、不推进 todo → 注入催促 user 消息，逼它动手 ──
 			if (consecutiveExploreOnly >= EXPLORE_DRIFT_LIMIT && !isChatMode && !isExploreMode && !isPlanMode) {
@@ -3520,7 +3543,7 @@ OBJECTIVE
 			// 注册当前 handler，让 cancelTask 能主动 abort（不用等下一 chunk）
 			__activeStreamHandlers.set(sessionId, handler);
 			try {
-				for await (const chunk of handler.createMessage(finalSystemPrompt, history, activeTools)) {
+				for await (const chunk of handler.createMessage(finalSystemPrompt, historyForCall, activeTools)) {
 					// LLM 流式输出中每一块都检查一次取消（让"结束"按钮秒级生效）
 					if (server.sessionManager.isCancelled(sessionId)) {
 						console.log(`[Agent] LLM 流中检测到取消，中止当前 request`);
@@ -3608,7 +3631,19 @@ OBJECTIVE
 								const params = JSON.parse(chunk.input);
 								toolCalls.push({ id: chunk.id, name: chunk.name, params });
 							} catch (e) {
-								console.warn('[Agent] 解析工具参数失败:', chunk.input, e);
+								// B2 修复：工具参数 JSON 可能被截断（少 } / 断在字符串中 / 悬空 key）→ 先尝试本地补全再决定是否丢弃
+								const __repaired = repairTruncatedJson(chunk.input);
+								if (!__repaired.fallback) {
+									try {
+										const params = JSON.parse(__repaired.repaired);
+										toolCalls.push({ id: chunk.id, name: chunk.name, params });
+										console.warn(`[Agent] 工具参数 JSON 截断已自动修复 (${chunk.name}): ${__repaired.notes.join('; ')}`);
+									} catch (e2) {
+										console.warn('[Agent] 解析工具参数失败(修复后仍失败):', chunk.input, e2);
+									}
+								} else {
+									console.warn('[Agent] 解析工具参数失败(不可修复，已丢弃):', chunk.input, e);
+								}
 							}
 						}
 					} else if ((chunk as any).type === 'reasoning') {
@@ -3681,7 +3716,7 @@ OBJECTIVE
 					// 重试也注册 active handler，让 cancel 期间也能 abort
 					__activeStreamHandlers.set(sessionId, handler);
 					try {
-						for await (const chunk of handler.createMessage(finalSystemPrompt, history, activeTools)) {
+						for await (const chunk of handler.createMessage(finalSystemPrompt, historyForCall, activeTools)) {
 							if (server.sessionManager.isCancelled(sessionId)) {
 								try { await (handler as any).stopCurrentRequest?.(); } catch {}
 								aiError = '[用户取消]';
@@ -3703,7 +3738,11 @@ OBJECTIVE
 								try {
 									const params = JSON.parse(chunk.input);
 									toolCalls.push({ id: chunk.id, name: chunk.name, params });
-								} catch { /* ignore */ }
+								} catch {
+										// B2 修复：重试路径同样修复截断的工具参数 JSON
+										const __r = repairTruncatedJson(chunk.input);
+										if (!__r.fallback) { try { toolCalls.push({ id: chunk.id, name: chunk.name, params: JSON.parse(__r.repaired) }); } catch { /* ignore */ } }
+								}
 							} else if (chunk.type === 'usage') {
 								totalInputTokens  += (chunk as any).inputTokens  ?? 0;
 								totalOutputTokens += (chunk as any).outputTokens ?? 0;
@@ -4577,41 +4616,41 @@ OBJECTIVE
 	// 补加一个 beforeExit 兜底，也能触发端口释放
 	process.on('beforeExit', () => { if (!shuttingDown) void gracefulShutdown('beforeExit'); });
 
-	// O4：Parent-death watcher
-	// Tauri spawn sidecar 时设了 MAXIAN_PARENT_PID + MAXIAN_KILL_ON_PARENT_DEATH=1。
-	// dev 环境用 kill -9 强杀 desktop 主进程时 Tauri CloseRequested handler 不跑、
-	// hard_kill_sidecar 没机会执行 → sidecar 给 init 接管成为僵尸占住 4096 端口。
-	// 解决：sidecar 自己每 3s 探测父进程是否还活，父死了就 graceful shutdown。
-	if (process.env.MAXIAN_KILL_ON_PARENT_DEATH === '1' && process.env.MAXIAN_PARENT_PID) {
-		const parentPid = parseInt(process.env.MAXIAN_PARENT_PID, 10);
-		if (Number.isFinite(parentPid) && parentPid > 0) {
-			console.log(`[Maxian Server] Parent-death watcher 已启用 (parent_pid=${parentPid})`);
-			let parentMissCount = 0;
-			const watchTimer = setInterval(() => {
-				try {
-					// signal 0 = 不发信号，仅探测进程存在
-					process.kill(parentPid, 0);
-					parentMissCount = 0;   // 探到父进程还活着 → 清零
-				} catch (e: any) {
-					// 只有明确 ESRCH（进程确实不存在）才算父进程死了。
-					// ⚠️ Windows / Bun 下 process.kill(pid, 0) 对【活着】的父进程也可能抛
-					// EPERM 等非 ESRCH 错误；若像以前那样裸 catch 一律判死，会导致 sidecar
-					// 启动几秒后被自己误杀（端口变空、前端 /health 连不上、"启动失败"）。
-					// 宁可父真死后 sidecar 残留（交由 Tauri CloseRequested / 下次启动杀残留清理），也不误杀。
-					if (e?.code !== 'ESRCH') {
-						return;
-					}
-					// 连续 2 次确认进程不存在才自杀，避免偶发误判
-					if (++parentMissCount < 2) {
-						return;
-					}
-					console.log(`[Maxian Server] 父进程 ${parentPid} 已退出（连续确认），sidecar 自动关闭`);
-					clearInterval(watchTimer);
-					if (!shuttingDown) void gracefulShutdown('parent_death');
-				}
-			}, 3000);
-			// 不阻塞进程退出
-			watchTimer.unref?.();
+	// O4：Parent-death watcher（v0.2.28：改用 stdin EOF，替代不可靠的 process.kill 轮询）
+	// 背景：Tauri spawn sidecar 时设 MAXIAN_KILL_ON_PARENT_DEATH=1。父进程（desktop）若被
+	// kill -9 / 崩溃，Tauri 的 CloseRequested handler 不跑、sidecar 会变僵尸占住端口。
+	// 旧方案每 3s 用 process.kill(parentPid, 0) 探父进程——但 **Bun on Windows 对【活着】的
+	// 父进程也可能抛 ESRCH**，导致 sidecar 启动几秒后被自己误杀（端口变空、/health 连不上、
+	// "启动失败"，Windows 高发，反复出现）。
+	// 新方案：监听 stdin 的 EOF。Tauri 的 CommandChild 持有 sidecar 的 stdin 写端，父进程
+	// 存活期间管道一直开着；父进程一旦死亡，OS 关闭写端 → sidecar 收到 stdin 'end'/'close'。
+	// 这是 OS 级可靠信号，不受 process.kill 在 Windows 上误判的影响。
+	// 防御：① 启动宽限期（前 8s）内收到 EOF 一律忽略——正常使用中父进程不可能在 sidecar 启动
+	//        8s 内就死，此时的 EOF 只可能是管道初始化噪声；忽略后即便 watcher 退化失效，也只是
+	//        变成"残留靠下次启动 kill_process_on_port 清理"，**绝不误杀**（误杀=启动失败，远更严重）。
+	//      ② 只触发一次。
+	if (process.env.MAXIAN_KILL_ON_PARENT_DEATH === '1') {
+		console.log('[Maxian Server] Parent-death watcher 已启用（stdin EOF 模式）');
+		const watcherStartedAt = Date.now();
+		const PARENT_WATCH_GRACE_MS = 8000;
+		let parentGoneHandled = false;
+		const onParentGone = (reason: string): void => {
+			if (parentGoneHandled || shuttingDown) return;
+			if (Date.now() - watcherStartedAt < PARENT_WATCH_GRACE_MS) {
+				console.log(`[Maxian Server] 启动宽限期内收到 stdin ${reason}，忽略（疑似管道初始化噪声，不自杀）`);
+				return;
+			}
+			parentGoneHandled = true;
+			console.log(`[Maxian Server] 父进程断开（stdin ${reason}），sidecar 自动关闭`);
+			if (!shuttingDown) void gracefulShutdown('parent_death');
+		};
+		try {
+			process.stdin.resume();   // 切到 flowing 模式，才能收到 'end'
+			process.stdin.on('end',   () => onParentGone('end'));
+			process.stdin.on('close', () => onParentGone('close'));
+			process.stdin.on('error', () => { /* 忽略 stdin 错误，避免拖垮进程 */ });
+		} catch (e) {
+			console.warn('[Maxian Server] stdin parent-death watcher 启用失败（忽略，不影响运行）:', e);
 		}
 	}
 }
