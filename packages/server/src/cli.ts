@@ -143,6 +143,7 @@ import type {
 	MaxianPlatform,
 } from '@maxian/core';
 import type { IToolExecutor } from '@maxian/core/tools';
+import { getTodoWriteList } from '@maxian/core/tools';   // 自动续跑：读会话 todo 状态判断是否还有未收尾项
 import type { MessageParam, ToolDefinition, ContentBlock } from '@maxian/core/api';
 
 // ─── CLI 参数 ─────────────────────────────────────────────────────────────────
@@ -2895,6 +2896,7 @@ HARD RULES
    - 决定不做（用户没要求/不必要/超出范围）→ status = "cancelled"
    - **不允许**留任何 in_progress 或 pending 的项目就调 attempt_completion
    - 否则前端会显示 "X/Y（AI 提前结束，N 项未完成）"，用户视为任务失败
+   - **🔥 执行纪律（防空转 / 防反复规划）**：3 步以上任务只需 todo_write 规划**一次**，之后**严禁反复"重新了解项目 / 重新规划"**；严格按清单顺序逐项推进——开始某项**前**先 todo_write 标它 in_progress（同时只能 1 个 in_progress），做完**立刻**标 completed 再开下一项；每轮系统会在 \`<current_todos>\` 里给你实时进度，以它为准照着往下做；**禁止连续多轮只 read_file/list_files 探索而不 edit/write**——缺什么读什么，读完立即动手改
 
 9. **🔥 完成前必须验证（Verify-before-done）**：声明任务"完成 / 修好 / done / 实现完毕"之前，必须满足以下至少一项作为客观证据：
    - **a) PostToolUse hook 全过**：edit/write 后 .maxian/config.json 配置的 hook（如 tsc --noEmit）退出码 0
@@ -3073,7 +3075,26 @@ OBJECTIVE
 		mode:          string = 'code',
 		uiMode:        string = 'code',
 	): Promise<string> {
-		const MAX_ITERATIONS = 30;
+		// 迭代预算：per-todo 滚动续期（参照 jiusi）——不再固定次数。
+		// 只要在"完成 todo"就把预算续命；一直空转不推进就早停。比固定 30 更适配任务规模。
+		const GRACE_BUDGET   = 60;    // 没完成任何 todo 前的初始预算（够探索 + 规划）
+		const PER_TODO_QUOTA = 30;    // 每完成一项 todo，从当前轮起再续 30 轮
+		const HARD_CAP       = 400;   // 绝对上限，防真死循环（上下文也会先爆）
+		let   budgetCeiling      = GRACE_BUDGET;
+		let   lastCompletedCount = 0;
+		// 每轮迭代调用：看自上轮以来是否多完成了 todo，有就把预算滚动延长到 iter + PER_TODO_QUOTA
+		const rollBudget = (currentIter: number): number => {
+			try {
+				const completed = getTodoWriteList(sessionId).filter(t => t.status === 'completed').length;
+				if (completed > lastCompletedCount) {
+					budgetCeiling = Math.max(budgetCeiling, currentIter + PER_TODO_QUOTA);
+					console.log(`[Agent] todo 已完成 ${completed} 项，迭代预算续期至 iter=${budgetCeiling}`);
+					lastCompletedCount = completed;
+				}
+			} catch { /* 读不到 todo 就维持当前预算 */ }
+			return Math.min(HARD_CAP, budgetCeiling);
+		};
+		let MAX_ITERATIONS = GRACE_BUDGET;   // 兼容日志/UI 提示，循环条件里每轮由 rollBudget 刷新
 		// 清掉上次遗留的取消标记（这次是新任务启动，不该继承上次的 cancel 状态）
 		server.sessionManager.resetCancelled(sessionId);
 		const ctx            = new NodeToolContext(workspacePath, sessionId);
@@ -3105,6 +3126,17 @@ OBJECTIVE
 		let   totalToolCalls    = 0;
 		const loopStartTime     = Date.now();
 		let   finalText      = '';   // 最终迭代文本（无工具调用时）
+
+		// ── 防提前退出 / 任务清单一致性（参照 jiusi）──────────────────────
+		// LLM 没调工具就结束时，若 todo 还有 in_progress/pending → 自动注入"继续"指令再跑，
+		// 避免"AI 提前结束、N 项未收尾"。带次数上限 + 漂移检测防死循环。
+		const MAX_AUTO_CONTINUE  = 4;    // 自动续跑最多次数
+		let   autoContinueCount  = 0;
+		const NO_TOOL_DRIFT_LIMIT = 2;   // 连续 N 轮纯文本无工具调用 → 判定漂移，停止续跑
+		let   consecutiveNoToolText = 0;
+		// 空转打断：连续 N 轮只读探索（无 edit/write/todo_write）→ 注入催促，逼它动手
+		const EXPLORE_DRIFT_LIMIT = 3;
+		let   consecutiveExploreOnly = 0;
 
 		// ── 根据模式构建系统提示词 & 工具列表 ──────────────────────────────────
 		// E. Prompt 静态/动态分离：
@@ -3200,6 +3232,27 @@ OBJECTIVE
 		// 但注意它在 finalSystemPrompt 的位置 → 每轮都重算（在 for 循环内动态生成）
 		const finalSystemPromptBase = staticPrompt + dynamicSuffix;
 
+		// ── 防 doom-loop：每轮把"当前 todo 清单 + 进度"注入 system prompt ──────
+		// 长会话历史被压缩后，AI 会忘记自己已规划、在做哪步 → 反复"了解现状/重新规划"空转。
+		// 每轮刷新清单让 AI 始终看得见进度，并强制 todo 工作流纪律。仅 code 模式注入。
+		const buildTodoReminderSuffix = (): string => {
+			if (isChatMode || isExploreMode || isPlanMode) return '';
+			const todos = getTodoWriteList(sessionId);
+			if (todos.length === 0) return '';
+			const done = todos.filter(t => t.status === 'completed').length;
+			const lines = todos.map((t, i) => {
+				const icon = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⏳';
+				return `  ${i + 1}. ${icon} ${t.content}`;
+			}).join('\n');
+			return `\n\n<current_todos 进度=${done}/${todos.length}>\n`
+				+ `这是你当前的任务清单（系统每轮自动刷新，以此为准）：\n${lines}\n\n`
+				+ `【硬纪律】\n`
+				+ `① 清单已定 —— 禁止再"重新了解项目/重新规划"，直接推进下一个未完成（⏳/🔄）项；\n`
+				+ `② 开始某项前，先 todo_write 把它标 in_progress；做完立刻 todo_write 标 completed 再开下一项；\n`
+				+ `③ 不要反复读同类文件空转 —— 缺什么读什么，读完立刻动手 edit/write；\n`
+				+ `④ 全部完成后才允许只输出文字总结收尾。\n</current_todos>`;
+		};
+
 		// B3: 自动召回记忆生成 prompt 段
 		// 每轮调用前用最近一条 user 消息作为 query 召回 top-K 记忆，注入到 system prompt
 		const buildMemorySuffix = async (): Promise<string> => {
@@ -3288,7 +3341,7 @@ OBJECTIVE
 			return [...baseActiveTools, ...mcpDefs];
 		};
 
-		for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+		for (let iter = 0; iter < (MAX_ITERATIONS = rollBudget(iter)); iter++) {
 			// ── 取消检查：每轮开始前检查用户是否点了"结束" ──
 			if (server.sessionManager.isCancelled(sessionId)) {
 				console.log(`[Agent] 检测到取消信号（iter=${iter}），中止 agent loop`);
@@ -3391,7 +3444,20 @@ OBJECTIVE
 			const activeTools = buildActiveTools();
 			// B2/B3: 每轮重算 final system prompt（拼上 mcp section + memory section）
 			const memorySuffix = await buildMemorySuffix();
-			const finalSystemPrompt = finalSystemPromptBase + buildMcpSuffix() + memorySuffix;
+			const finalSystemPrompt = finalSystemPromptBase + buildMcpSuffix() + memorySuffix + buildTodoReminderSuffix();
+
+			// ── 空转打断：连续多轮只读探索、不推进 todo → 注入催促 user 消息，逼它动手 ──
+			if (consecutiveExploreOnly >= EXPLORE_DRIFT_LIMIT && !isChatMode && !isExploreMode && !isPlanMode) {
+				const stuck = getTodoWriteList(sessionId).filter(t => t.status === 'in_progress' || t.status === 'pending');
+				if (stuck.length > 0) {
+					history.push({ role: 'user', content:
+						`[系统提醒] 你已连续 ${consecutiveExploreOnly} 轮只在读文件/探索，没有任何实质改动（edit/write）、todo 也没推进。\n` +
+						`立即停止探索、停止重新规划：① 用 todo_write 把最早一项未完成的 todo 标 in_progress；② 直接调 edit / write_to_file 把它做出来。本轮禁止只读不写。`,
+					});
+					console.log(`[Agent] 空转打断：连续 ${consecutiveExploreOnly} 轮只探索未推进 → 注入催促`);
+					consecutiveExploreOnly = 0;
+				}
+			}
 			console.log(`[Agent] iter=${iter} mode=${mode} 调用 AI，携带 ${activeTools?.length ?? 0} 个工具${ctx.activeMcpTools && ctx.activeMcpTools.size > 0 ? ` (含 ${ctx.activeMcpTools.size} 个 MCP)` : ''}，历史 ${history.length} 条`);
 
 			// B2-LIFECYCLE: 自动卸载 N 轮未用的非 sticky MCP 工具
@@ -3738,8 +3804,64 @@ OBJECTIVE
 					}
 					history.push(finalAssistant);
 				}
+
+				// ── 漂移检测 + 自动续跑（参照 jiusi，治"提前退出 / 任务清单对不上"）──
+				consecutiveNoToolText++;
+				const aiDrifting = consecutiveNoToolText >= NO_TOOL_DRIFT_LIMIT;
+				const canAutoContinue =
+					!isChatMode && !isExploreMode && !isPlanMode
+					&& autoContinueCount < MAX_AUTO_CONTINUE
+					&& !aiDrifting
+					&& !server.sessionManager.isCancelled(sessionId);
+				if (canAutoContinue) {
+					const leftover = getTodoWriteList(sessionId)
+						.filter(t => t.status === 'in_progress' || t.status === 'pending');
+					if (leftover.length > 0) {
+						autoContinueCount++;
+						const names = leftover.map(t => `「${t.content}」`).join('、');
+						history.push({ role: 'user', content:
+							`[系统自动续跑 ${autoContinueCount}/${MAX_AUTO_CONTINUE}] ` +
+							`你上一轮纯文本结束、没调任何工具，但 todo 还有 ${leftover.length} 项未收尾：${names}。\n\n` +
+							`【硬约束】本轮必须调至少一个工具，禁止只输出文本。二选一：\n` +
+							`  (A) 如果其实已经做完只是忘了 mark：用 todo_write 把对应项 status 改成 completed。\n` +
+							`  (B) 如果还没做完：针对最早一项 pending todo，直接调具体执行工具（read_file / edit / execute_command 等）把它做完。\n\n` +
+							`【禁止】不要把没做的标 failed 来蒙混——"超出范围 / 不必要 / 待确认"都不是理由；只有需求自相矛盾或技术上根本无法实现才可，且必须在 remark 写清硬阻塞原因。\n` +
+							`【禁止】不要回复"好的我现在开始…"这类纯文本，直接调工具。`,
+						});
+						console.log(`[Agent] 自动续跑 #${autoContinueCount}/${MAX_AUTO_CONTINUE}: ${leftover.length} 项未收尾 → ${names}`);
+						await server.sessionManager.emitEvent(sessionId, {
+							type: 'assistant_message', sessionId,
+							content: `\n\n[🔄 自动续跑 #${autoContinueCount}/${MAX_AUTO_CONTINUE} — 检查 ${leftover.length} 项 todo 状态]\n\n`,
+							isPartial: false,
+						} as any);
+						continue;   // 不 break，注入续跑指令后再跑一轮
+					}
+				}
+
+				// ── 漂移退出：连续多轮纯文本无工具调用 → 停止续跑，给用户清晰提示而非无声结束 ──
+				if (aiDrifting && !isChatMode && !isExploreMode && !isPlanMode) {
+					const leftover = getTodoWriteList(sessionId)
+						.filter(t => t.status === 'in_progress' || t.status === 'pending');
+					if (leftover.length > 0) {
+						console.warn(`[Agent] 漂移检测：连续 ${consecutiveNoToolText} 轮纯文本无工具调用，停止续跑（${leftover.length} 项未收尾）`);
+						await server.sessionManager.emitEvent(sessionId, {
+							type: 'assistant_message', sessionId,
+							content: `\n\n⚠️ [已停止自动续跑] AI 连续 ${consecutiveNoToolText} 轮只输出文字、没调任何工具——可能任务已做完但 todo 没 mark，或在原地踏步。剩余 ${leftover.length} 项：${leftover.map(t => `「${t.content}」`).join('、')}。\n可回复"继续"让它再试，或换更具体的指令。`,
+							isPartial: false,
+						} as any);
+					}
+				}
 				break;
 			}
+
+			// ── 有工具调用：重置"连续纯文本"漂移计数（本轮在干活，没漂移）──
+			consecutiveNoToolText = 0;
+
+			// ── 空转检测：本轮有没有"推进性"工具（改文件 / 更新 todo）；只读探索则累加 ──
+			const isProgressTool = (n: string) =>
+				n === 'edit' || n === 'multiedit' || n === 'write_to_file' || n === 'apply_patch' || n === 'todo_write';
+			if (toolCalls.some(tc => isProgressTool(tc.name))) consecutiveExploreOnly = 0;
+			else consecutiveExploreOnly++;
 
 			// ── 有工具调用：把本轮最后一段 reasoning 尾巴保存（如果存在尾随 text）──
 			await saveReasoningSegment();

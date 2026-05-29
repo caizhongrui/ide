@@ -104,9 +104,19 @@ export async function getClient(): Promise<MaxianClient> {
   return _client
 }
 
-export async function waitForServer(maxMs = 15000, intervalMs = 300): Promise<void> {
-  const c = await getClient()
-  const usedBase = resolvedInfo?.baseUrl ?? BASE
+/** 重置缓存的 client + 已解析端口：启动重试时调用，强制下次 getClient 重新 invoke server_info 拿最新端口。
+ *  应对启动竞态：sidecar 还没把实际端口写入 Rust state 时 getServerInfo 会拿到默认端口；
+ *  或 sidecar fallback 换了端口、或残留旧 sidecar 被换掉——重置后重新解析即可连上正确端口。 */
+export function resetClient(): void {
+  _client = null
+  resolvedInfo = null
+}
+
+// 启动超时放宽到 25s：Windows 刚开机后首次启动，Defender 扫描 60MB sidecar binary + 系统繁忙，
+// sidecar 起来可能较慢；超时太短会误判失败弹错误框。
+export async function waitForServer(maxMs = 25000, intervalMs = 300): Promise<void> {
+  let c = await getClient()
+  let usedBase = resolvedInfo?.baseUrl ?? BASE
   const start = Date.now()
   let lastErr: unknown = null
   let attempts = 0
@@ -121,6 +131,14 @@ export async function waitForServer(maxMs = 15000, intervalMs = 300): Promise<vo
     } catch (e) {
       lastErr = e
       if (attempts <= 3) console.warn(`[maxian] health attempt ${attempts} failed:`, e)
+    }
+    // 每 5 次失败重新解析一次端口：sidecar 起来后才把实际端口写进 Rust state，
+    // 或被占自动 fallback 换了端口——重置 client 重新 invoke server_info 拿最新端口
+    if (attempts % 5 === 0) {
+      resetClient()
+      c = await getClient()
+      usedBase = resolvedInfo?.baseUrl ?? BASE
+      console.warn(`[maxian] 重新解析 sidecar 端口 @ ${usedBase}`)
     }
     await new Promise((res) => setTimeout(res, intervalMs))
   }

@@ -60,9 +60,16 @@ function buildOne(key) {
 		'build',
 		'--compile',
 		`--target=${t.bunTarget}`,
+		// 压缩 + 去 sourcemap：减小体积，并提高源码反编译门槛
+		'--minify',
+		'--sourcemap=none',
 		`--outfile`, outFile,
 		DIST_CLI,
 	];
+	// Windows：隐藏 sidecar 的 console 窗口，否则 spawn 时会弹一个 cmd 黑窗
+	if (key.startsWith('win32')) {
+		args.splice(args.indexOf('--minify'), 0, '--windows-hide-console');
+	}
 	// Windows 下 npm 全局 bin 也可能拿不到 bun；shell: true 让 PATHEXT 生效
 	const r = spawnSync('bun', args, { stdio: 'inherit', cwd: ROOT, shell: process.platform === 'win32' });
 	if (r.status !== 0) {

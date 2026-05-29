@@ -1,6 +1,6 @@
 [package]
 name = "maxian-desktop"
-version = "0.2.25"
+version = "0.2.26"
 description = "码弦 Maxian 桌面客户端"
 edition = "2021"
 rust-version = "1.77"
@@ -21,6 +21,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -34,3 +35,9 @@ parking_lot = "0.12"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+# 发布构建优化：去符号 + LTO，减小体积、提高反编译门槛、略微加快启动
+[profile.release]
+strip = true        # 去除调试符号（更难逆向、体积更小）
+lto = "thin"        # 链接时优化
+codegen-units = 1   # 更充分的优化（编译稍慢，产物更优）

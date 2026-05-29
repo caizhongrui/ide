@@ -5,7 +5,7 @@ import hljs from "highlight.js/lib/common"
 import "highlight.js/styles/github-dark.css"
 import logoUrl from "./assets/logo.png"
 import {
-  getClient, waitForServer,
+  getClient, waitForServer, resetClient,
   loadSavedCredentials, saveCredentials, clearCredentials,
   loginCheck, configureServerAi, clearServerAi,
   resolvedBase, USER, PASS,
@@ -1644,17 +1644,32 @@ export default function App() {
 
   async function bootWithCredentials(creds: SavedCredentials) {
     setAppStatus("booting"); setBootError("")
-    try {
-      await waitForServer()
-      await configureServerAi(creds.apiUrl, creds.username, creds.password)
-      await refreshWorkspaces()
-      await refreshSessions()
-      setAppStatus("ready")
-      // 启动后静默检查更新（后台，不影响 UI）
-      void checkForUpdatesSilent()
-    } catch (e: any) {
-      setBootError(String(e?.message || e))
-      setAppStatus("error")
+    // 启动竞态自愈：手动点图标启动时，sidecar（子进程）可能还没监听好，
+    // /auth/configure 等请求会 connection refused。自动重试若干次（每次重置 client
+    // 重新解析端口 + 等待），把原来需要用户手点"重试"的弹窗变成自动恢复。
+    const MAX_BOOT_RETRY = 3
+    for (let attempt = 1; attempt <= MAX_BOOT_RETRY; attempt++) {
+      try {
+        if (attempt > 1) {
+          resetClient()                                   // 丢掉可能连错端口的旧 client，重新解析
+          await new Promise(r => setTimeout(r, 1000))     // 给 sidecar 一点稳定时间
+        }
+        await waitForServer()
+        await configureServerAi(creds.apiUrl, creds.username, creds.password)
+        await refreshWorkspaces()
+        await refreshSessions()
+        setAppStatus("ready")
+        // 启动后静默检查更新（后台，不影响 UI）
+        void checkForUpdatesSilent()
+        return
+      } catch (e: any) {
+        if (attempt < MAX_BOOT_RETRY) {
+          console.warn(`[boot] 第 ${attempt}/${MAX_BOOT_RETRY} 次启动失败，自动重试：`, e?.message || e)
+          continue
+        }
+        setBootError(String(e?.message || e))
+        setAppStatus("error")
+      }
     }
   }
 

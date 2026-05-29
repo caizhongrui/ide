@@ -86,6 +86,26 @@ fn save_window_state(s: &WindowState) {
     }
 }
 
+/// 确保窗口当前位置落在某个显示器可视区内，否则居中。
+/// 用于 single-instance 激活：万一窗口跑到屏幕外，点图标即可把它拉回来。
+fn ensure_window_on_screen(win: &tauri::WebviewWindow) {
+    let pos = match win.outer_position() { Ok(p) => p, Err(_) => return };
+    if let Ok(monitors) = win.available_monitors() {
+        for m in monitors {
+            let mp = m.position();
+            let ms = m.size();
+            // 物理坐标比较；留余量让标题栏仍可抓取
+            if pos.x >= mp.x - 100
+                && pos.x <= mp.x + ms.width as i32 - 100
+                && pos.y >= mp.y
+                && pos.y <= mp.y + ms.height as i32 - 50 {
+                return;  // 在可视区内，保持不动
+            }
+        }
+        let _ = win.center();  // 不在任何显示器内 → 居中
+    }
+}
+
 /// 硬 kill sidecar：Windows 用 taskkill /T /F 杀进程树，Unix 先 SIGTERM 后 SIGKILL。
 /// 即便 CommandChild 已丢失，也能靠 pid 补杀。
 fn hard_kill_sidecar(child: Option<CommandChild>, pid: Option<u32>) {
@@ -120,8 +140,41 @@ fn hard_kill_sidecar(child: Option<CommandChild>, pid: Option<u32>) {
     }
 }
 
-/// 启动前探活：检查端口是否已被占用，是的话尝试 /health 验证是我们的 server
-/// 返回值：true=复用已有 server，跳过 spawn；false=端口空闲或已 kill 掉冲突进程，可以 spawn
+/// 杀掉占用指定端口的进程：清理上次没退干净的残留 sidecar，确保新 sidecar 能在固定端口起来。
+fn kill_process_on_port(port: &str) {
+    #[cfg(windows)]
+    {
+        if let Ok(out) = std::process::Command::new("netstat").args(["-ano"]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let needle = format!(":{}", port);
+            let mut pids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for line in text.lines() {
+                if line.contains(&needle) && line.to_uppercase().contains("LISTENING") {
+                    if let Some(pid) = line.split_whitespace().last() {
+                        if pid != "0" { pids.insert(pid.to_string()); }
+                    }
+                }
+            }
+            for pid in pids {
+                let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).output();
+                println!("[maxian-desktop] 杀掉占用端口 {} 的残留进程 pid={}", port, pid);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(out) = std::process::Command::new("lsof").args(["-ti", &format!(":{}", port)]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for pid in text.split_whitespace() {
+                let _ = std::process::Command::new("kill").args(["-9", pid]).output();
+                println!("[maxian-desktop] 杀掉占用端口 {} 的残留进程 pid={}", port, pid);
+            }
+        }
+    }
+}
+
+/// 启动前探活：检查端口上是否有我们的 maxian-server（用 /health 验证）。
+/// 返回值：true=端口上是 maxian-server（残留，需清理）；false=端口空闲或被别的服务占。
 fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
     // 1. 试着连一下 /health
     let url = format!("http://127.0.0.1:{}/health", port);
@@ -130,9 +183,10 @@ fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
         base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass))
     };
     // 用 curl 做 HEAD 探活（避免引入 reqwest 依赖；Windows 10+ 已自带 curl.exe）
+    let devnull = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let out = std::process::Command::new("curl")
         .args([
-            "-s", "-o", "/dev/null",
+            "-s", "-o", devnull,
             "-w", "%{http_code}",
             "--max-time", "2",
             "-H", &format!("Authorization: Basic {}", auth),
@@ -142,7 +196,7 @@ fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
     if let Ok(o) = out {
         let code = String::from_utf8_lossy(&o.stdout).trim().to_string();
         if code == "200" {
-            println!("[maxian-desktop] 端口 {} 已有 maxian-server 响应 /health=200，复用它", port);
+            println!("[maxian-desktop] 端口 {} 上检测到 maxian-server（/health=200，按残留处理）", port);
             return true;
         }
         if !code.is_empty() && code != "000" {
@@ -161,15 +215,14 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
     let user = read_env_or_default("MAXIAN_USER", "maxian");
     let pass = read_env_or_default("MAXIAN_PASS", "test123");
 
-    // 启动前探活：端口已被自己 maxian-server 占就复用
+    // 启动前探活：51847 上若已有 maxian-server——加了 single-instance 后不会有合法的并发实例，
+    // 所以一定是上次没退干净的【残留】。它的 parent-death watcher 认的是【旧 app】的 pid，
+    // 复用它会让它几秒后发现旧 app 已死而自杀 → 端口变空 → 前端 /health 失败（Windows 高发）。
+    // 故：杀掉残留 + 重新 spawn 全新 sidecar（认【当前 app】为 parent，不会自杀），稳定在固定端口。
     if probe_existing_server(&configured, &user, &pass) {
-        // 记录到 state，让 server_info 知道实际端口
-        if let Some(s) = app.try_state::<ServerPort>() {
-            if let Ok(mut g) = s.0.lock() {
-                *g = configured.parse::<u16>().ok();
-            }
-        }
-        return Err("__REUSE_EXISTING__".into());
+        println!("[maxian-desktop] 检测到残留 sidecar 占用端口 {}，杀掉后重新 spawn", configured);
+        kill_process_on_port(&configured);
+        std::thread::sleep(Duration::from_millis(600));  // 等端口释放再 bind
     }
 
     // K-Port：端口被别的服务占（如其他 Node dev server 抢了 51847）→ 自动找空闲端口
@@ -462,6 +515,16 @@ fn open_path_in_explorer(path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // single-instance 必须最先注册：再次启动 / 点任务栏图标时不开新实例，
+        // 而是把已有主窗口激活——拉回可视区 + 取消最小化 + 置前台 + 聚焦。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                ensure_window_on_screen(&win);
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
@@ -523,11 +586,34 @@ pub fn run() {
             // O9：恢复上次的窗口尺寸/位置/maximized 状态
             if let Some(win) = app.get_webview_window("main") {
                 if let Some(state) = load_window_state() {
+                    // 尺寸：clamp 到不小于 minWidth/minHeight(900x600)，防坏 state 把窗口缩没
                     if let (Some(w), Some(h)) = (state.width, state.height) {
-                        let _ = win.set_size(LogicalSize::new(w as f64, h as f64));
+                        let _ = win.set_size(LogicalSize::new(w.max(900) as f64, h.max(600) as f64));
                     }
+                    // 位置：必须落在某个显示器可视区内，否则居中——
+                    // 防窗口恢复到屏幕外（换显示器/改分辨率/负坐标），出现"任务栏有预览但点不出窗口"
                     if let (Some(x), Some(y)) = (state.x, state.y) {
-                        let _ = win.set_position(LogicalPosition::new(x as f64, y as f64));
+                        let mut on_screen = false;
+                        if let Ok(monitors) = win.available_monitors() {
+                            for m in monitors {
+                                let scale = m.scale_factor();
+                                let mx = m.position().x as f64 / scale;
+                                let my = m.position().y as f64 / scale;
+                                let mw = m.size().width as f64 / scale;
+                                let mh = m.size().height as f64 / scale;
+                                // 窗口左上角大致落在该显示器内（留余量，标题栏可抓取）
+                                if (x as f64) >= mx - 100.0 && (x as f64) <= mx + mw - 100.0
+                                    && (y as f64) >= my && (y as f64) <= my + mh - 50.0 {
+                                    on_screen = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if on_screen {
+                            let _ = win.set_position(LogicalPosition::new(x as f64, y as f64));
+                        } else {
+                            let _ = win.center();
+                        }
                     }
                     if state.maximized.unwrap_or(false) {
                         let _ = win.maximize();
