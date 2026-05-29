@@ -12,6 +12,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.27',
+		date: '2026-05-29',
+		changes: [
+			'🩹 修复 Windows 上「启动失败 / 无法连接服务」（核心修复）：',
+			'   · 后台服务进程启动几秒后被错误判定为「父进程已退出」而自我关闭 —— 实为 Windows 下进程存活探测误判；现在仅在确认进程真不存在时才退出',
+			'   · 后台服务的输出 / 崩溃原因会写入日志文件（%USERPROFILE%\\.maxian\\sidecar.log），方便排查启动问题',
+			'⚙️ 内部稳定性优化',
+		],
+	},
+	{
 		version: '0.2.26',
 		date: '2026-05-29',
 		changes: [

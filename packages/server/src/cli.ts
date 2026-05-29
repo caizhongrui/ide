@@ -4586,13 +4586,26 @@ OBJECTIVE
 		const parentPid = parseInt(process.env.MAXIAN_PARENT_PID, 10);
 		if (Number.isFinite(parentPid) && parentPid > 0) {
 			console.log(`[Maxian Server] Parent-death watcher 已启用 (parent_pid=${parentPid})`);
+			let parentMissCount = 0;
 			const watchTimer = setInterval(() => {
 				try {
 					// signal 0 = 不发信号，仅探测进程存在
 					process.kill(parentPid, 0);
-				} catch {
-					// 父进程已不存在 → 自杀（释放端口）
-					console.log(`[Maxian Server] 父进程 ${parentPid} 已退出，sidecar 自动关闭`);
+					parentMissCount = 0;   // 探到父进程还活着 → 清零
+				} catch (e: any) {
+					// 只有明确 ESRCH（进程确实不存在）才算父进程死了。
+					// ⚠️ Windows / Bun 下 process.kill(pid, 0) 对【活着】的父进程也可能抛
+					// EPERM 等非 ESRCH 错误；若像以前那样裸 catch 一律判死，会导致 sidecar
+					// 启动几秒后被自己误杀（端口变空、前端 /health 连不上、"启动失败"）。
+					// 宁可父真死后 sidecar 残留（交由 Tauri CloseRequested / 下次启动杀残留清理），也不误杀。
+					if (e?.code !== 'ESRCH') {
+						return;
+					}
+					// 连续 2 次确认进程不存在才自杀，避免偶发误判
+					if (++parentMissCount < 2) {
+						return;
+					}
+					console.log(`[Maxian Server] 父进程 ${parentPid} 已退出（连续确认），sidecar 自动关闭`);
 					clearInterval(watchTimer);
 					if (!shuttingDown) void gracefulShutdown('parent_death');
 				}

@@ -140,6 +140,31 @@ fn hard_kill_sidecar(child: Option<CommandChild>, pid: Option<u32>) {
     }
 }
 
+/// sidecar 日志文件路径（%USERPROFILE%\.maxian\sidecar.log 或 ~/.maxian/sidecar.log）。
+/// 把 GUI 下看不见的 sidecar 输出 / 崩溃码 / spawn 失败原因落盘，便于排查"服务没起来"。
+fn sidecar_log_path() -> Option<PathBuf> {
+    #[cfg(unix)]
+    let home = std::env::var("HOME").ok();
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok();
+    home.map(|h| PathBuf::from(h).join(".maxian").join("sidecar.log"))
+}
+/// 每次 spawn 前清空，只保留本次启动的输出（避免无限增长）。
+fn reset_sidecar_log(header: &str) {
+    if let Some(path) = sidecar_log_path() {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let _ = std::fs::write(&path, format!("{header}\n"));
+    }
+}
+fn append_sidecar_log(line: &str) {
+    if let Some(path) = sidecar_log_path() {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", line.trim_end());
+        }
+    }
+}
+
 /// 杀掉占用指定端口的进程：清理上次没退干净的残留 sidecar，确保新 sidecar 能在固定端口起来。
 fn kill_process_on_port(port: &str) {
     #[cfg(windows)]
@@ -321,12 +346,19 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         .env("BUN_GC_HEAP_GROWTH_RATIO", "1.5")
         .env("NODE_OPTIONS", "--max-old-space-size=2048");
 
+    reset_sidecar_log(&format!("=== maxian-server spawn: port={} ===", port));
     let (mut rx, child) = sidecar
         .spawn()
-        .map_err(|e| format!("启动 maxian-server sidecar 失败: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("启动 maxian-server sidecar 失败: {e}");
+            // spawn 直接失败：多半是 sidecar binary 被杀毒/EDR 拦截删除/隔离，或文件缺失
+            append_sidecar_log(&format!("[spawn ERROR] {msg}（疑似被杀毒/EDR 拦截，或 binary 缺失）"));
+            msg
+        })?;
 
     let pid = child.pid();
     println!("[maxian-desktop] sidecar 已启动 pid={} port={}", pid, port);
+    append_sidecar_log(&format!("[spawn OK] pid={} port={}", pid, port));
 
     // 后台消费子进程 stdout/stderr，透传到本进程（便于开发时查看日志）
     tauri::async_runtime::spawn(async move {
@@ -336,18 +368,26 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
                 CommandEvent::Stdout(data) => {
                     if let Ok(line) = String::from_utf8(data) {
                         print!("{line}");
+                        append_sidecar_log(&line);
                     }
                 }
                 CommandEvent::Stderr(data) => {
                     if let Ok(line) = String::from_utf8(data) {
                         eprint!("{line}");
+                        append_sidecar_log(&format!("[stderr] {}", line.trim_end()));
                     }
+                }
+                CommandEvent::Error(err) => {
+                    eprintln!("[maxian-desktop] sidecar 事件错误: {err}");
+                    append_sidecar_log(&format!("[error] {err}"));
                 }
                 CommandEvent::Terminated(payload) => {
                     println!(
                         "[maxian-desktop] sidecar 已退出 code={:?} signal={:?}",
                         payload.code, payload.signal
                     );
+                    // 非 0 退出码 = sidecar 崩溃/被杀；用户可据此区分"被拦截"还是"运行崩溃"
+                    append_sidecar_log(&format!("[terminated] code={:?} signal={:?}", payload.code, payload.signal));
                     break;
                 }
                 _ => {}
