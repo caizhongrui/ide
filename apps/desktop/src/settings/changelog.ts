@@ -12,6 +12,24 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.29',
+		date: '2026-05-30',
+		changes: [
+			'🪟 修复 Windows 启动时反复闪现 cmd 黑窗（启动期 netstat / taskkill / curl 等系统命令统一隐藏控制台）',
+			'🩹 修复重启后模型选择器空白且不主动加载（token 配置完成后自动重新拉取场景模型）',
+			'🤖 子代理 (task) 调用挂死修复（子任务跑命令不再永远等审批超时）',
+			'📋 LSP 诊断升级（对标 DeepSeek-TUI 模式）：',
+			'   · 诊断改为独立消息投递给模型（不再藏在工具结果末尾被截断/跳过）',
+			'   · 改用真等待（等服务器真正完成分析才返回，替代固定 sleep）',
+			'   · 覆盖 write_to_file / multiedit / apply_patch 全部写文件路径（之前只 edit 有）',
+			'   · 强制模型必须先修诊断错误再做下一项任务',
+			'🛡️ 默认 PostToolUse 钩子按项目类型自动配置（TS→tsc / Rust→cargo check / Python→pyright / Go→go build / Java→mvn），零配置兜底',
+			'✍️ write_to_file 工具描述加警示 + 失败信息明确指引（覆盖已存在文件前必须先 read_file）',
+			'⚙️ 修复 DeepSeek-R1 流式思考导致后台服务事件循环卡死（去掉每个 chunk 一行的高频日志）',
+			'⚙️ 一批内部稳定性优化',
+		],
+	},
+	{
 		version: '0.2.28',
 		date: '2026-05-29',
 		changes: [

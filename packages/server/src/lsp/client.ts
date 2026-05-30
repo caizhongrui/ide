@@ -39,6 +39,8 @@ export class LSPClient {
 	private openedFiles = new Map<string, number>();
 	/** 发布诊断 */
 	private diagnostics = new Map<string, Diagnostic[]>();
+	/** F7: 等下一次该 file 收到 publishDiagnostics 的 resolver 集合（seq-based 真等待用） */
+	private pendingDiagnosticsResolvers = new Map<string, Set<() => void>>();
 	private killed = false;
 
 	constructor(opts: LSPClientOptions) {
@@ -55,6 +57,12 @@ export class LSPClient {
 		this.connection.onNotification('textDocument/publishDiagnostics', (params: any) => {
 			const filePath = fileURLToPath(params.uri);
 			this.diagnostics.set(filePath, params.diagnostics ?? []);
+			// F7: 触发 waitForNextDiagnostics 等待者（seq-based 真等待 —— didChange 后等 server 推送下一次 publishDiagnostics）
+			const waiters = this.pendingDiagnosticsResolvers.get(filePath);
+			if (waiters && waiters.size > 0) {
+				for (const resolve of waiters) resolve();
+				waiters.clear();
+			}
 		});
 		// 常见请求的无操作响应
 		this.connection.onRequest('window/workDoneProgress/create', () => null);
@@ -143,6 +151,37 @@ export class LSPClient {
 	/** 诊断缓存 */
 	getDiagnostics(filePath: string): Diagnostic[] {
 		return this.diagnostics.get(filePath) ?? [];
+	}
+
+	/**
+	 * F7 seq-based 真等待（对标 DeepSeek-TUI lsp_hooks 的 diagnostics_for(path, seq).await）：
+	 * 等到该 file 下一次收到 textDocument/publishDiagnostics 通知。
+	 * 由 LSP.diagnostics 在 touchFile（触发 didChange）之后调用——保证拿到的是 server
+	 * 真正完成本次 didChange 分析后的诊断，而不是上一次的旧快照。
+	 * 超时（调用方传入）后静默 resolve，调用方再去 getDiagnostics 拿当时缓存（可能是旧的）作为兜底。
+	 */
+	waitForNextDiagnostics(filePath: string, timeoutMs: number): Promise<void> {
+		return new Promise<void>((resolve) => {
+			let resolved = false;
+			const done = (): void => {
+				if (resolved) return;
+				resolved = true;
+				resolve();
+			};
+			let waiters = this.pendingDiagnosticsResolvers.get(filePath);
+			if (!waiters) {
+				waiters = new Set();
+				this.pendingDiagnosticsResolvers.set(filePath, waiters);
+			}
+			waiters.add(done);
+			// 超时兜底：server 可能因优化不推空 publishDiagnostics、或冷启动慢
+			const t = setTimeout(() => {
+				const ws = this.pendingDiagnosticsResolvers.get(filePath);
+				if (ws) ws.delete(done);
+				done();
+			}, timeoutMs);
+			(t as any).unref?.();
+		});
 	}
 
 	// ── LSP 操作 ────────────────────────────────────────────────────────

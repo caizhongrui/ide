@@ -101,8 +101,10 @@ export namespace LSP {
 		const c = await getClientForFile(file, workspaceRoot);
 		if (!c) return [];
 		await c.touchFile(file);
-		// 等一点时间让 server 产生诊断
-		await new Promise(r => setTimeout(r, 500));
+		// F7 seq-based 真等待（对标 DeepSeek-TUI lsp_hooks::diagnostics_for(path, seq)）：
+		// touchFile 触发 didChange，然后等 server 真正完成分析并推送 publishDiagnostics（最多 2s）。
+		// 替代旧的固定 500ms sleep——不再"等多了浪费时间 / 等少了拿到旧诊断"。
+		await c.waitForNextDiagnostics(file, 2000);
 		return c.getDiagnostics(file);
 	}
 

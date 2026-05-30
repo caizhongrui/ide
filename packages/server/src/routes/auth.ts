@@ -36,6 +36,14 @@ export function AuthRoutes(setAiConfig: SetAiConfigFn, getAiConfig: () => AiRunt
 		// 必须显式声明 type='proxy'，否则 pushAiCallLog 等下游会因 cfg.type !== 'proxy' 跳过
 		setAiConfig({ type: 'proxy', apiUrl, username, password } as any);
 		console.log('[Maxian Server] AI 代理已配置:', apiUrl);
+		// F10: token 就绪后异步重新预热 scene-models。
+		// 修复：sidecar 启动瞬间 server.getAiConfig() 返回 null（前端还没发 /auth/configure），
+		// 启动预热拿到 0 个模型 → 前端 createEffect 拉清单也是 0 → retry 1 次（1.5s）后放弃
+		// → ModelSelector 因 models 空不渲染。token 在这一刻才真正就绪，立即重新拉一次即可解决。
+		try {
+			const rerun = (globalThis as any).__maxianRerunScenePrefetch;
+			if (typeof rerun === 'function') void rerun();
+		} catch { /* ignore — 预热失败不影响 /auth/configure 响应 */ }
 		return c.json({ ok: true });
 	});
 

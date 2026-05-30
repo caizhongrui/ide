@@ -256,6 +256,11 @@ class NodeToolContext implements IToolContext {
 	readonly workspacePath: string;
 	readonly fileContextTracker: MemoryFileContextTracker;
 	didEditFile = false;
+	/** F6: post-write LSP 诊断缓冲（对标 DeepSeek-TUI lsp_hooks pending_lsp_blocks）。
+	 *  写工具执行后 push 到这里（不再拼 tool result）；runAgentLoop 在下一轮 LLM 请求前
+	 *  flush 为独立 user message 注入 historyForCall，避免诊断被 tool result truncate
+	 *  或被模型 skim 漏。 */
+	pendingLspBlocks: string[] = [];
 	readonly sessionId?: string;
 	/**
 	 * K8d 收尾：平台能力容器。
@@ -310,7 +315,7 @@ const AGENT_TOOL_DEFINITIONS: ToolDefinition[] = [
 	},
 	{
 		name: 'write_to_file',
-		description: '创建新文件或完全覆盖写入文件内容。适合创建新文件或大幅重写文件。',
+		description: '创建新文件或完全覆盖写入文件内容。⚠️ **覆盖已存在文件前必须先调用 read_file**——否则 FileTime 门禁会拦截写入（每次都浪费一次工具调用）。修改已存在文件的局部首选 edit / multiedit（无需整体重写、不会丢已有内容）。仅适合：① 新建文件；② 已 read_file 过且需整体重写。',
 		parameters: {
 			type: 'object',
 			properties: {
@@ -980,6 +985,40 @@ function createBufferedToolOutputSink(opts: {
 	};
 }
 
+/**
+ * F2: post-write LSP 诊断 helper（共享给 edit / write_to_file / multiedit / apply_patch）。
+ * 原来只 edit 路径跑诊断（cli.ts 旧 1106 行），其它三种写法裸奔——"少括号 / 变量位置错"漏网的根因。
+ * 这里接受多个绝对路径（apply_patch 可能改多文件），对每个跑 LSP.diagnostics，
+ * 取前 20 条 error/warning 拼成一段诊断字符串返回，给调用方拼到 tool result 末尾。
+ * LSP 不可用 / 文件无诊断 → 返回空字符串（不影响主流程）。
+ */
+async function runPostWriteDiagnostics(absolutePaths: string[], workspacePath: string): Promise<string> {
+	if (!absolutePaths || absolutePaths.length === 0) return '';
+	// F7: seq-based 真等待已下沉到 LSP.diagnostics 内部（client.waitForNextDiagnostics 等 publishDiagnostics 到达）。
+	// 这里不再叠加固定 sleep——下层会等 server 真正完成分析才返回。
+	const parts: string[] = [];
+	for (const absPath of absolutePaths) {
+		try {
+			const diags = await LSP.diagnostics(absPath, workspacePath);
+			if (!diags || diags.length === 0) continue;
+			const filtered = diags
+				.filter((d: any) => (d.severity ?? 1) <= 2)   // 1=Error, 2=Warning
+				.slice(0, 20);
+			if (filtered.length === 0) continue;
+			const lines = filtered.map((d: any) => {
+				const sev = d.severity === 1 ? '❌ Error' : '⚠️ Warning';
+				const line = (d.range?.start?.line ?? 0) + 1;
+				const col  = (d.range?.start?.character ?? 0) + 1;
+				return `  ${sev} [${line}:${col}] ${d.message}`;
+			}).join('\n');
+			const rel = path.relative(workspacePath, absPath) || absPath;
+			parts.push(`📋 ${rel} LSP 诊断（前 ${filtered.length} 条 error/warning）：\n${lines}`);
+		} catch { /* LSP 不可用 / 文件读不到 → 跳过本文件，继续其它 */ }
+	}
+	if (parts.length === 0) return '';
+	return `\n\n${parts.join('\n\n')}`;
+}
+
 async function executeToolCall(
 	ctx: NodeToolContext,
 	name: string,
@@ -1010,7 +1049,7 @@ async function executeToolCall(
 						const { FileTime } = await import('@maxian/core/file/FileTime');
 						await FileTime.assert(ctx.sessionId, wAbsPath);
 					} catch (e) {
-						return `Error: ${(e as Error).message}`;
+						return `Error: ${(e as Error).message}\n\n💡 必须先 read_file 完整读过该文件才能编辑（防止覆盖最新内容）。若只改局部 → 首选 edit / multiedit；若必须整体重写 → 先 read_file 看当前内容，再 write_to_file。`;
 					}
 				}
 
@@ -1034,6 +1073,11 @@ async function executeToolCall(
 				if (ctx.sessionId) saveFileSnapshot(ctx.sessionId, wAbsPath);
 				result = await writeToFileTool(ctx, params);
 				ctx.didEditFile = true;
+				// F6: 诊断 push 缓冲，下一轮独立 user message 投递
+				{
+					const __diag = await runPostWriteDiagnostics([wAbsPath], ctx.workspacePath);
+					if (__diag) ctx.pendingLspBlocks.push(__diag);
+				}
 				// 通知前端文件变更
 				if (emitEvent) {
 					await emitEvent({
@@ -1061,7 +1105,7 @@ async function executeToolCall(
 						const { FileTime } = await import('@maxian/core/file/FileTime');
 						await FileTime.assert(ctx.sessionId, absolutePath);
 					} catch (e) {
-						return `Error: ${(e as Error).message}`;
+						return `Error: ${(e as Error).message}\n\n💡 必须先 read_file 完整读过该文件才能编辑（防止覆盖最新内容）。若只改局部 → 首选 edit / multiedit；若必须整体重写 → 先 read_file 看当前内容，再 write_to_file。`;
 					}
 				}
 
@@ -1100,27 +1144,11 @@ async function executeToolCall(
 				}
 				let resp = formatEditResponse(editResult, params.new_string as string);
 
-				// 【编辑后 diagnostic 摘要】如果 LSP 可用，跑一次诊断，取前 20 条 error/warning
+				// F6 升级（对标 DeepSeek-TUI lsp_hooks）：诊断不再拼 tool result（避免被 truncate / skim 漏），
+				// 改 push 到 ctx.pendingLspBlocks 缓冲，runAgentLoop 在下一轮 LLM 请求前 flush 为独立 user message。
 				if (editResult.success) {
-					try {
-						const diags = await LSP.diagnostics(absolutePath, ctx.workspacePath);
-						if (diags && diags.length > 0) {
-							const filtered = diags
-								.filter((d: any) => (d.severity ?? 1) <= 2)   // 1=Error, 2=Warning
-								.slice(0, 20);
-							if (filtered.length > 0) {
-								const lines = filtered.map((d: any) => {
-									const sev = d.severity === 1 ? '❌ Error' : '⚠️ Warning';
-									const line = (d.range?.start?.line ?? 0) + 1;
-									const col  = (d.range?.start?.character ?? 0) + 1;
-									return `  ${sev} [${line}:${col}] ${d.message}`;
-								}).join('\n');
-								resp += `\n\n📋 LSP 诊断（前 ${filtered.length} 条 error/warning）：\n${lines}`;
-							} else {
-								resp += `\n\n✓ LSP 诊断：无 error/warning`;
-							}
-						}
-					} catch { /* LSP 不可用则忽略 */ }
+					const __diag = await runPostWriteDiagnostics([absolutePath], ctx.workspacePath);
+					if (__diag) ctx.pendingLspBlocks.push(__diag);
 				}
 
 				return resp;
@@ -1144,7 +1172,7 @@ async function executeToolCall(
 						const { FileTime } = await import('@maxian/core/file/FileTime');
 						await FileTime.assert(ctx.sessionId, mAbsPath);
 					} catch (e) {
-						return `Error: ${(e as Error).message}`;
+						return `Error: ${(e as Error).message}\n\n💡 必须先 read_file 完整读过该文件才能编辑（防止覆盖最新内容）。若只改局部 → 首选 edit / multiedit；若必须整体重写 → 先 read_file 看当前内容，再 write_to_file。`;
 					}
 				}
 
@@ -1173,6 +1201,11 @@ async function executeToolCall(
 					}
 				}
 				const multieditResponse = formatMultieditResponse(multieditResult, mFilePath);
+				// F6: 诊断 push 缓冲
+				{
+					const __diag = await runPostWriteDiagnostics([mAbsPath], ctx.workspacePath);
+					if (__diag) ctx.pendingLspBlocks.push(__diag);
+				}
 				return typeof multieditResponse === 'string' ? multieditResponse : JSON.stringify(multieditResponse);
 			}
 			case 'todo_write': {
@@ -1442,7 +1475,15 @@ async function executeToolCall(
 					for (const p of r.filesChanged) await emitEvent({ type: 'file_changed', sessionId: ctx.sessionId, path: p, action: 'modified' });
 					for (const p of r.filesDeleted) await emitEvent({ type: 'file_changed', sessionId: ctx.sessionId, path: p, action: 'deleted' });
 				}
-				return formatApplyPatchResult(r);
+				const apResp = formatApplyPatchResult(r);
+				// F6: 诊断 push 缓冲（apply_patch 可能改多文件，逐个查后整段 push）
+				if (r.success) {
+					const allChanged = [...(r.filesCreated || []), ...(r.filesChanged || [])]
+						.map(p => path.isAbsolute(p) ? p : path.resolve(ctx.workspacePath, p));
+					const __diag = await runPostWriteDiagnostics(allChanged, ctx.workspacePath);
+					if (__diag) ctx.pendingLspBlocks.push(__diag);
+				}
+				return apResp;
 			}
 			case 'lsp': {
 				const lp = params as unknown as ILspToolParams;
@@ -2005,7 +2046,10 @@ async function main() {
 		},
 	});
 	// fire-and-forget 预热两个常用 businessCode，让首次 AI 调用时 sceneModelCache 已就绪
-	void (async () => {
+	// F10: 抽 helper —— 启动时调一次（env 已配则生效；通常 sidecar 启动瞬间还没收到前端 /auth/configure
+	// 推送 token，所以这次预热大概率拿 0 个）；/auth/configure 处理成功后 auth.ts handler 会再调一次
+	// （此时 token 已就绪），让模型列表真正可用。修复"重启后 ModelSelector 空白且不主动获取"的 bug。
+	const __runScenePrefetch = async (): Promise<void> => {
 		const cfg = server.getAiConfig() ?? (aiConfig && aiConfig.type === 'proxy' ? {
 			apiUrl: aiConfig.apiUrl, username: aiConfig.username, password: aiConfig.password,
 		} : null);
@@ -2013,7 +2057,9 @@ async function main() {
 			await prefetchSceneModels('IDE_CHAT_CODE', cfg);
 			await prefetchSceneModels('IDE_CHAT_ASK',  cfg);
 		}
-	})();
+	};
+	(globalThis as any).__maxianRerunScenePrefetch = __runScenePrefetch;
+	void __runScenePrefetch();
 
 	// ─── 集成终端 WebSocket 服务 ──────────────────────────────────────────────
 
@@ -2912,6 +2958,8 @@ HARD RULES
    - 只有用户**明确要求修改 / 实现 / 修复 / 新增 / 重构**时，才编辑文件
    - 拿不准是"问"还是"做"时，先用一句话确认意图，**不要擅自改代码**
 
+12. **🔥 LSP / hook 诊断必须响应**：edit / write_to_file / multiedit / apply_patch 等写文件工具返回的 \`📋 LSP 诊断\` 段（含 ❌ Error / ⚠️ Warning）—— **下一轮必须先修干净再做别的**，禁止"忽略警告继续下一项 todo"。同理 PostToolUse hook 返回的 \`tsc --noEmit\` / \`cargo check\` / \`pyright\` / \`go build\` 等输出**含错误时**，也必须先修。诊断里有错就当**任务没完成**，绝不"飞过去"。
+
 ====
 
 TOOL SELECTION
@@ -3170,6 +3218,38 @@ OBJECTIVE
 		const projectInstructions = loadProjectInstructions(workspacePath);
 		const skillsList = loadAvailableSkills(workspacePath);
 		const projectCfg = loadProjectConfig(workspacePath);
+		// F3: 自动注入默认 PostToolUse hook（用户没配 → 按项目类型给默认诊断命令）。
+		// 用户机器没装 LSP 时的强兜底：项目工具链（tsc / cargo check / pyright / go build / mvn）
+		// 通常项目本身已有依赖，无需额外安装。用户 .maxian/config.json 已配的优先，**不覆盖**。
+		{
+			if (!projectCfg.hooks) (projectCfg as any).hooks = {};
+			if (!projectCfg.hooks!.PostToolUse) (projectCfg as any).hooks.PostToolUse = {};
+			const post = (projectCfg as any).hooks.PostToolUse as Record<string, string>;
+			const writeTools = ['edit', 'write_to_file', 'multiedit', 'apply_patch'];
+			const hasFile = (p: string): boolean => fs.existsSync(path.join(workspacePath, p));
+			let defaultCmd: string | null = null;
+			if (hasFile('package.json') && (hasFile('tsconfig.json') || hasFile('jsconfig.json'))) {
+				const pm = hasFile('pnpm-lock.yaml') ? 'pnpm' : hasFile('yarn.lock') ? 'yarn' : 'npx';
+				defaultCmd = `${pm} tsc --noEmit`;
+			} else if (hasFile('Cargo.toml')) {
+				defaultCmd = 'cargo check --message-format=short';
+			} else if (hasFile('pyproject.toml') || hasFile('pyrightconfig.json')) {
+				defaultCmd = 'pyright';
+			} else if (hasFile('go.mod')) {
+				defaultCmd = 'go build ./...';
+			} else if (hasFile('pom.xml')) {
+				defaultCmd = 'mvn compile -q';
+			}
+			if (defaultCmd) {
+				const injected: string[] = [];
+				for (const t of writeTools) {
+					if (!post[t]) { post[t] = defaultCmd; injected.push(t); }
+				}
+				if (injected.length > 0) {
+					console.log(`[ProjectConfig] F3 自动注入默认 PostToolUse hook "${defaultCmd}" → 覆盖 ${injected.join('/')}`);
+				}
+			}
+		}
 		const additionalSystemPrompt = projectCfg.additionalSystemPrompt
 			? `\n\n====\n\nPROJECT CUSTOM PROMPT（.maxian/config.json）\n\n${projectCfg.additionalSystemPrompt}`
 			: '';
@@ -3464,7 +3544,17 @@ OBJECTIVE
 			//       （cached token 价≈未命中 1/10，长会话成本/延迟显著上升）。移到 history 尾后，前缀稳定、
 			//       仅末尾一条小提醒不命中。临时消息只用于本次 createMessage，不写入持久 history。
 			const finalSystemPrompt = finalSystemPromptBase + buildMcpSuffix();
-			const __ephemeralReminder = (memorySuffix + buildTodoReminderSuffix()).trim();
+			// F6 flush：把上一轮工具执行收集的 LSP 诊断作为独立段（拼在 reminder 前面，更紧急），
+			// 然后清空缓冲。这是对标 DeepSeek-TUI lsp_hooks::flush_pending_lsp_diagnostics 的关键路径——
+			// 诊断不再藏在 tool result 末尾（容易被 truncate/skim 漏），改为独立投递到下一轮 history 尾。
+			const __lspSection = (ctx.pendingLspBlocks && ctx.pendingLspBlocks.length > 0)
+				? `[LSP 诊断 — 必须立即先修这些 error/warning 再继续，禁止"飞过去做下一项 todo"]\n${ctx.pendingLspBlocks.join('').trim()}`
+				: '';
+			ctx.pendingLspBlocks = [];
+			const __ephemeralReminder = [__lspSection, memorySuffix, buildTodoReminderSuffix()]
+				.filter(s => s && s.trim())
+				.join('\n\n')
+				.trim();
 			const historyForCall = __ephemeralReminder
 				? [...history, { role: 'user' as const, content: __ephemeralReminder }]
 				: history;
@@ -3650,7 +3740,6 @@ OBJECTIVE
 						// 模型原生 reasoning_content（如 DeepSeek-R1 / QwQ）
 						const reasoningText = (chunk as any).text ?? '';
 						if (reasoningText.length > 0) {
-							console.log(`[Agent] ✨ 原生思考内容 (${reasoningText.length}字): ${reasoningText.slice(0, 50)}${reasoningText.length > 50 ? '…' : ''}`);
 							// 累积到独立的 iterReasoningText，用于持久化为 reasoning 消息
 							// 注意：**绝不**进 API history，否则下轮模型会把自己的思考当上下文
 							iterReasoningText += reasoningText;
@@ -3984,7 +4073,12 @@ OBJECTIVE
 				if (DESTRUCTIVE_TOOLS.has(tc.name)) {
 					// 每次工具调用都从 DB 实时读 session.mode，
 					// 这样用户在执行过程中切换模式都能立刻生效。
-					const liveMode = server.sessionManager.getMode(sessionId);
+					// F1 修复：子 agent 上下文（sessionId 以 'subagent_' 开头）强制 bypass。
+					// 子 session 没注册到 sessionManager → getMode 默认返回 'code' →
+					// COMMAND_EXEC(bash/execute_command) 走审批路径 → 但前端不监听 subSession 的审批
+					// → 子 agent 永久挂死、父 task 同步等死。父 agent 已审过 task 派发，子内部 bypass 即可。
+					const __isSubagent = sessionId.startsWith('subagent_');
+					const liveMode = __isSubagent ? 'bypass' : server.sessionManager.getMode(sessionId);
 
 					// ★ bypass 模式：所有破坏性工具一律自动批准
 					if (liveMode === 'bypass') {

@@ -22,6 +22,23 @@ use std::time::Duration;
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, RunEvent, WindowEvent};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+// F11: Windows 上启动子进程时不弹 cmd 黑窗
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// 构造一个 std::process::Command，在 Windows 上设置 CREATE_NO_WINDOW (0x08000000)
+/// 让子进程**不分配 console**——治启动时 netstat / taskkill / curl 等 Windows 系统命令反复闪黑窗。
+/// 其它平台行为与 std::process::Command::new 完全相同。
+fn cmd_no_window(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 mod terminal;
 mod pet;
 mod skills;
@@ -120,22 +137,22 @@ fn hard_kill_sidecar(child: Option<CommandChild>, pid: Option<u32>) {
         #[cfg(target_os = "windows")]
         {
             // taskkill /T 递归杀子进程树，/F 强制
-            let _ = std::process::Command::new("taskkill")
+            let _ = cmd_no_window("taskkill")
                 .args(["/PID", &p.to_string(), "/T", "/F"])
                 .output();
         }
         #[cfg(unix)]
         {
             // 先 SIGTERM 让 Hono 优雅关闭（释放端口）
-            let _ = std::process::Command::new("kill")
+            let _ = cmd_no_window("kill")
                 .args(["-TERM", &p.to_string()])
                 .output();
             std::thread::sleep(Duration::from_millis(250));
             // 250ms 后如果还在，SIGKILL 强杀（同时杀掉子进程组 -pid）
-            let _ = std::process::Command::new("kill")
+            let _ = cmd_no_window("kill")
                 .args(["-KILL", &format!("-{}", p)])  // 杀整个进程组
                 .output();
-            let _ = std::process::Command::new("kill")
+            let _ = cmd_no_window("kill")
                 .args(["-KILL", &p.to_string()])
                 .output();
         }
@@ -171,7 +188,7 @@ fn append_sidecar_log(line: &str) {
 fn kill_process_on_port(port: &str) {
     #[cfg(windows)]
     {
-        if let Ok(out) = std::process::Command::new("netstat").args(["-ano"]).output() {
+        if let Ok(out) = cmd_no_window("netstat").args(["-ano"]).output() {
             let text = String::from_utf8_lossy(&out.stdout);
             let needle = format!(":{}", port);
             let mut pids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -183,17 +200,17 @@ fn kill_process_on_port(port: &str) {
                 }
             }
             for pid in pids {
-                let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).output();
+                let _ = cmd_no_window("taskkill").args(["/F", "/PID", &pid]).output();
                 println!("[maxian-desktop] 杀掉占用端口 {} 的残留进程 pid={}", port, pid);
             }
         }
     }
     #[cfg(unix)]
     {
-        if let Ok(out) = std::process::Command::new("lsof").args(["-ti", &format!(":{}", port)]).output() {
+        if let Ok(out) = cmd_no_window("lsof").args(["-ti", &format!(":{}", port)]).output() {
             let text = String::from_utf8_lossy(&out.stdout);
             for pid in text.split_whitespace() {
-                let _ = std::process::Command::new("kill").args(["-9", pid]).output();
+                let _ = cmd_no_window("kill").args(["-9", pid]).output();
                 println!("[maxian-desktop] 杀掉占用端口 {} 的残留进程 pid={}", port, pid);
             }
         }
@@ -211,7 +228,7 @@ fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
     };
     // 用 curl 做 HEAD 探活（避免引入 reqwest 依赖；Windows 10+ 已自带 curl.exe）
     let devnull = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let out = std::process::Command::new("curl")
+    let out = cmd_no_window("curl")
         .args([
             "-s", "-o", devnull,
             "-w", "%{http_code}",
@@ -539,7 +556,7 @@ fn open_path_in_explorer(path: String) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let cmd_name = "xdg-open";
 
-    std::process::Command::new(cmd_name)
+    cmd_no_window(cmd_name)
         .arg(target.as_os_str())
         .spawn()
         .map_err(|e| format!("打开 {} 失败（{}）: {}", target.display(), cmd_name, e))?;
