@@ -149,7 +149,9 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 	app.get('/workspaces/:id/files', async (c) => {
 		const id = c.req.param('id');
 		const pattern = c.req.query('pattern') || '**/*';
-		const files = await workspaceManager.listFiles(id, pattern);
+		// F15b 真异步：?wait=0 时缓存 miss 立即返回空数组（前端"双 fetch"模式立刻解阻塞 UI）
+		const wait = c.req.query('wait') !== '0';
+		const files = await workspaceManager.listFiles(id, pattern, wait);
 		return c.json({ files });
 	});
 

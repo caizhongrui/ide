@@ -241,14 +241,21 @@ export class WorkspaceManager {
 	/** F15a: 同一 workspace 的并发 listFiles 调用去重（避免重复扫） */
 	private scanningPromise = new Map<string, Promise<string[]>>();
 
-	async listFiles(id: string, query: string = ''): Promise<string[]> {
+	/**
+	 * @param id workspaceId
+	 * @param query 模糊过滤（路径子串）
+	 * @param wait F15b 真异步：默认 true（缓存 miss 时 await 扫完才返回）；
+	 *             false → 缓存 miss 时**立即返回空数组**，扫描继续在后台跑——
+	 *             前端可"双 fetch"模式：先用 wait=false 立刻解阻塞 UI，再 await 完整列表。
+	 */
+	async listFiles(id: string, query: string = '', wait: boolean = true): Promise<string[]> {
 		const ws = this.get(id);
 		if (!ws) throw new Error(`Workspace ${id} not found`);
 
 		// F15a: 优先命中缓存
 		let files = this.fileCache.get(id);
 		if (!files) {
-			// 缓存 miss：启动扫描（去重 — 同一 ws 并发只扫一次）+ await
+			// 缓存 miss：启动扫描（去重 — 同一 ws 并发只扫一次）
 			let promise = this.scanningPromise.get(id);
 			if (!promise) {
 				promise = (async () => {
@@ -260,6 +267,8 @@ export class WorkspaceManager {
 				this.scanningPromise.set(id, promise);
 				void promise.finally(() => this.scanningPromise.delete(id));
 			}
+			// F15b: wait=false → 不等扫完，立即返回空（扫描继续后台跑，前端可下次再问）
+			if (!wait) return [];
 			files = await promise;
 		}
 

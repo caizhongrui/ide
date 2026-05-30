@@ -593,8 +593,16 @@ export class MaxianClient {
 		await this.request('DELETE', `/workspaces/${id}`);
 	}
 
-	async listFiles(workspaceId: string, pattern?: string): Promise<{ files: string[] }> {
-		const qs = pattern ? `?pattern=${encodeURIComponent(pattern)}` : '';
+	/**
+	 * 列工作区文件。
+	 * @param opts.wait F15b 真异步：默认 true（server 缓存 miss 时 await 扫完才返回）；
+	 *                  false → server 缓存 miss 时立即返回空（前端可"双 fetch"立刻解阻塞 UI，再 await 完整列表）。
+	 */
+	async listFiles(workspaceId: string, pattern?: string, opts?: { wait?: boolean }): Promise<{ files: string[] }> {
+		const params: string[] = [];
+		if (pattern) params.push(`pattern=${encodeURIComponent(pattern)}`);
+		if (opts && opts.wait === false) params.push('wait=0');
+		const qs = params.length > 0 ? '?' + params.join('&') : '';
 		return this.request('GET', `/workspaces/${workspaceId}/files${qs}`);
 	}
 

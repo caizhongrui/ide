@@ -2745,14 +2745,23 @@ export default function App() {
     if (cached?.id === ws.id) return        // 已是最新缓存，无需重新加载
     setWsFileCacheLoading(true)
     void (async () => {
+      const wsId = ws.id
       try {
         const c = await getClient()
-        const res = await c.listFiles(ws.id)
-        setWsFileCache({ id: ws.id, files: res.files ?? [] })
+        // F15b 真异步：第一次 wait=false 立即返回 —— 缓存 miss 时 server 立刻给空数组，UI 不阻塞
+        const immediate = await c.listFiles(wsId, undefined, { wait: false })
+        if (activeWorkspace()?.id !== wsId) return   // 用户已切到别的 ws，丢弃结果
+        setWsFileCache({ id: wsId, files: immediate.files ?? [] })
+        // 立即返回是空（说明 server 缓存 miss + 扫描在后台跑）→ 启动第二次 await 等完整列表
+        if (!immediate.files || immediate.files.length === 0) {
+          const full = await c.listFiles(wsId)   // wait=true（默认），await 扫完
+          if (activeWorkspace()?.id !== wsId) return  // 中途切走，丢弃
+          setWsFileCache({ id: wsId, files: full.files ?? [] })
+        }
       } catch {
-        setWsFileCache({ id: ws.id, files: [] })
+        if (activeWorkspace()?.id === wsId) setWsFileCache({ id: wsId, files: [] })
       } finally {
-        setWsFileCacheLoading(false)
+        if (activeWorkspace()?.id === wsId) setWsFileCacheLoading(false)
       }
     })()
   })
