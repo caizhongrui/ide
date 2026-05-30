@@ -235,18 +235,63 @@ export class WorkspaceManager {
 	 *   源码看不到。15 层足够覆盖常见 Java / Go / 嵌套 monorepo 结构。
 	 *   配合 IGNORED_DIRS 过滤 node_modules / target / dist / build 等大目录，性能可控。
 	 */
+	/** F15a: workspaceId → 完整文件列表的内存缓存。第一次 listFiles 后填充；
+	 *  之后所有 query 都直接走内存过滤，秒回。chokidar 通过 addToFileCache/removeFromFileCache 增量更新。 */
+	private fileCache = new Map<string, string[]>();
+	/** F15a: 同一 workspace 的并发 listFiles 调用去重（避免重复扫） */
+	private scanningPromise = new Map<string, Promise<string[]>>();
+
 	async listFiles(id: string, query: string = ''): Promise<string[]> {
 		const ws = this.get(id);
 		if (!ws) throw new Error(`Workspace ${id} not found`);
-		const results: string[] = [];
-		await this.walkDir(ws.path, ws.path, results, 0, 15);
 
-		if (!query || query === '*' || query === '**/*') return results;
+		// F15a: 优先命中缓存
+		let files = this.fileCache.get(id);
+		if (!files) {
+			// 缓存 miss：启动扫描（去重 — 同一 ws 并发只扫一次）+ await
+			let promise = this.scanningPromise.get(id);
+			if (!promise) {
+				promise = (async () => {
+					const results: string[] = [];
+					await this.walkDir(ws.path, ws.path, results, 0, 15);
+					this.fileCache.set(id, results);
+					return results;
+				})();
+				this.scanningPromise.set(id, promise);
+				void promise.finally(() => this.scanningPromise.delete(id));
+			}
+			files = await promise;
+		}
+
+		if (!query || query === '*' || query === '**/*') return files;
 
 		// 过滤：文件名或相对路径含 query（忽略大小写）
 		const q = query.toLowerCase().replace(/^\*|\*$/g, ''); // 去掉 glob 通配符
-		if (!q) return results;
-		return results.filter(f => f.toLowerCase().includes(q));
+		if (!q) return files;
+		return files.filter(f => f.toLowerCase().includes(q));
+	}
+
+	/** F15a: chokidar 'add' 事件回调（cli.ts subscribeFileChanges 内调用），增量更新缓存 */
+	addToFileCache(workspaceId: string, relPath: string): void {
+		const cache = this.fileCache.get(workspaceId);
+		if (cache && !cache.includes(relPath)) cache.push(relPath);
+	}
+
+	/** F15a: chokidar 'unlink' 事件回调（cli.ts subscribeFileChanges 内调用），增量更新缓存 */
+	removeFromFileCache(workspaceId: string, relPath: string): void {
+		const cache = this.fileCache.get(workspaceId);
+		if (cache) {
+			const idx = cache.indexOf(relPath);
+			if (idx >= 0) cache.splice(idx, 1);
+		}
+	}
+
+	/** F15b: 启动预扫——sidecar 启动后立即对所有 workspace fire-and-forget 填缓存。
+	 *  用户切换 workspace 时大概率缓存已就绪，避免首次 86s 卡顿。失败静默忽略，下次同步 listFiles 重试。 */
+	prefetchAllFiles(): void {
+		for (const ws of this.list()) {
+			void this.listFiles(ws.id).catch(() => { /* 静默 */ });
+		}
 	}
 
 	private static readonly IGNORED_DIRS = new Set([
@@ -254,6 +299,8 @@ export class WorkspaceManager {
 		'.svn', '__pycache__', '.pytest_cache', '.mypy_cache',
 		'vendor', 'Pods', '.gradle', '.idea', '.vscode',
 		'coverage', '.nyc_output', '.turbo', '.next', '.nuxt',
+		// F15c: 加 Java / .NET / Maven / 临时目录
+		'bin', 'obj', '.mvn', 'tmp', 'temp',
 	]);
 
 	private async walkDir(

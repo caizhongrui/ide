@@ -2000,6 +2000,11 @@ async function main() {
 		SessionManager.load(),
 	]);
 
+	// F15b: 启动后立即对所有 workspace 后台预扫文件列表，填 listFiles 缓存。
+	// fire-and-forget，不阻塞 server 启动。用户后续切 workspace 时大概率缓存已就绪，
+	// 避免 Windows 上 Java 大项目首次扫描 86s 卡顿（之前症状：切会话后 UI 1 分钟才出来）。
+	workspaceManager.prefetchAllFiles();
+
 	// K-Watcher：把工作区文件系统变化广播给所有订阅了这个工作区的 SSE 客户端，
 	// 客户端可以增量 patch @ 引用的文件缓存。
 	workspaceManager.subscribeFileChanges((change) => {

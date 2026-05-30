@@ -577,15 +577,32 @@
   /* active 标题保持正常文字色，无 accent 覆盖 */
 
   /* ─── Session item hover actions ─────────────────────── */
+  /* F14: 按钮区改为 absolute 定位，不占 flex 宽度——标题可以显示完整 / 截断更晚。
+   * hover 时渐变淡入，从 transparent 过渡到 item 当前背景色，平滑遮住下方标题尾巴。 */
   .session-item-actions {
+    position: absolute;
+    right: 4px;
+    top: 0;
+    bottom: 0;
     display: flex;
     align-items: center;
     gap: 1px;
+    padding-left: 20px;       /* 左侧 20px 用渐变挡住标题，避免文字与按钮硬叠 */
     opacity: 0;
+    pointer-events: none;
     transition: opacity 120ms;
-    flex-shrink: 0;
   }
-  .session-item:hover .session-item-actions { opacity: 1; }
+  .session-item:hover .session-item-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  /* hover 时按 item 的三种背景状态（default/hover/active）做对应渐变，遮住底部文本尾巴 */
+  .session-item:hover:not(.active) .session-item-actions {
+    background: linear-gradient(to right, transparent 0, var(--bg-hover) 20px);
+  }
+  .session-item.active:hover .session-item-actions {
+    background: linear-gradient(to right, transparent 0, color-mix(in srgb, var(--accent) 12%, var(--bg-muted)) 20px);
+  }
 
   .item-action-btn {
     display: inline-flex;
