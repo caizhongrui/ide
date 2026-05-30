@@ -12,6 +12,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.30',
+		date: '2026-05-30',
+		changes: [
+			'🚨 紧急修复 Windows 上 v0.2.29 安装后启动立刻崩溃（黑窗一闪而过、无法连接服务）',
+			'   · 根因：HTTP 路由注册顺序与 Hono 路由匹配器初始化的 race condition——Windows 前端启动更快、首个请求触发后端冻结路由表',
+			'   · 现把场景模型路由的注册提前到服务监听之前完成',
+		],
+	},
+	{
 		version: '0.2.29',
 		date: '2026-05-30',
 		changes: [

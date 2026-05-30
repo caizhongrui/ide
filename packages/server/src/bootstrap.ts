@@ -49,6 +49,13 @@ export interface BootstrapOptions {
 	listen: ListenOptions;
 	/** 可选的 CORS */
 	cors?: string[] | boolean;
+	/** F12 hotfix: 在 listen 之前注册额外路由的 callback。
+	 *  必须用这个 hook 而不是 bootstrap 返回后再 register —— Hono smart-router 在 listen 后
+	 *  收到首个请求会 build matcher 并冻结路由表，之后再 add route 抛
+	 *  "Can not add a route since the matcher is already built"。
+	 *  Windows 上前端启动快、sidecar 还没 register 完前端就发 GET /scene-models 触发
+	 *  matcher build → sidecar 后续 register 直接崩。必须 listen 前注册完。 */
+	setupExtraRoutes?: (server: CreatedServer) => void | Promise<void>;
 }
 
 export interface BootstrapResult {
@@ -105,6 +112,12 @@ export async function bootstrap(opts: BootstrapOptions): Promise<BootstrapResult
 				});
 			}
 		});
+	}
+
+	// 3.5. F12 hotfix: 给调用方 listen 前注册额外路由的机会（如 /scene-models）。
+	// 必须在 listen 之前，否则 Hono smart-router 收到首个请求会 build matcher → 之后 add 抛错。
+	if (opts.setupExtraRoutes) {
+		await opts.setupExtraRoutes(server);
 	}
 
 	// 4. 启动监听

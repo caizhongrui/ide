@@ -2030,19 +2030,23 @@ async function main() {
 			password: opts.password,
 		},
 		cors: opts.cors,
-	});
-
-	// K-MultiModel (v0.2.25)：注册 /scene-models/:code 透传路由 + 启动预热缓存。
-	// 客户端 ModelSelector 拉清单走这个路由；getAiHandler 也按 (uiMode 对应 businessCode,
-	// session.model) 查 sceneModelCache 拿 supportVision 等 meta 给 AiProxyHandler。
-	registerSceneModelsRoute(server.app, {
-		getAiConfig: () => {
-			const rt = server.getAiConfig();
-			if (rt) return { apiUrl: rt.apiUrl, username: rt.username, password: rt.password };
-			if (aiConfig && aiConfig.type === 'proxy') {
-				return { apiUrl: aiConfig.apiUrl, username: aiConfig.username, password: aiConfig.password };
-			}
-			return null;
+		// F12 hotfix: K-MultiModel /scene-models 路由必须在 listen 之前注册，否则 Windows 上前端
+		// 启动快、立刻发请求触发 Hono build matcher → 之后这里 register 抛 "matcher already built"
+		// → sidecar 启动后立刻崩。bootstrap 在 listen 前调本 callback 就能避开 race。
+		setupExtraRoutes: (srv) => {
+			// K-MultiModel (v0.2.25)：注册 /scene-models/:code 透传路由 + 启动预热缓存。
+			// 客户端 ModelSelector 拉清单走这个路由；getAiHandler 也按 (uiMode 对应 businessCode,
+			// session.model) 查 sceneModelCache 拿 supportVision 等 meta 给 AiProxyHandler。
+			registerSceneModelsRoute(srv.app, {
+				getAiConfig: () => {
+					const rt = srv.getAiConfig();
+					if (rt) return { apiUrl: rt.apiUrl, username: rt.username, password: rt.password };
+					if (aiConfig && aiConfig.type === 'proxy') {
+						return { apiUrl: aiConfig.apiUrl, username: aiConfig.username, password: aiConfig.password };
+					}
+					return null;
+				},
+			});
 		},
 	});
 	// fire-and-forget 预热两个常用 businessCode，让首次 AI 调用时 sceneModelCache 已就绪
