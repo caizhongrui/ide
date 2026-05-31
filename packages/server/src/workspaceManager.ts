@@ -399,11 +399,31 @@ export class WorkspaceManager {
 		this.dbDeleteFile(workspaceId, relPath);
 	}
 
-	/** F18 启动：① 已扫过的 ws 从 DB 秒填内存（loadFileCacheFromDb 已做）；
-	 *  ② 对所有 ws 后台全扫一次做校对（绝不阻塞）—— 从没扫过的首次建缓存，扫过的修正关闭期变化。 */
+	/** F18 启动文件缓存策略（绝不阻塞、绝不抢启动期资源）：
+	 *  ① loadFileCacheFromDb 已秒填内存（已扫过的 ws）；
+	 *  ② **从没扫过的（files_scanned=0）** → 立即后台全扫建缓存（必须，否则没数据）；
+	 *  ③ **已扫过的** → DB 缓存已就绪，启动**不立即全扫**（之前并发全扫所有 ws 的几万次 readdir
+	 *     会占满 Bun 单线程事件循环数十秒，拖慢同期的 messages/git 请求 —— 实测 net 21~37s）。
+	 *     改为延迟 90s（避开启动期 UI/消息加载）后**串行、错峰**校对，每个之间隔 8s，且 walkDir
+	 *     每层让出事件循环 —— 修正应用关闭期间的文件变化，但绝不影响启动期。 */
 	prefetchAllFiles(): void {
-		for (const ws of this.list()) {
-			this.scanWorkspaceFilesBg(ws.id, ws.path);
+		const all = this.list();
+		const scanned: WsRecord[] = [];
+		for (const ws of all) {
+			if (!this.isFilesScanned(ws.id)) {
+				this.scanWorkspaceFilesBg(ws.id, ws.path);   // 首次建缓存：立即后台扫
+			} else {
+				scanned.push(ws);                              // 已扫过：延迟错峰校对
+			}
+		}
+		if (scanned.length > 0) {
+			void (async () => {
+				await new Promise(r => setTimeout(r, 90_000));  // 避开启动期
+				for (const ws of scanned) {
+					this.scanWorkspaceFilesBg(ws.id, ws.path);
+					await new Promise(r => setTimeout(r, 8_000)); // 串行错峰，不并发
+				}
+			})();
 		}
 	}
 
@@ -428,6 +448,9 @@ export class WorkspaceManager {
 		try {
 			entries = await fs.readdir(current, { withFileTypes: true });
 		} catch { return; }
+		// F18：每读完一个目录就让出事件循环一拍，给同期的 HTTP 请求（messages/git）插队的机会，
+		// 避免大项目几万次 readdir 把 Bun 单线程占满数十秒、拖慢用户操作。setImmediate 开销极小。
+		await new Promise<void>(r => setImmediate(r));
 		for (const entry of entries) {
 			if (entry.name.startsWith('.')) continue;
 			if (WorkspaceManager.IGNORED_DIRS.has(entry.name)) continue;
