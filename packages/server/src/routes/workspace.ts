@@ -7,11 +7,42 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import type { WorkspaceManager } from '../workspaceManager.js';
+
+/**
+ * F21：git 调用改 **异步 spawn**，不再用 execSync 同步阻塞事件循环。
+ * 之前 execSync 每次 git（rev-parse / branch / worktree）都同步卡死整个 Bun 单线程，
+ * 切会话拉所有 workspace 的 branches/current-branch 时十几次串行同步阻塞，历史消息全排队。
+ * 改 spawn 后 git 子进程在后台跑，事件循环不被占用，其它 HTTP 请求正常处理。
+ * @param args git 参数数组（如 ['branch','--show-current']）
+ * @returns stdout（trim 前）。失败 reject。
+ */
+function gitAsync(args: string[], cwd: string, timeoutMs = 8000): Promise<string> {
+	return new Promise<string>((resolve, reject) => {
+		const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+		let out = '';
+		let err = '';
+		const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } reject(new Error(`git ${args[0]} 超时 ${timeoutMs}ms`)); }, timeoutMs);
+		child.stdout.on('data', d => { out += d.toString(); });
+		child.stderr.on('data', d => { err += d.toString(); });
+		child.on('error', e => { clearTimeout(timer); reject(e); });
+		child.on('close', code => {
+			clearTimeout(timer);
+			if (code === 0) resolve(out);
+			else reject(new Error(`git ${args.join(' ')} exit ${code}: ${err.trim()}`));
+		});
+	});
+}
+
+/** F21：异步判断是否 git 仓库（git rev-parse --git-dir），不阻塞。 */
+async function isGitRepoAsync(dirPath: string): Promise<boolean> {
+	try { await gitAsync(['rev-parse', '--git-dir'], dirPath, 4000); return true; }
+	catch { return false; }
+}
 
 /** 文件扩展名 → MIME 类型 */
 const MIME_MAP: Record<string, string> = {
@@ -570,26 +601,16 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		return worktrees;
 	}
 
-	/** 判断目录是否是 git 仓库 */
-	function isGitRepo(dirPath: string): boolean {
-		try {
-			execSync('git rev-parse --git-dir', { cwd: dirPath, encoding: 'utf8', stdio: 'pipe' });
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
-	// 列出工作区的 git worktrees
-	app.get('/workspaces/:id/worktrees', (c) => {
+	// 列出工作区的 git worktrees（F21 全异步）
+	app.get('/workspaces/:id/worktrees', async (c) => {
 		const id = c.req.param('id');
 		const ws = workspaceManager.list().find(w => w.id === id);
 		if (!ws) return c.json({ error: 'workspace not found' }, 404);
-		if (!isGitRepo(ws.path)) {
+		if (!(await isGitRepoAsync(ws.path))) {
 			return c.json({ worktrees: [], branches: [], isGitRepo: false });
 		}
 		try {
-			const out = execSync('git worktree list --porcelain', { cwd: ws.path, encoding: 'utf8' });
+			const out = await gitAsync(['worktree', 'list', '--porcelain'], ws.path);
 			const worktrees = parseWorktrees(out);
 			return c.json({ worktrees, isGitRepo: true });
 		} catch (e) {
@@ -597,16 +618,16 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		}
 	});
 
-	// 列出 git 分支（本地分支）
-	app.get('/workspaces/:id/branches', (c) => {
+	// 列出 git 分支（本地分支）（F21 全异步）
+	app.get('/workspaces/:id/branches', async (c) => {
 		const id = c.req.param('id');
 		const ws = workspaceManager.list().find(w => w.id === id);
 		if (!ws) return c.json({ error: 'workspace not found' }, 404);
-		if (!isGitRepo(ws.path)) {
+		if (!(await isGitRepoAsync(ws.path))) {
 			return c.json({ branches: [], isGitRepo: false });
 		}
 		try {
-			const out = execSync('git branch --format=%(refname:short)', { cwd: ws.path, encoding: 'utf8' });
+			const out = await gitAsync(['branch', '--format=%(refname:short)'], ws.path);
 			const branches = out.trim().split('\n').filter(Boolean);
 			return c.json({ branches, isGitRepo: true });
 		} catch (e) {
@@ -614,22 +635,24 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		}
 	});
 
-	// 创建新 worktree
+	// 创建新 worktree（F21 全异步）
 	app.post('/workspaces/:id/worktrees',
 		zValidator('json', z.object({
 			branch: z.string(),
 			newBranch: z.string().optional(),  // 若提供，以新分支名创建
 			worktreePath: z.string().optional(), // 若不提供，使用 <workspace>/../<branch>
 		})),
-		(c) => {
+		async (c) => {
 			const id = c.req.param('id');
 			const ws = workspaceManager.list().find(w => w.id === id);
 			if (!ws) return c.json({ error: 'workspace not found' }, 404);
 			const { branch, newBranch, worktreePath } = c.req.valid('json');
 			const wtPath = worktreePath ?? path.join(path.dirname(ws.path), newBranch ?? branch);
 			try {
-				const branchArg = newBranch ? `-b ${newBranch} ${branch}` : branch;
-				execSync(`git worktree add "${wtPath}" ${branchArg}`, { cwd: ws.path, encoding: 'utf8' });
+				const args = newBranch
+					? ['worktree', 'add', wtPath, '-b', newBranch, branch]
+					: ['worktree', 'add', wtPath, branch];
+				await gitAsync(args, ws.path, 30000);
 				return c.json({ ok: true, path: wtPath });
 			} catch (e) {
 				return c.json({ error: String(e) }, 500);
@@ -637,30 +660,30 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		}
 	);
 
-	// 获取当前 git 分支
-	app.get('/workspaces/:id/current-branch', (c) => {
+	// 获取当前 git 分支（F21 全异步）
+	app.get('/workspaces/:id/current-branch', async (c) => {
 		const id = c.req.param('id');
 		const ws = workspaceManager.list().find(w => w.id === id);
 		if (!ws) return c.json({ error: 'workspace not found' }, 404);
-		if (!isGitRepo(ws.path)) return c.json({ branch: null, isGitRepo: false });
+		if (!(await isGitRepoAsync(ws.path))) return c.json({ branch: null, isGitRepo: false });
 		try {
-			const branch = execSync('git branch --show-current', { cwd: ws.path, encoding: 'utf8' }).trim();
+			const branch = (await gitAsync(['branch', '--show-current'], ws.path)).trim();
 			return c.json({ branch: branch || null, isGitRepo: true });
 		} catch (e) {
 			return c.json({ branch: null, isGitRepo: true, error: String(e) });
 		}
 	});
 
-	// 检出 git 分支
+	// 检出 git 分支（F21 全异步）
 	app.post('/workspaces/:id/checkout',
 		zValidator('json', z.object({ branch: z.string() })),
-		(c) => {
+		async (c) => {
 			const id = c.req.param('id');
 			const ws = workspaceManager.list().find(w => w.id === id);
 			if (!ws) return c.json({ error: 'workspace not found' }, 404);
 			const { branch } = c.req.valid('json');
 			try {
-				execSync(`git checkout ${JSON.stringify(branch)}`, { cwd: ws.path, encoding: 'utf8' });
+				await gitAsync(['checkout', branch], ws.path, 30000);
 				return c.json({ ok: true });
 			} catch (e) {
 				return c.json({ error: String(e) }, 500);
@@ -668,16 +691,16 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		}
 	);
 
-	// 删除 worktree
+	// 删除 worktree（F21 全异步）
 	app.delete('/workspaces/:id/worktrees',
 		zValidator('json', z.object({ worktreePath: z.string() })),
-		(c) => {
+		async (c) => {
 			const id = c.req.param('id');
 			const ws = workspaceManager.list().find(w => w.id === id);
 			if (!ws) return c.json({ error: 'workspace not found' }, 404);
 			const { worktreePath } = c.req.valid('json');
 			try {
-				execSync(`git worktree remove "${worktreePath}" --force`, { cwd: ws.path, encoding: 'utf8' });
+				await gitAsync(['worktree', 'remove', worktreePath, '--force'], ws.path, 30000);
 				return c.json({ ok: true });
 			} catch (e) {
 				return c.json({ error: String(e) }, 500);

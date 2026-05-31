@@ -22,6 +22,14 @@ export type WorkspaceFilesChange = {
 };
 export type WorkspaceFilesListener = (change: WorkspaceFilesChange) => void;
 
+/** DIAG：walkDir 扫描耗时统计，定位"扫描慢"的真凶 */
+interface WalkStats {
+	dirCount: number;                            // 遍历的目录总数
+	readdirMs: number;                           // readdir I/O 累计耗时
+	yieldMs: number;                             // setImmediate 让出累计耗时
+	slowDirs: Array<{ dir: string; ms: number }>; // readdir > 30ms 的慢目录
+}
+
 type WsRecord = WorkspaceInfo & { id: string };
 
 /** 数据库行类型 */
@@ -267,18 +275,43 @@ export class WorkspaceManager {
 			return !!row?.files_scanned;
 		} catch { return false; }
 	}
-	/** 全量替换某 ws 的 DB 文件列表（事务批量，置 files_scanned=1）。在后台调用，不在请求路径。 */
-	private saveFilesToDb(wsId: string, files: string[]): void {
+	/** F20 首次全量写 DB（**分批 + 每批让出事件循环**）。
+	 *  ⚠️ bun:sqlite 是同步 API：几万行一次性 INSERT 会同步卡死事件循环数秒，期间所有 HTTP
+	 *  （历史消息 / git）被阻塞、用户切会话看不到历史。这里每 2000 行一个小事务，事务之间
+	 *  await setImmediate 让出，给同期请求插队机会。仅在**首次**（files_scanned=0）调用。 */
+	private async saveFilesToDbFull(wsId: string, files: string[]): Promise<void> {
 		try {
 			const db = getDb();
-			const tx = db.transaction((list: string[]) => {
-				db.prepare('DELETE FROM workspace_files WHERE workspace_id = ?').run(wsId);
-				const ins = db.prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)');
-				for (const p of list) ins.run(wsId, p);
-				db.prepare('UPDATE workspaces SET files_scanned = 1 WHERE id = ?').run(wsId);
+			db.prepare('DELETE FROM workspace_files WHERE workspace_id = ?').run(wsId);
+			const ins = db.prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)');
+			const BATCH = 2000;
+			for (let i = 0; i < files.length; i += BATCH) {
+				const slice = files.slice(i, i + BATCH);
+				const tx = db.transaction((list: string[]) => { for (const p of list) ins.run(wsId, p); });
+				tx(slice);
+				await new Promise<void>(r => setImmediate(r));  // 每批让出，避免同步卡死
+			}
+			db.prepare('UPDATE workspaces SET files_scanned = 1 WHERE id = ?').run(wsId);
+		} catch (e) { console.error('[F20] saveFilesToDbFull:', e); }
+	}
+
+	/** F20 增量写 DB（只写 diff：added INSERT / removed DELETE）。校对用，diff=0 时零写入、不卡。 */
+	private applyDiffToDb(wsId: string, added: string[], removed: string[]): void {
+		if (added.length === 0 && removed.length === 0) return;   // 零写入
+		try {
+			const db = getDb();
+			const tx = db.transaction(() => {
+				if (added.length > 0) {
+					const ins = db.prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)');
+					for (const p of added) ins.run(wsId, p);
+				}
+				if (removed.length > 0) {
+					const del = db.prepare('DELETE FROM workspace_files WHERE workspace_id = ? AND path = ?');
+					for (const p of removed) del.run(wsId, p);
+				}
 			});
-			tx(files);
-		} catch (e) { console.error('[F18] saveFilesToDb:', e); }
+			tx();
+		} catch (e) { console.error('[F20] applyDiffToDb:', e); }
 	}
 	private dbInsertFile(wsId: string, relPath: string): void {
 		try { getDb().prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)').run(wsId, relPath); } catch { /* ignore */ }
@@ -289,13 +322,21 @@ export class WorkspaceManager {
 
 	/** F18 启动：从 DB 把所有 ws 的文件列表填进内存热缓存（秒回，不扫盘）。 */
 	loadFileCacheFromDb(): void {
+		// DIAG：启动同步 SELECT 几万行也会卡事件循环——计时每个 ws
+		const __t0 = performance.now();
+		let __total = 0;
 		for (const ws of this.list()) {
+			const __wt0 = performance.now();
 			const files = this.loadFilesFromDb(ws.id);
+			const __wms = performance.now() - __wt0;
 			if (files.length > 0) {
 				this.fileCache.set(ws.id, files);
 				this.fileCacheSet.set(ws.id, new Set(files));
+				__total += files.length;
+				if (__wms > 30) console.log(`[F18-DIAG] DB读 ${ws.name}: ${files.length}文件 ${__wms.toFixed(0)}ms`);
 			}
 		}
+		console.log(`[F18-DIAG] loadFileCacheFromDb 总: ${__total}文件 ${(performance.now() - __t0).toFixed(0)}ms（启动同步读，注意是否卡）`);
 	}
 
 	/**
@@ -341,19 +382,41 @@ export class WorkspaceManager {
 		this.scanningInProgress.add(wsId);
 		void (async () => {
 			try {
+				const wasScanned = this.isFilesScanned(wsId);
 				const results: string[] = [];
-				await this.walkDir(wsPath, wsPath, results, 0, 15);
+				// DIAG：扫描耗时分解，定位 85 秒花在哪
+				const __stats: WalkStats = { dirCount: 0, readdirMs: 0, yieldMs: 0, slowDirs: [] };
+				const __scanT0 = performance.now();
+				await this.walkDir(wsPath, wsPath, results, 0, 15, __stats);
+				const __scanMs = performance.now() - __scanT0;
+				const __slow = __stats.slowDirs
+					.sort((a, b) => b.ms - a.ms).slice(0, 5)
+					.map(d => `${d.ms.toFixed(0)}ms:${d.dir.split(/[\\/]/).slice(-2).join('/')}`).join(' | ');
+				console.log(
+					`[F18-DIAG] ${wsPath.split(/[\\/]/).pop()} 扫描分解: ` +
+					`文件${results.length} 目录${__stats.dirCount} | ` +
+					`walkDir总${__scanMs.toFixed(0)}ms = readdir累计${__stats.readdirMs.toFixed(0)}ms + 让出累计${__stats.yieldMs.toFixed(0)}ms + 其余${(__scanMs - __stats.readdirMs - __stats.yieldMs).toFixed(0)}ms | ` +
+					`慢目录(>30ms)共${__stats.slowDirs.length}个 top5: ${__slow || '无'}`
+				);
+				// DIAG：diff 计算耗时
+				const __diffT0 = performance.now();
 				const fresh = new Set(results);
 				const old = this.fileCacheSet.get(wsId) ?? new Set<string>();
-				// diff：算出新增 / 删除（用于 broadcast 前端增量更新）
 				const added:   string[] = results.filter(p => !old.has(p));
 				const removed: string[] = [...old].filter(p => !fresh.has(p));
-				// 写内存
 				this.fileCache.set(wsId, results);
 				this.fileCacheSet.set(wsId, fresh);
-				// 写 DB（事务批量，置 files_scanned=1）
-				this.saveFilesToDb(wsId, results);
-				// 有变化 → broadcast 前端增量
+				const __diffMs = performance.now() - __diffT0;
+				// DIAG：DB 写耗时（同步操作，会卡事件循环——重点观察）
+				const __dbT0 = performance.now();
+				if (!wasScanned) {
+					await this.saveFilesToDbFull(wsId, results);
+				} else {
+					this.applyDiffToDb(wsId, added, removed);
+				}
+				const __dbMs = performance.now() - __dbT0;
+				// DIAG：broadcast 耗时
+				const __bcT0 = performance.now();
 				if (added.length > 0 || removed.length > 0) {
 					const ws = this.get(wsId);
 					if (ws) {
@@ -363,7 +426,11 @@ export class WorkspaceManager {
 						}
 					}
 				}
-				console.log(`[F18] ${wsId} 全扫完成：${results.length} 文件（新增 ${added.length} / 删除 ${removed.length}）`);
+				const __bcMs = performance.now() - __bcT0;
+				console.log(
+					`[F18] ${wsPath.split(/[\\/]/).pop()} 全扫完成: 文件${results.length}(新增${added.length}/删除${removed.length}) ` +
+					`| diff计算${__diffMs.toFixed(0)}ms | DB写${__dbMs.toFixed(0)}ms(${wasScanned ? '增量' : '全量'}) | broadcast${__bcMs.toFixed(0)}ms`
+				);
 			} catch (e) {
 				console.error('[F18] scanWorkspaceFilesBg:', e);
 			} finally {
@@ -441,27 +508,35 @@ export class WorkspaceManager {
 		current: string,
 		out: string[],
 		depth: number,
-		maxDepth: number
+		maxDepth: number,
+		stats?: WalkStats,
 	): Promise<void> {
 		if (depth > maxDepth) return;
 		let entries: import('node:fs').Dirent[];
+		// DIAG：单次 readdir 计时——定位"扫描慢"到底是 readdir I/O 慢（Defender/慢盘）还是别的
+		const __t0 = performance.now();
 		try {
 			entries = await fs.readdir(current, { withFileTypes: true });
 		} catch { return; }
-		// F18：每读完一个目录就让出事件循环一拍，给同期的 HTTP 请求（messages/git）插队的机会，
-		// 避免大项目几万次 readdir 把 Bun 单线程占满数十秒、拖慢用户操作。setImmediate 开销极小。
+		if (stats) {
+			const dt = performance.now() - __t0;
+			stats.dirCount++;
+			stats.readdirMs += dt;
+			if (dt > 30) {               // 记录慢目录（readdir > 30ms）
+				if (stats.slowDirs.length < 200) stats.slowDirs.push({ dir: current, ms: dt });
+			}
+		}
+		// F18：每读完一个目录就让出事件循环一拍，给同期的 HTTP 请求（messages/git）插队的机会。
+		const __ty = performance.now();
 		await new Promise<void>(r => setImmediate(r));
+		if (stats) stats.yieldMs += performance.now() - __ty;
 		for (const entry of entries) {
 			if (entry.name.startsWith('.')) continue;
 			if (WorkspaceManager.IGNORED_DIRS.has(entry.name)) continue;
 			const full = path.join(current, entry.name);
-			// K-Win (v0.2.24)：path.relative() 在 Windows 返回反斜杠 (a\b\c.java)，
-			// 前端的 buildFileTree() 用 '/'.split() 切路径建树会失败，导致整个文件
-			// 列表在 Windows 上变成一长串扁平节点（看不到树形结构）。
-			// 统一归一化为 POSIX 风格 '/'，与 listFiles() 全链路约定一致。
 			const rel = path.relative(root, full).split(path.sep).join('/');
 			if (entry.isDirectory()) {
-				await this.walkDir(root, full, out, depth + 1, maxDepth);
+				await this.walkDir(root, full, out, depth + 1, maxDepth, stats);
 			} else {
 				out.push(rel);
 			}

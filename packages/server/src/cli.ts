@@ -1988,6 +1988,23 @@ async function main() {
 	const platform  = await createDefaultPlatform();
 	const aiConfig  = loadAiConfig();
 
+	// DIAG：事件循环阻塞监控（终极定位工具）——每 200ms 自检一次，若实际间隔远超预期
+	// （说明这段时间事件循环被某个同步操作占住，所有 HTTP 请求都在等），打印卡了多久。
+	// 配合各模块的 [F18-DIAG] 日志，就能定位"哪个操作卡住了所有功能"。
+	{
+		const EXPECT = 200;
+		let __last = Date.now();
+		const __timer = setInterval(() => {
+			const now = Date.now();
+			const lag = now - __last - EXPECT;
+			__last = now;
+			if (lag > 150) {   // 事件循环被堵 > 150ms 才报（正常抖动 < 50ms）
+				console.log(`[EVENTLOOP-LAG] ⚠️ 事件循环卡了 ${lag}ms（这段时间所有请求被阻塞）@ ${new Date(now).toISOString()}`);
+			}
+		}, EXPECT);
+		(__timer as any).unref?.();
+	}
+
 	// 初始化数据库驱动（按运行时选 bun:sqlite 或 better-sqlite3）
 	const { initDb } = await import('./database.js');
 	await initDb();
