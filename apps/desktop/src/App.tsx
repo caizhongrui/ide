@@ -1970,28 +1970,27 @@ export default function App() {
       const __diagNetStart = performance.now()
       const { messages: stored, hasMore } = await c.getSessionMessages(id, { limit: 50 })
       const __diagNetMs = performance.now() - __diagNetStart
-      // DIAG: 渲染稳定后（progressive rAF 跑完）弹框报告各阶段耗时
-      setTimeout(() => {
+      // DIAG: 渲染稳定后（progressive rAF 跑完）把各阶段耗时**写入 sidecar.log**（不弹框）。
+      // Windows 用户直接看 %USERPROFILE%\.maxian\sidecar.log 里的 [CLIENT-DIAG] 行。
+      // 多个 setTimeout 采样（1s/3s/8s）：若渲染卡很久，后面的采样能看到累计增长。
+      const __diagReport = (tag: string) => {
         if (activeSessionId() !== id) return
         const total = (performance.now() - __diagT0).toFixed(0)
         const reasoningCount = stored.filter((m: any) => m.role === 'reasoning').length
         const maxContentLen = stored.reduce((mx: number, m: any) => Math.max(mx, (m.content ?? '').length), 0)
-        alert(
-          `【诊断】切会话耗时分解\n` +
-          `———————————————\n` +
-          `消息条数: ${stored.length}（其中 reasoning ${reasoningCount} 条）\n` +
-          `最长单条内容: ${maxContentLen} 字\n` +
-          `———————————————\n` +
-          `网络 getMessages: ${__diagNetMs.toFixed(0)}ms\n` +
-          `markdown 渲染: 调用 ${__mdPerf.calls} 次, 累计 ${__mdPerf.totalMs.toFixed(0)}ms\n` +
-          `  ├ marked.parse:  ${__mdPerf.markedMs.toFixed(0)}ms\n` +
-          `  ├ linkify(DOMParser): ${__mdPerf.linkifyMs.toFixed(0)}ms\n` +
-          `  └ DOMPurify:     ${__mdPerf.purifyMs.toFixed(0)}ms\n` +
-          `最慢单次渲染: ${__mdPerf.maxMs.toFixed(0)}ms（长度 ${__mdPerf.maxLen} 字）\n` +
-          `———————————————\n` +
-          `selectSession 总耗时: ${total}ms`
-        )
-      }, 3000)
+        const report =
+          `切会话[${tag}] sid=${id.slice(0, 8)} | ` +
+          `消息=${stored.length}条(reasoning ${reasoningCount}) 最长=${maxContentLen}字 | ` +
+          `net=${__diagNetMs.toFixed(0)}ms | ` +
+          `md: 调用${__mdPerf.calls}次 累计${__mdPerf.totalMs.toFixed(0)}ms ` +
+          `(marked=${__mdPerf.markedMs.toFixed(0)} linkify/DOMParser=${__mdPerf.linkifyMs.toFixed(0)} purify=${__mdPerf.purifyMs.toFixed(0)}) | ` +
+          `最慢单次=${__mdPerf.maxMs.toFixed(0)}ms(${__mdPerf.maxLen}字) | ` +
+          `总=${total}ms`
+        void getClient().then(c => c.reportClientLog(report)).catch(() => {})
+      }
+      setTimeout(() => __diagReport('1s'), 1000)
+      setTimeout(() => __diagReport('3s'), 3000)
+      setTimeout(() => __diagReport('8s'), 8000)
       if (stored.length > 0) {
         progressiveSetMessages(stored.map(storedToChatMessage))
         setMsgHasMore(hasMore)

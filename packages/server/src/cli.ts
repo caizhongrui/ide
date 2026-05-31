@@ -2039,6 +2039,16 @@ async function main() {
 		// 启动快、立刻发请求触发 Hono build matcher → 之后这里 register 抛 "matcher already built"
 		// → sidecar 启动后立刻崩。bootstrap 在 listen 前调本 callback 就能避开 race。
 		setupExtraRoutes: (srv) => {
+			// DIAG（临时）：客户端诊断日志上报 → sidecar console.log → 进 sidecar.log。
+			// 前端 POST { msg } 文本，Windows 用户直接看 %USERPROFILE%\.maxian\sidecar.log。
+			srv.app.post('/__client-log', async (c) => {
+				try {
+					const body = await c.req.json().catch(() => ({} as any));
+					const msg = typeof body?.msg === 'string' ? body.msg : JSON.stringify(body);
+					console.log(`[CLIENT-DIAG] ${msg}`);
+				} catch { /* ignore */ }
+				return c.json({ ok: true });
+			});
 			// K-MultiModel (v0.2.25)：注册 /scene-models/:code 透传路由 + 启动预热缓存。
 			// 客户端 ModelSelector 拉清单走这个路由；getAiHandler 也按 (uiMode 对应 businessCode,
 			// session.model) 查 sceneModelCache 拿 supportVision 等 meta 给 AiProxyHandler。

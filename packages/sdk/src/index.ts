@@ -310,6 +310,11 @@ export class MaxianClient {
 		return this.request('GET', '/health');
 	}
 
+	/** DIAG（临时）：上报客户端诊断文本到 sidecar，console.log 进 sidecar.log */
+	async reportClientLog(msg: string): Promise<void> {
+		try { await this.request('POST', '/__client-log', { msg }); } catch { /* ignore */ }
+	}
+
 	async listSessions(): Promise<{ sessions: SessionSummary[] }> {
 		return this.request('GET', '/sessions');
 	}
