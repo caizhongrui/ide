@@ -2805,20 +2805,30 @@ export default function App() {
       const wsId = ws.id
       try {
         const c = await getClient()
-        // F15b 真异步：第一次 wait=false 立即返回 —— 缓存 miss 时 server 立刻给空数组，UI 不阻塞
-        const immediate = await c.listFiles(wsId, undefined, { wait: false })
-        if (activeWorkspace()?.id !== wsId) return   // 用户已切到别的 ws，丢弃结果
-        setWsFileCache({ id: wsId, files: immediate.files ?? [] })
-        // 立即返回是空（说明 server 缓存 miss + 扫描在后台跑）→ 启动第二次 await 等完整列表
-        if (!immediate.files || immediate.files.length === 0) {
-          const full = await c.listFiles(wsId)   // wait=true（默认），await 扫完
-          if (activeWorkspace()?.id !== wsId) return  // 中途切走，丢弃
-          setWsFileCache({ id: wsId, files: full.files ?? [] })
+        // F17 真异步轮询：**永远只用 wait=false**（server 缓存 miss 立即返回空，扫描后台跑）。
+        // ⚠️ 关键修复：旧代码缓存 miss 时第二次用 wait=true `await c.listFiles(wsId)`，会一直等
+        // 全量扫描（Windows 大 Java 项目如 cimJava 要 72 秒！）。而浏览器对同域名只有 6 个并发
+        // 连接，这个 72 秒请求**占住一个连接**，导致切会话发的 getSessionMessages 在连接池排队
+        // 等 ~70 秒 → "历史 1 分钟才显示"。改为轮询 wait=false 后，前端永不 await 全量扫描，
+        // 连接立即释放，messages 秒回；文件列表后台扫完后某次轮询自动拿到（@ mention 用）。
+        let delay = 800
+        const pollOnce = async (): Promise<void> => {
+          if (activeWorkspace()?.id !== wsId) return  // 切走了，停止轮询
+          const r = await c.listFiles(wsId, undefined, { wait: false })
+          if (activeWorkspace()?.id !== wsId) return
+          const files = r.files ?? []
+          if (files.length > 0) {
+            setWsFileCache({ id: wsId, files })
+            setWsFileCacheLoading(false)
+            return
+          }
+          // 仍空（扫描后台进行中）→ 退避轮询（800ms → 最多 4s），直到拿到或切走
+          delay = Math.min(delay * 1.5, 4000)
+          setTimeout(() => { void pollOnce() }, delay)
         }
+        await pollOnce()
       } catch {
-        if (activeWorkspace()?.id === wsId) setWsFileCache({ id: wsId, files: [] })
-      } finally {
-        if (activeWorkspace()?.id === wsId) setWsFileCacheLoading(false)
+        if (activeWorkspace()?.id === wsId) { setWsFileCache({ id: wsId, files: [] }); setWsFileCacheLoading(false) }
       }
     })()
   })

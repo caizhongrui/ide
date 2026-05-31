@@ -12,6 +12,16 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.33',
+		date: '2026-05-31',
+		changes: [
+			'⚡ 修复 Windows 切换会话历史卡 1 分钟才显示（找到真正原因）：',
+			'   · 真因不是渲染——是大项目（如几万文件的 Java 工程）文件扫描要 70 秒，占住浏览器 HTTP 连接，导致切会话拉取历史消息的请求在连接池排队等待',
+			'   · 现在文件列表改为轮询式后台加载，永不阻塞连接，历史消息秒显；文件列表扫完后自动补上（@ 引用文件用）',
+			'（仍保留诊断日志，确认修复效果后下版移除）',
+		],
+	},
+	{
 		version: '0.2.32',
 		date: '2026-05-30',
 		changes: [
