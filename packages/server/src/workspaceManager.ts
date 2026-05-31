@@ -62,6 +62,9 @@ export class WorkspaceManager {
 		const db = getDb();
 		const count = (db.prepare('SELECT COUNT(*) as c FROM workspaces').get() as { c: number }).c;
 		console.log(`[Database] 已加载 ${count} 个工作区`);
+		// F18：启动时从 DB 把已扫过的文件列表秒填内存热缓存（几十 ms，不扫盘）。
+		// 之后 cli.ts prefetchAllFiles() 会后台全扫校对（绝不阻塞）修正关闭期变化。
+		mgr.loadFileCacheFromDb();
 		// 给已存在的工作区启 watcher（启动失败不阻塞服务启动）
 		await mgr.startAllWatchers().catch(e => console.error('[WorkspaceWatcher] startAllWatchers:', e));
 		return mgr;
@@ -154,6 +157,9 @@ export class WorkspaceManager {
 		if (added.length === 0 && removed.length === 0) return;
 		const ws = this.get(wsId);
 		if (!ws) return;                    // workspace 已被删
+		// F18：chokidar 实时增量 → 同步内存热缓存 + DB（再 broadcast 前端）
+		for (const p of added)   this.addToFileCache(wsId, p);
+		for (const p of removed) this.removeFromFileCache(wsId, p);
 		const change: WorkspaceFilesChange = {
 			workspaceId: wsId, workspacePath: ws.path, added, removed,
 		};
@@ -202,6 +208,8 @@ export class WorkspaceManager {
 
 		// 启动文件 watcher（失败不阻塞 add 成功）
 		this.startWatcher(id, resolved).catch(e => console.error(`[WorkspaceWatcher] add-start ${id}:`, e));
+		// F18：新 workspace 后台全扫一次建文件缓存（fire-and-forget，绝不阻塞 add 返回）
+		this.scanWorkspaceFilesBg(id, resolved);
 
 		return { id, path: resolved, name, openedAt };
 	}
@@ -235,71 +243,167 @@ export class WorkspaceManager {
 	 *   源码看不到。15 层足够覆盖常见 Java / Go / 嵌套 monorepo 结构。
 	 *   配合 IGNORED_DIRS 过滤 node_modules / target / dist / build 等大目录，性能可控。
 	 */
-	/** F15a: workspaceId → 完整文件列表的内存缓存。第一次 listFiles 后填充；
-	 *  之后所有 query 都直接走内存过滤，秒回。chokidar 通过 addToFileCache/removeFromFileCache 增量更新。 */
+	/** F18: workspaceId → 完整文件列表的内存热缓存（从 DB 填，chokidar 实时增量同步）。
+	 *  listFiles 永远只读这里 —— **绝不在请求路径上做全量扫描**（那会阻塞 HTTP 连接）。 */
 	private fileCache = new Map<string, string[]>();
-	/** F15a: 同一 workspace 的并发 listFiles 调用去重（避免重复扫） */
-	private scanningPromise = new Map<string, Promise<string[]>>();
+	/** F18: 内存 Set 镜像（O(1) 去重判断，避免 includes 线性扫几万条） */
+	private fileCacheSet = new Map<string, Set<string>>();
+	/** F18: 正在后台全扫的 ws（去重，避免并发重复全扫） */
+	private scanningInProgress = new Set<string>();
+
+	// ─── F18 DB 持久层 helpers ───────────────────────────────────────────────
+	/** 从 DB 读某 ws 的文件列表 */
+	private loadFilesFromDb(wsId: string): string[] {
+		try {
+			const db = getDb();
+			const rows = db.prepare('SELECT path FROM workspace_files WHERE workspace_id = ?').all(wsId) as Array<{ path: string }>;
+			return rows.map(r => r.path);
+		} catch { return []; }
+	}
+	private isFilesScanned(wsId: string): boolean {
+		try {
+			const db = getDb();
+			const row = db.prepare('SELECT files_scanned FROM workspaces WHERE id = ?').get(wsId) as { files_scanned?: number } | undefined;
+			return !!row?.files_scanned;
+		} catch { return false; }
+	}
+	/** 全量替换某 ws 的 DB 文件列表（事务批量，置 files_scanned=1）。在后台调用，不在请求路径。 */
+	private saveFilesToDb(wsId: string, files: string[]): void {
+		try {
+			const db = getDb();
+			const tx = db.transaction((list: string[]) => {
+				db.prepare('DELETE FROM workspace_files WHERE workspace_id = ?').run(wsId);
+				const ins = db.prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)');
+				for (const p of list) ins.run(wsId, p);
+				db.prepare('UPDATE workspaces SET files_scanned = 1 WHERE id = ?').run(wsId);
+			});
+			tx(files);
+		} catch (e) { console.error('[F18] saveFilesToDb:', e); }
+	}
+	private dbInsertFile(wsId: string, relPath: string): void {
+		try { getDb().prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)').run(wsId, relPath); } catch { /* ignore */ }
+	}
+	private dbDeleteFile(wsId: string, relPath: string): void {
+		try { getDb().prepare('DELETE FROM workspace_files WHERE workspace_id = ? AND path = ?').run(wsId, relPath); } catch { /* ignore */ }
+	}
+
+	/** F18 启动：从 DB 把所有 ws 的文件列表填进内存热缓存（秒回，不扫盘）。 */
+	loadFileCacheFromDb(): void {
+		for (const ws of this.list()) {
+			const files = this.loadFilesFromDb(ws.id);
+			if (files.length > 0) {
+				this.fileCache.set(ws.id, files);
+				this.fileCacheSet.set(ws.id, new Set(files));
+			}
+		}
+	}
 
 	/**
 	 * @param id workspaceId
 	 * @param query 模糊过滤（路径子串）
-	 * @param wait F15b 真异步：默认 true（缓存 miss 时 await 扫完才返回）；
-	 *             false → 缓存 miss 时**立即返回空数组**，扫描继续在后台跑——
-	 *             前端可"双 fetch"模式：先用 wait=false 立刻解阻塞 UI，再 await 完整列表。
+	 * @param _wait 兼容旧签名，已忽略 —— listFiles **永不阻塞**，只读内存缓存。
+	 *
+	 * F18：listFiles 只读内存 fileCache（启动时已从 DB 填）。缓存未就绪（从没扫过的新 ws）→
+	 * 立即返回空 + 后台 fire-and-forget 全扫（绝不在请求路径 await 全量扫描，避免占住 HTTP 连接）。
 	 */
-	async listFiles(id: string, query: string = '', wait: boolean = true): Promise<string[]> {
+	async listFiles(id: string, query: string = '', _wait: boolean = true): Promise<string[]> {
 		const ws = this.get(id);
 		if (!ws) throw new Error(`Workspace ${id} not found`);
 
-		// F15a: 优先命中缓存
 		let files = this.fileCache.get(id);
 		if (!files) {
-			// 缓存 miss：启动扫描（去重 — 同一 ws 并发只扫一次）
-			let promise = this.scanningPromise.get(id);
-			if (!promise) {
-				promise = (async () => {
-					const results: string[] = [];
-					await this.walkDir(ws.path, ws.path, results, 0, 15);
-					this.fileCache.set(id, results);
-					return results;
-				})();
-				this.scanningPromise.set(id, promise);
-				void promise.finally(() => this.scanningPromise.delete(id));
+			// 内存没有 → 从 DB 兜底读一次（可能 loadFileCacheFromDb 之后新加的 ws）
+			const fromDb = this.loadFilesFromDb(id);
+			if (fromDb.length > 0) {
+				this.fileCache.set(id, fromDb);
+				this.fileCacheSet.set(id, new Set(fromDb));
+				files = fromDb;
+			} else {
+				// 真的从没扫过 → 触发后台全扫（不阻塞），本次立即返回空
+				this.scanWorkspaceFilesBg(id, ws.path);
+				return [];
 			}
-			// F15b: wait=false → 不等扫完，立即返回空（扫描继续后台跑，前端可下次再问）
-			if (!wait) return [];
-			files = await promise;
 		}
 
 		if (!query || query === '*' || query === '**/*') return files;
-
-		// 过滤：文件名或相对路径含 query（忽略大小写）
-		const q = query.toLowerCase().replace(/^\*|\*$/g, ''); // 去掉 glob 通配符
+		const q = query.toLowerCase().replace(/^\*|\*$/g, '');
 		if (!q) return files;
 		return files.filter(f => f.toLowerCase().includes(q));
 	}
 
-	/** F15a: chokidar 'add' 事件回调（cli.ts subscribeFileChanges 内调用），增量更新缓存 */
-	addToFileCache(workspaceId: string, relPath: string): void {
-		const cache = this.fileCache.get(workspaceId);
-		if (cache && !cache.includes(relPath)) cache.push(relPath);
+	/**
+	 * F18 后台全扫（fire-and-forget，绝不阻塞）：walkDir 全扫 → 写内存 + DB → broadcast 前端。
+	 * 用于：① 新 ws 首次扫描；② 启动后台校对（和 DB diff，修正 app 关闭期间的变化）。
+	 * walkDir 本身是 async（每层 readdir 让出事件循环），全程不阻塞其它请求。
+	 */
+	scanWorkspaceFilesBg(wsId: string, wsPath: string): void {
+		if (this.scanningInProgress.has(wsId)) return;
+		this.scanningInProgress.add(wsId);
+		void (async () => {
+			try {
+				const results: string[] = [];
+				await this.walkDir(wsPath, wsPath, results, 0, 15);
+				const fresh = new Set(results);
+				const old = this.fileCacheSet.get(wsId) ?? new Set<string>();
+				// diff：算出新增 / 删除（用于 broadcast 前端增量更新）
+				const added:   string[] = results.filter(p => !old.has(p));
+				const removed: string[] = [...old].filter(p => !fresh.has(p));
+				// 写内存
+				this.fileCache.set(wsId, results);
+				this.fileCacheSet.set(wsId, fresh);
+				// 写 DB（事务批量，置 files_scanned=1）
+				this.saveFilesToDb(wsId, results);
+				// 有变化 → broadcast 前端增量
+				if (added.length > 0 || removed.length > 0) {
+					const ws = this.get(wsId);
+					if (ws) {
+						const change: WorkspaceFilesChange = { workspaceId: wsId, workspacePath: ws.path, added, removed };
+						for (const listener of this.listeners) {
+							try { listener(change); } catch { /* ignore */ }
+						}
+					}
+				}
+				console.log(`[F18] ${wsId} 全扫完成：${results.length} 文件（新增 ${added.length} / 删除 ${removed.length}）`);
+			} catch (e) {
+				console.error('[F18] scanWorkspaceFilesBg:', e);
+			} finally {
+				this.scanningInProgress.delete(wsId);
+			}
+		})();
 	}
 
-	/** F15a: chokidar 'unlink' 事件回调（cli.ts subscribeFileChanges 内调用），增量更新缓存 */
-	removeFromFileCache(workspaceId: string, relPath: string): void {
-		const cache = this.fileCache.get(workspaceId);
-		if (cache) {
-			const idx = cache.indexOf(relPath);
-			if (idx >= 0) cache.splice(idx, 1);
+	/** F18 chokidar 'add' 实时回写：内存 + DB（路径已归一化 POSIX） */
+	addToFileCache(workspaceId: string, relPath: string): void {
+		const set = this.fileCacheSet.get(workspaceId);
+		if (set && !set.has(relPath)) {
+			set.add(relPath);
+			this.fileCache.get(workspaceId)?.push(relPath);
+			this.dbInsertFile(workspaceId, relPath);
+		} else if (!set) {
+			// 缓存还没建（首次扫描前的变化）—— 仍写 DB，扫描时会合并
+			this.dbInsertFile(workspaceId, relPath);
 		}
 	}
 
-	/** F15b: 启动预扫——sidecar 启动后立即对所有 workspace fire-and-forget 填缓存。
-	 *  用户切换 workspace 时大概率缓存已就绪，避免首次 86s 卡顿。失败静默忽略，下次同步 listFiles 重试。 */
+	/** F18 chokidar 'unlink' 实时回写：内存 + DB */
+	removeFromFileCache(workspaceId: string, relPath: string): void {
+		const set = this.fileCacheSet.get(workspaceId);
+		if (set?.has(relPath)) {
+			set.delete(relPath);
+			const arr = this.fileCache.get(workspaceId);
+			if (arr) {
+				const idx = arr.indexOf(relPath);
+				if (idx >= 0) arr.splice(idx, 1);
+			}
+		}
+		this.dbDeleteFile(workspaceId, relPath);
+	}
+
+	/** F18 启动：① 已扫过的 ws 从 DB 秒填内存（loadFileCacheFromDb 已做）；
+	 *  ② 对所有 ws 后台全扫一次做校对（绝不阻塞）—— 从没扫过的首次建缓存，扫过的修正关闭期变化。 */
 	prefetchAllFiles(): void {
 		for (const ws of this.list()) {
-			void this.listFiles(ws.id).catch(() => { /* 静默 */ });
+			this.scanWorkspaceFilesBg(ws.id, ws.path);
 		}
 	}
 

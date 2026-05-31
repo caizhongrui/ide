@@ -290,9 +290,27 @@ function initSchema(db: Database.Database): void {
 		);
 		CREATE INDEX IF NOT EXISTS idx_codebase_apis_ws
 			ON codebase_index_apis(workspace_id);
+
+		-- ── F18：工作区文件列表持久化缓存（@ 引用补全用）──────────────
+		-- 全量扫描结果存这里，启动直接读（秒回，不再每次重扫 72s）；
+		-- chokidar add/unlink 实时回写；后台低频全扫校对修正关闭期变化。
+		CREATE TABLE IF NOT EXISTS workspace_files (
+			workspace_id TEXT NOT NULL,
+			path         TEXT NOT NULL,          -- 工作区相对路径，POSIX '/'
+			PRIMARY KEY (workspace_id, path)
+		);
+		CREATE INDEX IF NOT EXISTS idx_wsfiles_ws
+			ON workspace_files(workspace_id);
 	`);
 
 	// ── 数据库迁移：补充新增列（对已存在的旧数据库） ─────────────────────────
+	// F18：workspaces 表加 files_scanned 标记（是否已全量扫过文件列表，避免重复全扫）
+	const wsCols = (db.pragma('table_info(workspaces)') as Array<{ name: string }>).map(r => r.name);
+	if (!wsCols.includes('files_scanned')) {
+		db.exec(`ALTER TABLE workspaces ADD COLUMN files_scanned INTEGER NOT NULL DEFAULT 0`);
+		console.log('[Database] 迁移完成：workspaces 表新增 files_scanned 列（F18 文件缓存）');
+	}
+
 	const cols = (db.pragma('table_info(sessions)') as Array<{ name: string }>).map(r => r.name);
 	if (!cols.includes('ui_mode')) {
 		db.exec(`ALTER TABLE sessions ADD COLUMN ui_mode TEXT NOT NULL DEFAULT 'code'`);

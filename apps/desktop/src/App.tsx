@@ -4816,25 +4816,36 @@ export default {
                 </Show>
                 </div>
 
-                {/* Git 状态栏 */}
-                <GitStatusBar
-                  hasWorkspace={() => !!activeWorkspace()}
-                  currentBranch={currentBranch}
-                  showBranchPicker={showBranchPicker}
-                  branchPickerBranches={branchPickerBranches}
-                  branchPickerLoading={branchPickerLoading}
-                  branchPickerSearch={branchPickerSearch}
-                  setBranchPickerSearch={setBranchPickerSearch}
-                  branchPickerRect={branchPickerRect}
-                  onOpenPicker={openBranchPicker}
-                  onSwitchBranch={switchBranch}
-                  onCreateBranch={() => {
-                    setShowBranchPicker(false)
-                    setShowSettings(true)
-                    setSettingsTab("worktree")
-                  }}
-                  rightSlot={<ProcStats />}
-                />
+                {/* 状态栏：Code 模式显示完整 git 栏；Chat 模式纯对话不关联工作区，
+                    只保留右侧内存/CPU 显示（ProcStats），不显示 git 分支信息 */}
+                <Show
+                  when={globalMode() === 'code'}
+                  fallback={
+                    <div class="git-status-bar git-status-bar-chat">
+                      <div style="flex:1" />
+                      <ProcStats />
+                    </div>
+                  }
+                >
+                  <GitStatusBar
+                    hasWorkspace={() => !!activeWorkspace()}
+                    currentBranch={currentBranch}
+                    showBranchPicker={showBranchPicker}
+                    branchPickerBranches={branchPickerBranches}
+                    branchPickerLoading={branchPickerLoading}
+                    branchPickerSearch={branchPickerSearch}
+                    setBranchPickerSearch={setBranchPickerSearch}
+                    branchPickerRect={branchPickerRect}
+                    onOpenPicker={openBranchPicker}
+                    onSwitchBranch={switchBranch}
+                    onCreateBranch={() => {
+                      setShowBranchPicker(false)
+                      setShowSettings(true)
+                      setSettingsTab("worktree")
+                    }}
+                    rightSlot={<ProcStats />}
+                  />
+                </Show>
 
                 <div
                   ref={composerWrapRef}
