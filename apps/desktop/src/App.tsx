@@ -1,6 +1,6 @@
 import { createSignal, createMemo, For, Show, onMount, onCleanup, createEffect, untrack } from "solid-js"
 import type { SessionSummary, Workspace, MaxianEvent, StoredMessage } from "@maxian/sdk"
-import { renderMarkdown, updateMarkdownInto } from "./markdown"
+import { renderMarkdown, updateMarkdownInto, __mdPerf, __resetMdPerf } from "./markdown"
 import hljs from "highlight.js/lib/common"
 import "highlight.js/styles/github-dark.css"
 import logoUrl from "./assets/logo.png"
@@ -1465,6 +1465,37 @@ export default function App() {
     if (recvDotRef) recvDotRef.classList.remove('recv-dot-active')
   }
 
+  // F16: 启动预热——后台触发 marked + DOMPurify + highlight.js 首次加载和 JIT 编译。
+  // 现象：用户第一次切到含历史消息的会话时，这些重模块同步首次加载 + Windows WebView2
+  //       冷 JIT 编译可导致几十秒到 1 分钟卡顿；之后切别的会话因模块/JIT 都热了，秒切。
+  // 修复：app 启动后用 setTimeout(500ms) 让 UI 首屏先画完，再后台跑一次 hljs.highlight
+  //       多语言 + renderMarkdown 含 code/table/markdown 的内容，把所有重模块预热完。
+  //       用户实际切第一个会话时所有重模块已就绪，第一次也秒切。整个预热 < 1s，且后台跑不阻塞 UI。
+  onMount(() => {
+    setTimeout(() => {
+      try {
+        // 1) 预热 hljs：覆盖常用语言（每次 highlight 都会触发对应语言的内部 init）
+        hljs.highlight('const x: number = 1', { language: 'typescript', ignoreIllegals: true })
+        hljs.highlight('def f(): return 1', { language: 'python', ignoreIllegals: true })
+        hljs.highlight('public class A {}', { language: 'java', ignoreIllegals: true })
+        hljs.highlight('echo hi', { language: 'bash', ignoreIllegals: true })
+        hljs.highlightAuto('console.log("warm")')   // 触发 auto-detect 的初始化
+        // 2) 预热 marked + DOMPurify（通过 renderMarkdown 跑一次"重内容"）
+        void import('./markdown').then((m) => {
+          try {
+            m.renderMarkdown(
+              '**bold** *italic* `inline` [link](#)\n\n' +
+              '```typescript\nconst x: number = 1\nfunction foo() { return [1,2,3].map(n => n * 2) }\n```\n\n' +
+              '| a | b |\n|---|---|\n| 1 | 2 |\n\n> blockquote\n\n- li1\n- li2'
+            )
+          } catch { /* 忽略 */ }
+        })
+      } catch (e) {
+        console.warn('[F16 预热] 失败（忽略，不影响功能）:', e)
+      }
+    }, 500)   // 给 UI 首屏 500ms 时间，再后台预热
+  })
+
   // ─── 平台检测：给 body 加 class，让 CSS 能区分 macOS / Windows / Linux ──
   // macOS 用 titleBarStyle:Overlay + 我们自己的标题栏（替代原生）
   // Windows / Linux 用系统原生标题栏（隐藏我们自定义的那条，避免双标题栏）
@@ -1931,9 +1962,36 @@ export default function App() {
       }
     })()
 
+    // ─── DIAG 诊断埋点（临时）：测切会话各步骤耗时，定位"历史显示卡 1 分钟"真凶 ───
+    const __diagT0 = performance.now()
+    __resetMdPerf()
     // Load persisted messages from server（最近 50 条，滚到底部）
     try {
+      const __diagNetStart = performance.now()
       const { messages: stored, hasMore } = await c.getSessionMessages(id, { limit: 50 })
+      const __diagNetMs = performance.now() - __diagNetStart
+      // DIAG: 渲染稳定后（progressive rAF 跑完）弹框报告各阶段耗时
+      setTimeout(() => {
+        if (activeSessionId() !== id) return
+        const total = (performance.now() - __diagT0).toFixed(0)
+        const reasoningCount = stored.filter((m: any) => m.role === 'reasoning').length
+        const maxContentLen = stored.reduce((mx: number, m: any) => Math.max(mx, (m.content ?? '').length), 0)
+        alert(
+          `【诊断】切会话耗时分解\n` +
+          `———————————————\n` +
+          `消息条数: ${stored.length}（其中 reasoning ${reasoningCount} 条）\n` +
+          `最长单条内容: ${maxContentLen} 字\n` +
+          `———————————————\n` +
+          `网络 getMessages: ${__diagNetMs.toFixed(0)}ms\n` +
+          `markdown 渲染: 调用 ${__mdPerf.calls} 次, 累计 ${__mdPerf.totalMs.toFixed(0)}ms\n` +
+          `  ├ marked.parse:  ${__mdPerf.markedMs.toFixed(0)}ms\n` +
+          `  ├ linkify(DOMParser): ${__mdPerf.linkifyMs.toFixed(0)}ms\n` +
+          `  └ DOMPurify:     ${__mdPerf.purifyMs.toFixed(0)}ms\n` +
+          `最慢单次渲染: ${__mdPerf.maxMs.toFixed(0)}ms（长度 ${__mdPerf.maxLen} 字）\n` +
+          `———————————————\n` +
+          `selectSession 总耗时: ${total}ms`
+        )
+      }, 3000)
       if (stored.length > 0) {
         progressiveSetMessages(stored.map(storedToChatMessage))
         setMsgHasMore(hasMore)

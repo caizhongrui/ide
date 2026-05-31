@@ -12,6 +12,13 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.32',
+		date: '2026-05-30',
+		changes: [
+			'🔬 诊断版：切换会话时弹框显示历史加载耗时分解，用于定位「历史显示卡顿」真正原因（定位后会移除）',
+		],
+	},
+	{
 		version: '0.2.31',
 		date: '2026-05-30',
 		changes: [

@@ -187,10 +187,31 @@ const SANITIZE_OPTS = {
   ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|data:image\/(?:png|jpeg|jpg|gif|webp|svg\+xml));|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
 }
 
+// ─── 诊断埋点（DIAG，临时）：统计 renderPipeline 调用次数 / 累计耗时 / 最慢单次 ──
+// 用于定位"切会话历史显示卡 1 分钟"的真凶。selectSession 前 resetMdPerf()，渲染后读 __mdPerf。
+export const __mdPerf = { calls: 0, totalMs: 0, maxMs: 0, maxLen: 0, markedMs: 0, linkifyMs: 0, purifyMs: 0 }
+export function __resetMdPerf(): void {
+  __mdPerf.calls = 0; __mdPerf.totalMs = 0; __mdPerf.maxMs = 0; __mdPerf.maxLen = 0
+  __mdPerf.markedMs = 0; __mdPerf.linkifyMs = 0; __mdPerf.purifyMs = 0
+}
+
 function renderPipeline(text: string): string {
+  const t0 = performance.now()
   const raw = marked.parse(text) as string
+  const t1 = performance.now()
   const linkified = linkifyFilePaths(raw)
-  return DOMPurify.sanitize(linkified, SANITIZE_OPTS)
+  const t2 = performance.now()
+  const out = DOMPurify.sanitize(linkified, SANITIZE_OPTS)
+  const t3 = performance.now()
+  // 诊断累加
+  const dt = t3 - t0
+  __mdPerf.calls++
+  __mdPerf.totalMs   += dt
+  __mdPerf.markedMs  += t1 - t0
+  __mdPerf.linkifyMs += t2 - t1
+  __mdPerf.purifyMs  += t3 - t2
+  if (dt > __mdPerf.maxMs) { __mdPerf.maxMs = dt; __mdPerf.maxLen = text.length }
+  return out
 }
 
 // ─── K-Perf：稳定段落 HTML 缓存 ──────────────────────────────────────────
