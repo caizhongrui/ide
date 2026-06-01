@@ -2800,6 +2800,8 @@ export default function App() {
     if (!ws) { setWsFileCache(null); return }
     const cached = wsFileCache()
     if (cached?.id === ws.id) return        // 已是最新缓存，无需重新加载
+    // 触发点③：切到新工作区 → 按需触发一次后台校对（修正应用关闭期/外部新建删除的文件）。
+    triggerFileRefresh()
     setWsFileCacheLoading(true)
     void (async () => {
       const wsId = ws.id
@@ -2872,6 +2874,25 @@ export default function App() {
     setMentionFiles(filterMentionFiles(query))
   }
 
+  /**
+   * 按需触发后端文件列表刷新（@ 引用候选用）—— 替代 v0.2.23 的常驻 watcher。
+   * fire-and-forget：后端 debounce + 后台增量扫，绝不阻塞 UI；扫到的新增/删除
+   * 经 SSE workspace-files-changed 增量 patch wsFileCache，下方 effect 自动重过滤候选。
+   */
+  function triggerFileRefresh() {
+    const ws = activeWorkspace()
+    if (!ws) return
+    void (async () => {
+      try { await (await getClient()).refreshFiles(ws.id) } catch { /* 静默，不影响现有候选 */ }
+    })()
+  }
+
+  // wsFileCache 被 SSE 增量 patch 后，若 @ 选择器正显示，自动重过滤候选（用户无需再敲字符）。
+  createEffect(() => {
+    wsFileCache()                                    // 订阅缓存变化
+    if (showMention()) searchMentionFiles(mentionQuery())
+  })
+
   function insertMention(filePath: string) {
     const cur = input()
     // 找到最后一个 @ 的位置并替换到此处
@@ -2914,6 +2935,9 @@ export default function App() {
     // @ 文件提及检测
     const atIdx = value.lastIndexOf('@')
     if (atIdx >= 0 && !value.slice(atIdx).includes(' ')) {
+      // 触发点①：刚打开 @ 选择器（边沿触发）→ 按需刷新候选，让外部新建的文件能被 @ 到。
+      // 后端 debounce + 后台增量扫，绝不阻塞；扫完经 SSE 增量 patch wsFileCache。
+      if (!showMention()) triggerFileRefresh()
       updatePalettePos()
       const query = value.slice(atIdx + 1)
       setMentionQuery(query)
@@ -5022,6 +5046,7 @@ export default {
                       onInput={(e) => onInputChange(e.currentTarget.value)}
                       onKeyDown={onKeyDown}
                       onPaste={handlePaste}
+                      onFocus={() => triggerFileRefresh()}
                       placeholder={globalMode() === 'code'
                         ? "描述你要完成的编码任务… (⌘↵ 发送, / 命令)"
                         : "提问或描述你的问题… (⌘↵ 发送, / 命令)"}

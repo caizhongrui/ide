@@ -23,6 +23,14 @@ interface WalkStats {
 	readdirMs: number;                           // readdir I/O 累计耗时
 	yieldMs: number;                             // setImmediate 让出累计耗时
 	slowDirs: Array<{ dir: string; ms: number }>; // readdir > 30ms 的慢目录
+	cachedDirs: number;                          // mtime 命中、跳过 readdir 的目录数（增量扫效果）
+}
+
+/** mtime 增量扫：每个目录的缓存条目（绝对路径为 key）。 */
+interface DirCacheEntry {
+	mtimeMs:  number;       // 该目录上次扫描时的 mtime
+	files:    string[];     // 该目录的直接文件名（已过滤 dotfile/IGNORED_DIRS）
+	subdirs:  string[];     // 该目录的直接子目录**绝对路径**（已过滤）
 }
 
 type WsRecord = WorkspaceInfo & { id: string };
@@ -150,6 +158,9 @@ export class WorkspaceManager {
 	private fileCacheSet = new Map<string, Set<string>>();
 	/** F18: 正在后台全扫的 ws（去重，避免并发重复全扫） */
 	private scanningInProgress = new Set<string>();
+	/** mtime 增量扫：目录绝对路径 → 上次扫描的 {mtime, 直接文件, 子目录}。
+	 *  下次扫描时目录 mtime 未变即跳过 readdir，只对变化目录重列，省掉绝大部分 I/O。 */
+	private dirCache = new Map<string, DirCacheEntry>();
 
 	// ─── F18 DB 持久层 helpers ───────────────────────────────────────────────
 	/** 从 DB 读某 ws 的文件列表 */
@@ -271,7 +282,7 @@ export class WorkspaceManager {
 				const wasScanned = this.isFilesScanned(wsId);
 				const results: string[] = [];
 				// DIAG：扫描耗时分解，定位 85 秒花在哪
-				const __stats: WalkStats = { dirCount: 0, readdirMs: 0, yieldMs: 0, slowDirs: [] };
+				const __stats: WalkStats = { dirCount: 0, readdirMs: 0, yieldMs: 0, slowDirs: [], cachedDirs: 0 };
 				const __scanT0 = performance.now();
 				await this.walkDir(wsPath, wsPath, results, 0, 15, __stats);
 				const __scanMs = performance.now() - __scanT0;
@@ -280,7 +291,7 @@ export class WorkspaceManager {
 					.map(d => `${d.ms.toFixed(0)}ms:${d.dir.split(/[\\/]/).slice(-2).join('/')}`).join(' | ');
 				console.log(
 					`[F18-DIAG] ${wsPath.split(/[\\/]/).pop()} 扫描分解: ` +
-					`文件${results.length} 目录${__stats.dirCount} | ` +
+					`文件${results.length} 目录${__stats.dirCount}(mtime命中跳过${__stats.cachedDirs}/真readdir${__stats.dirCount - __stats.cachedDirs}) | ` +
 					`walkDir总${__scanMs.toFixed(0)}ms = readdir累计${__stats.readdirMs.toFixed(0)}ms + 让出累计${__stats.yieldMs.toFixed(0)}ms + 其余${(__scanMs - __stats.readdirMs - __stats.yieldMs).toFixed(0)}ms | ` +
 					`慢目录(>30ms)共${__stats.slowDirs.length}个 top5: ${__slow || '无'}`
 				);
@@ -323,6 +334,39 @@ export class WorkspaceManager {
 				this.scanningInProgress.delete(wsId);
 			}
 		})();
+	}
+
+	/** 按需刷新 debounce：wsId → 上次触发后台扫描的时间戳（ms）。 */
+	private lastRefreshAt = new Map<string, number>();
+	/** 按需刷新最小间隔：同一 ws 在该窗口内重复触发直接跳过，避免频繁全扫。 */
+	private static readonly REFRESH_DEBOUNCE_MS = 15_000;
+
+	/**
+	 * 按需触发文件列表刷新（@ 引用候选用）—— 替代 v0.2.23 的 chokidar 常驻 watcher。
+	 *
+	 * ⚠️ 绝不重蹈 chokidar 覆辙：**不常驻监听、不递归建句柄**。仅在关键时机
+	 * （打开 @ 选择器 / 切工作区 / 输入框聚焦 / AI 写文件后）被动调一次，且：
+	 *   ① 时间 debounce（15s 内同 ws 不重扫）；
+	 *   ② scanWorkspaceFilesBg 内部 scanningInProgress 并发去重；
+	 *   ③ 全程 fire-and-forget 后台增量扫（walkDir 每层让出事件循环），绝不阻塞；
+	 *   ④ 增量扫只算 diff（applyDiffToDb，零改动零写入），扫完经 listeners 广播给前端。
+	 */
+	requestFileRefresh(wsId: string): void {
+		const ws = this.get(wsId);
+		if (!ws) return;
+		const now = Date.now();
+		if (now - (this.lastRefreshAt.get(wsId) ?? 0) < WorkspaceManager.REFRESH_DEBOUNCE_MS) return;
+		this.lastRefreshAt.set(wsId, now);
+		this.scanWorkspaceFilesBg(wsId, ws.path);
+	}
+
+	/** 按工作区绝对路径触发刷新（AI 工具只持有 workspacePath，没有 wsId）。 */
+	requestFileRefreshByPath(wsPath: string): void {
+		try {
+			const resolved = path.resolve(wsPath);
+			const ws = this.list().find(w => path.resolve(w.path) === resolved);
+			if (ws) this.requestFileRefresh(ws.id);
+		} catch { /* ignore */ }
 	}
 
 	/** F18 启动文件缓存策略（绝不阻塞、绝不抢启动期资源）：
@@ -371,6 +415,24 @@ export class WorkspaceManager {
 		stats?: WalkStats,
 	): Promise<void> {
 		if (depth > maxDepth) return;
+
+		// mtime 增量：先 stat 目录。mtime 未变 → 该目录内容没动，跳过 readdir，
+		// 直接复用缓存的直接文件列表，并继续递归子目录（深层变化由子目录自己的 mtime 发现）。
+		let mtimeMs = 0;
+		try { mtimeMs = (await fs.stat(current)).mtimeMs; } catch { return; }
+		const cached = this.dirCache.get(current);
+		if (cached && cached.mtimeMs === mtimeMs) {
+			if (stats) { stats.dirCount++; stats.cachedDirs++; }
+			for (const name of cached.files) {
+				out.push(path.relative(root, path.join(current, name)).split(path.sep).join('/'));
+			}
+			for (const sub of cached.subdirs) {
+				await this.walkDir(root, sub, out, depth + 1, maxDepth, stats);
+			}
+			return;
+		}
+
+		// mtime 变了（或首次）→ readdir 重列该目录，刷新缓存。
 		let entries: import('node:fs').Dirent[];
 		// DIAG：单次 readdir 计时——定位"扫描慢"到底是 readdir I/O 慢（Defender/慢盘）还是别的
 		const __t0 = performance.now();
@@ -389,16 +451,23 @@ export class WorkspaceManager {
 		const __ty = performance.now();
 		await new Promise<void>(r => setImmediate(r));
 		if (stats) stats.yieldMs += performance.now() - __ty;
+		const dirFiles:   string[] = [];
+		const dirSubdirs: string[] = [];
 		for (const entry of entries) {
 			if (entry.name.startsWith('.')) continue;
 			if (WorkspaceManager.IGNORED_DIRS.has(entry.name)) continue;
 			const full = path.join(current, entry.name);
-			const rel = path.relative(root, full).split(path.sep).join('/');
 			if (entry.isDirectory()) {
-				await this.walkDir(root, full, out, depth + 1, maxDepth, stats);
+				dirSubdirs.push(full);
 			} else {
-				out.push(rel);
+				dirFiles.push(entry.name);
+				out.push(path.relative(root, full).split(path.sep).join('/'));
 			}
+		}
+		// 写缓存：下次该目录 mtime 没变就走上面的快路径。
+		this.dirCache.set(current, { mtimeMs, files: dirFiles, subdirs: dirSubdirs });
+		for (const sub of dirSubdirs) {
+			await this.walkDir(root, sub, out, depth + 1, maxDepth, stats);
 		}
 	}
 }

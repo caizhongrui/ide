@@ -186,6 +186,14 @@ export function WorkspaceRoutes(workspaceManager: WorkspaceManager) {
 		return c.json({ files });
 	});
 
+	// 按需触发文件列表刷新（@ 引用候选用，替代 v0.2.23 的常驻 watcher）。
+	// fire-and-forget：内部 debounce + 并发去重 + 后台增量扫，立即返回，绝不阻塞。
+	app.post('/workspaces/:id/files/refresh', (c) => {
+		const id = c.req.param('id');
+		workspaceManager.requestFileRefresh(id);
+		return c.json({ ok: true });
+	});
+
 	// 读取工作区任意文件的内容（用于预览面板）
 	// 文本：返回 utf8 字符串；图片/二进制：返回 base64
 	// 路径安全：绝对路径必须位于工作区目录内

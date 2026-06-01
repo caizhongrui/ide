@@ -611,6 +611,16 @@ export class MaxianClient {
 		return this.request('GET', `/workspaces/${workspaceId}/files${qs}`);
 	}
 
+	/**
+	 * 按需触发工作区文件列表刷新（@ 引用候选用）。
+	 * fire-and-forget：服务端 debounce + 后台增量扫，立即返回；扫到的新增/删除
+	 * 通过 SSE workspace-files-changed 事件增量推回前端。绝不阻塞、不常驻监听。
+	 */
+	async refreshFiles(workspaceId: string): Promise<void> {
+		try { await this.request('POST', `/workspaces/${workspaceId}/files/refresh`); }
+		catch { /* 刷新失败静默忽略，不影响 @ 引用现有候选 */ }
+	}
+
 	/** 读取项目级配置 + 自定义 agent / command */
 	async getProjectConfig(workspaceId: string): Promise<{
 		config: {

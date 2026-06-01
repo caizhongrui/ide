@@ -994,6 +994,8 @@ function createBufferedToolOutputSink(opts: {
  */
 async function runPostWriteDiagnostics(absolutePaths: string[], workspacePath: string): Promise<string> {
 	if (!absolutePaths || absolutePaths.length === 0) return '';
+	// 触发点④：AI 写/删文件后按需刷新 @ 引用候选（debounce + 后台增量扫，绝不阻塞、不常驻监听）。
+	try { (globalThis as any).__maxianRequestFileRefresh?.(workspacePath); } catch { /* ignore */ }
 	// F7: seq-based 真等待已下沉到 LSP.diagnostics 内部（client.waitForNextDiagnostics 等 publishDiagnostics 到达）。
 	// 这里不再叠加固定 sleep——下层会等 server 真正完成分析才返回。
 	const parts: string[] = [];
@@ -2021,6 +2023,12 @@ async function main() {
 	// fire-and-forget，不阻塞 server 启动。用户后续切 workspace 时大概率缓存已就绪，
 	// 避免 Windows 上 Java 大项目首次扫描 86s 卡顿（之前症状：切会话后 UI 1 分钟才出来）。
 	workspaceManager.prefetchAllFiles();
+
+	// 触发点④桥接：AI 写/删文件后（runPostWriteDiagnostics）按需刷新 @ 引用候选。
+	// 模块级工具函数拿不到 workspaceManager 实例，用 globalThis 桥接（同 __maxianRerunScenePrefetch 模式）。
+	(globalThis as any).__maxianRequestFileRefresh = (wsPath: string) => {
+		try { workspaceManager.requestFileRefreshByPath(wsPath); } catch { /* ignore */ }
+	};
 
 	// K-Watcher：把工作区文件系统变化广播给所有订阅了这个工作区的 SSE 客户端，
 	// 客户端可以增量 patch @ 引用的文件缓存。
