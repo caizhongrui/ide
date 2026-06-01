@@ -196,6 +196,17 @@
     display: none !important;
   }
 
+  /* Windows / Linux 用原生标题栏、无自定义标题栏占位 → 全屏容器须占满整窗高，
+     否则沿用 macOS 的 calc(100vh - 38px) 会在窗口底部空出 38px。 */
+  body.platform-win .app-shell,
+  body.platform-linux .app-shell,
+  body.platform-win .boot-screen,
+  body.platform-linux .boot-screen,
+  body.platform-win .auth-screen,
+  body.platform-linux .auth-screen {
+    height: 100vh;
+  }
+
   /* ─── Layout ─────────────────────────────────────── */
   .app-shell {
     display: flex;

@@ -12,6 +12,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.39',
+		date: '2026-06-01',
+		changes: [
+			'✨ 消息新增「复制」按钮：鼠标悬停消息，右上角第一个图标即可一键复制该条内容到剪贴板',
+			'🐛 修复 Windows / Linux 版窗口底部出现一条空白：原生标题栏模式下内容区未占满整窗，已补齐',
+			'⚙️ 一批内部稳定性优化',
+		],
+	},
+	{
 		version: '0.2.38',
 		date: '2026-06-01',
 		changes: [

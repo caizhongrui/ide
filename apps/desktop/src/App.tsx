@@ -4796,6 +4796,15 @@ export default {
                       multiedit: (p) => EditDiffView(p),
                     }}
                     actions={{
+                      onCopy:       (m) => {
+                        const c: any = (m as any).content
+                        const text = typeof c === 'string' ? c
+                          : Array.isArray(c) ? c.map((b: any) => typeof b === 'string' ? b : (b?.text ?? '')).join('')
+                          : String(c ?? '')
+                        void navigator.clipboard.writeText(text)
+                          .then(() => showToast({ message: '已复制到剪贴板', kind: 'success', duration: 1500 }))
+                          .catch(() => showToast({ message: '复制失败', kind: 'error' }))
+                      },
                       onRegenerate: (m) => { void regenerateMessage(m.id) },
                       onFork:       (m) => { void forkFromMessage(m.id) },
                       onDelete:     (m) => { void deleteMessage(m.id) },

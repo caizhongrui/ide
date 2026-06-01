@@ -44,6 +44,8 @@ function markReasoningSeenDoneCapped(id: string): void {
 }
 
 export interface MessageActions {
+	/** 复制此消息内容到剪贴板 */
+	onCopy?:       (message: ChatMessage) => void;
 	/** 重新生成此消息（从此节点开始重跑） */
 	onRegenerate?: (message: ChatMessage) => void;
 	/** 从此消息分叉一个新会话 */
@@ -173,7 +175,7 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 					if (!a) return false;
 					// 只对 user / assistant 显示操作按钮
 					return (role() === 'user' || role() === 'assistant')
-						&& Boolean(a.onRegenerate || a.onFork || a.onDelete);
+						&& Boolean(a.onCopy || a.onRegenerate || a.onFork || a.onDelete);
 				};
 				const showAvatar = (): boolean => role() === 'user' || role() === 'assistant';
 				const avatarText = (): string => {
@@ -202,6 +204,14 @@ export function MessageBubble(props: MessageBubbleProps): JSX.Element {
 					<div class={`mu-msg mu-msg-${role()}`} data-msg-id={msg().id}>
 						<Show when={actionsAvailable()}>
 							<div class="mu-msg-actions">
+								<Show when={props.actions?.onCopy}>
+									<button class="mu-msg-action" title="复制" onClick={() => props.actions!.onCopy!(msg())}>
+										<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+											<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+											<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+										</svg>
+									</button>
+								</Show>
 								<Show when={props.actions?.onRegenerate}>
 									<button class="mu-msg-action" title="重新生成" onClick={() => props.actions!.onRegenerate!(msg())}>
 										<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
