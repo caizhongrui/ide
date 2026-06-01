@@ -1,15 +1,10 @@
 /*---------------------------------------------------------------------------------------------
  *  Maxian Server — Workspace Manager (SQLite-backed)
- *
- *  K-Watcher (v0.2.23)：每个工作区启一个 chokidar 文件系统 watcher，
- *  外部手动新建/删除文件（命令行 touch、其他 IDE 创建、git checkout 等）
- *  也能实时通知前端刷新 @ 引用文件候选缓存。
  *--------------------------------------------------------------------------------------------*/
 
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import chokidar, { type FSWatcher } from 'chokidar';
 import type { WorkspaceInfo } from './types.js';
 import { getDb } from './database.js';
 
@@ -45,18 +40,8 @@ function rowToRecord(row: WsRow): WsRecord {
 }
 
 export class WorkspaceManager {
-	// ─── K-Watcher：每工作区一个 chokidar 文件系统 watcher ────────────────────
-	private readonly watchers      = new Map<string, FSWatcher>();
-	private readonly pendingByWs   = new Map<string, { added: Set<string>; removed: Set<string> }>();
-	private readonly flushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
+	/** F18：文件变化监听器（后台全扫校对得到 diff 后 broadcast 前端刷新 @ 引用候选）。 */
 	private readonly listeners     = new Set<WorkspaceFilesListener>();
-	/** 同 IGNORED_DIRS 一致：传给 chokidar 的 anymatch glob，让它在遍历期间直接 prune 这些目录 */
-	private static readonly IGNORED_GLOBS: readonly (string | RegExp)[] = [
-		/(^|[\/\\])\../,                  // dotfiles
-		'**/node_modules/**', '**/dist/**', '**/build/**', '**/out/**',
-		'**/target/**', '**/__pycache__/**', '**/vendor/**', '**/Pods/**',
-		'**/coverage/**',
-	];
 
 	// ─── 初始化 ─────────────────────────────────────────────────────────────
 
@@ -73,109 +58,20 @@ export class WorkspaceManager {
 		// F18：启动时从 DB 把已扫过的文件列表秒填内存热缓存（几十 ms，不扫盘）。
 		// 之后 cli.ts prefetchAllFiles() 会后台全扫校对（绝不阻塞）修正关闭期变化。
 		mgr.loadFileCacheFromDb();
-		// 给已存在的工作区启 watcher（启动失败不阻塞服务启动）
-		await mgr.startAllWatchers().catch(e => console.error('[WorkspaceWatcher] startAllWatchers:', e));
 		return mgr;
 	}
 
-	// ─── K-Watcher API ──────────────────────────────────────────────────────
+	// ─── 文件变化订阅（F18 后台校对 broadcast 用）────────────────────────────
 
-	/** 订阅所有工作区的文件变化（批处理，100ms 时窗合并）。返回 unsubscribe。*/
+	/** 订阅所有工作区的文件变化（后台全扫校对得到 diff 后推送）。返回 unsubscribe。*/
 	subscribeFileChanges(listener: WorkspaceFilesListener): () => void {
 		this.listeners.add(listener);
 		return () => { this.listeners.delete(listener); };
 	}
 
-	/** 关闭所有 watcher（server shutdown 调）。*/
+	/** server shutdown 调。*/
 	async dispose(): Promise<void> {
-		const ids = Array.from(this.watchers.keys());
-		await Promise.all(ids.map(id => this.stopWatcher(id)));
-		for (const t of this.flushTimers.values()) clearTimeout(t);
-		this.flushTimers.clear();
-		this.pendingByWs.clear();
 		this.listeners.clear();
-	}
-
-	private async startAllWatchers(): Promise<void> {
-		for (const ws of this.list()) {
-			try { await this.startWatcher(ws.id, ws.path); }
-			catch (e) { console.error(`[WorkspaceWatcher] start ${ws.id} (${ws.path}):`, e); }
-		}
-	}
-
-	private async startWatcher(wsId: string, wsPath: string): Promise<void> {
-		if (this.watchers.has(wsId)) return;
-		const watcher = chokidar.watch(wsPath, {
-			ignored:        WorkspaceManager.IGNORED_GLOBS as (string | RegExp)[],
-			ignoreInitial:  true,           // 已有文件由 listFiles 一次性提供，不重发
-			persistent:     true,
-			depth:          15,             // 与 listFiles walkDir maxDepth 一致
-			awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
-		});
-		watcher.on('add',    p => this.recordChange(wsId, wsPath, p, 'added'));
-		watcher.on('unlink', p => this.recordChange(wsId, wsPath, p, 'removed'));
-		watcher.on('error',  err => console.error(`[WorkspaceWatcher] ${wsId} runtime:`, err));
-		this.watchers.set(wsId, watcher);
-		console.log(`[WorkspaceWatcher] ✅ ${wsId} → ${wsPath}`);
-	}
-
-	private async stopWatcher(wsId: string): Promise<void> {
-		const w = this.watchers.get(wsId);
-		if (!w) return;
-		this.watchers.delete(wsId);
-		try { await w.close(); } catch (e) { console.error(`[WorkspaceWatcher] close ${wsId}:`, e); }
-		const t = this.flushTimers.get(wsId);
-		if (t) { clearTimeout(t); this.flushTimers.delete(wsId); }
-		this.pendingByWs.delete(wsId);
-	}
-
-	private recordChange(wsId: string, wsPath: string, absPath: string, kind: 'added' | 'removed'): void {
-		// K-Win：归一化为 POSIX 风格 '/'，跟 listFiles() 输出格式一致，否则 Windows 上
-		// 前端 wsFileCache 既有 '\' 又有 '/' 路径，去重 Set 会出双份。
-		const rel = path.relative(wsPath, absPath).split(path.sep).join('/');
-		// 排除工作区外（chokidar 偶尔会推出 root 路径自身）
-		if (!rel || rel.startsWith('..')) return;
-		let pending = this.pendingByWs.get(wsId);
-		if (!pending) {
-			pending = { added: new Set(), removed: new Set() };
-			this.pendingByWs.set(wsId, pending);
-		}
-		if (kind === 'added') {
-			pending.added.add(rel);
-			pending.removed.delete(rel);     // 抖动：先删后建，最终保留 add
-		} else {
-			pending.removed.add(rel);
-			pending.added.delete(rel);
-		}
-		if (!this.flushTimers.has(wsId)) {
-			const t = setTimeout(() => {
-				this.flushTimers.delete(wsId);
-				this.flushPending(wsId);
-			}, 100);
-			this.flushTimers.set(wsId, t);
-		}
-	}
-
-	private flushPending(wsId: string): void {
-		const pending = this.pendingByWs.get(wsId);
-		if (!pending) return;
-		this.pendingByWs.delete(wsId);
-		const added   = Array.from(pending.added);
-		const removed = Array.from(pending.removed);
-		if (added.length === 0 && removed.length === 0) return;
-		const ws = this.get(wsId);
-		if (!ws) return;                    // workspace 已被删
-		// F18：chokidar 实时增量 → 同步内存热缓存 + DB（再 broadcast 前端）
-		for (const p of added)   this.addToFileCache(wsId, p);
-		for (const p of removed) this.removeFromFileCache(wsId, p);
-		const change: WorkspaceFilesChange = {
-			workspaceId: wsId, workspacePath: ws.path, added, removed,
-		};
-		for (const listener of this.listeners) {
-			try { listener(change); } catch (e) {
-				console.error('[WorkspaceWatcher] listener:', e);
-			}
-		}
 	}
 
 	// ─── 查询 ────────────────────────────────────────────────────────────────
@@ -214,8 +110,6 @@ export class WorkspaceManager {
 			'INSERT INTO workspaces (id, path, name, opened_at) VALUES (?, ?, ?, ?)'
 		).run(id, resolved, name, openedAt);
 
-		// 启动文件 watcher（失败不阻塞 add 成功）
-		this.startWatcher(id, resolved).catch(e => console.error(`[WorkspaceWatcher] add-start ${id}:`, e));
 		// F18：新 workspace 后台全扫一次建文件缓存（fire-and-forget，绝不阻塞 add 返回）
 		this.scanWorkspaceFilesBg(id, resolved);
 
@@ -234,8 +128,6 @@ export class WorkspaceManager {
 	}
 
 	async remove(id: string): Promise<void> {
-		// 先停 watcher 再删 DB 行；防止 watcher 在 stop 前 fire 一次 emit 拿到 null workspace
-		await this.stopWatcher(id);
 		const db = getDb();
 		db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
 	}
@@ -251,7 +143,7 @@ export class WorkspaceManager {
 	 *   源码看不到。15 层足够覆盖常见 Java / Go / 嵌套 monorepo 结构。
 	 *   配合 IGNORED_DIRS 过滤 node_modules / target / dist / build 等大目录，性能可控。
 	 */
-	/** F18: workspaceId → 完整文件列表的内存热缓存（从 DB 填，chokidar 实时增量同步）。
+	/** F18: workspaceId → 完整文件列表的内存热缓存（从 DB 填，后台全扫校对增量更新）。
 	 *  listFiles 永远只读这里 —— **绝不在请求路径上做全量扫描**（那会阻塞 HTTP 连接）。 */
 	private fileCache = new Map<string, string[]>();
 	/** F18: 内存 Set 镜像（O(1) 去重判断，避免 includes 线性扫几万条） */
@@ -312,12 +204,6 @@ export class WorkspaceManager {
 			});
 			tx();
 		} catch (e) { console.error('[F20] applyDiffToDb:', e); }
-	}
-	private dbInsertFile(wsId: string, relPath: string): void {
-		try { getDb().prepare('INSERT OR IGNORE INTO workspace_files (workspace_id, path) VALUES (?, ?)').run(wsId, relPath); } catch { /* ignore */ }
-	}
-	private dbDeleteFile(wsId: string, relPath: string): void {
-		try { getDb().prepare('DELETE FROM workspace_files WHERE workspace_id = ? AND path = ?').run(wsId, relPath); } catch { /* ignore */ }
 	}
 
 	/** F18 启动：从 DB 把所有 ws 的文件列表填进内存热缓存（秒回，不扫盘）。 */
@@ -437,33 +323,6 @@ export class WorkspaceManager {
 				this.scanningInProgress.delete(wsId);
 			}
 		})();
-	}
-
-	/** F18 chokidar 'add' 实时回写：内存 + DB（路径已归一化 POSIX） */
-	addToFileCache(workspaceId: string, relPath: string): void {
-		const set = this.fileCacheSet.get(workspaceId);
-		if (set && !set.has(relPath)) {
-			set.add(relPath);
-			this.fileCache.get(workspaceId)?.push(relPath);
-			this.dbInsertFile(workspaceId, relPath);
-		} else if (!set) {
-			// 缓存还没建（首次扫描前的变化）—— 仍写 DB，扫描时会合并
-			this.dbInsertFile(workspaceId, relPath);
-		}
-	}
-
-	/** F18 chokidar 'unlink' 实时回写：内存 + DB */
-	removeFromFileCache(workspaceId: string, relPath: string): void {
-		const set = this.fileCacheSet.get(workspaceId);
-		if (set?.has(relPath)) {
-			set.delete(relPath);
-			const arr = this.fileCache.get(workspaceId);
-			if (arr) {
-				const idx = arr.indexOf(relPath);
-				if (idx >= 0) arr.splice(idx, 1);
-			}
-		}
-		this.dbDeleteFile(workspaceId, relPath);
 	}
 
 	/** F18 启动文件缓存策略（绝不阻塞、绝不抢启动期资源）：

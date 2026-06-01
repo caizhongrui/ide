@@ -293,7 +293,7 @@ function initSchema(db: Database.Database): void {
 
 		-- ── F18：工作区文件列表持久化缓存（@ 引用补全用）──────────────
 		-- 全量扫描结果存这里，启动直接读（秒回，不再每次重扫 72s）；
-		-- chokidar add/unlink 实时回写；后台低频全扫校对修正关闭期变化。
+		-- 后台低频全扫校对修正关闭期变化（不再用 chokidar 持续监听）。
 		CREATE TABLE IF NOT EXISTS workspace_files (
 			workspace_id TEXT NOT NULL,
 			path         TEXT NOT NULL,          -- 工作区相对路径，POSIX '/'
