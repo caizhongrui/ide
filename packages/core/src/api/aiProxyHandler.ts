@@ -287,6 +287,19 @@ export class AiProxyHandler implements IApiHandler {
 	}
 
 	/**
+	 * K-MultiModel：sidecar 复用 cached handler 前刷新 meta 用。
+	 * 避免 supportsVision / selectedModel 是 handler 创建那一刻的快照 ——
+	 * scene-models 元数据是异步预热的，第一次建 handler 时可能 meta 还不
+	 * 完整（supportVision=0），之后管理端刷新成 supportVision=1，但
+	 * cached handler 仍用旧快照 → vision 降级把图丢了 (imageBlockCount=0)。
+	 * 让 cli.ts 每次复用前调一次，永远跟最新 meta 同步。
+	 */
+	updateMeta(meta: { supportsVision?: boolean; selectedModel?: string | null }): void {
+		if (meta.supportsVision !== undefined) this.config.supportsVision = meta.supportsVision;
+		if (meta.selectedModel  !== undefined) this.config.selectedModel  = meta.selectedModel ?? undefined;
+	}
+
+	/**
 	 * 🚀 带超时的fetch请求
 	 */
 	private async fetchWithTimeout(
@@ -911,11 +924,13 @@ export class AiProxyHandler implements IApiHandler {
 						const imgBlock = block as import('./types.js').ImageContentBlock;
 						if (imgBlock.source.type === 'base64') {
 							const mimeType = imgBlock.source.media_type || 'image/png';
+							// K-Vision (实测小米 mimo-v2-omni)：base64 image_url **不要带 detail 字段**。
+							// 对比测试: detail=high 时模型识别瞎编 (识别成 "88888 888" / "测试结果 01")；
+							// 移除 detail 后识别接近真实 ("小米 MI" / "Maxian IDE")。详见 v0.2.40 commit。
 							imageParts.push({
 								type: 'image_url',
 								image_url: {
 									url: `data:${mimeType};base64,${imgBlock.source.data}`,
-									detail: 'high'
 								}
 							});
 						} else if (imgBlock.source.type === 'url') {
@@ -943,9 +958,12 @@ export class AiProxyHandler implements IApiHandler {
 
 				// user 消息：如果包含图片，使用多模态格式
 				if (msg.role === 'user' && imageParts.length > 0) {
-					const parts: AiProxyContentPart[] = [];
+					// K-Vision (实测小米 mimo-v2-omni)：图片必须**放在文字前**。
+					// 对比测试: 文字在前时模型识别瞎编 ("88888 888" / "设置中心")；
+					// 图片在前时识别接近真实 ("小米 MI" / "Maxian IDE")。详见 v0.2.40 commit。
+					// 与小米官方文档示例顺序一致。
+					const parts: AiProxyContentPart[] = [...imageParts];
 					if (textContent) parts.push({ type: 'text', text: textContent });
-					parts.push(...imageParts);
 					result.push({ role: 'user', content: parts });
 					continue;
 				}

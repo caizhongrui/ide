@@ -2325,6 +2325,13 @@ async function main() {
 			const cacheKey = `rt|${runtimeCfg.apiUrl}|${runtimeCfg.username}|${bizCode}|${sessionModel ?? ''}`;
 			const cached = __aiHandlerCache.get(cacheKey);
 			if (cached) {
+				// K-MultiModel：handler 复用前按最新 meta 刷一次 supportsVision / selectedModel —
+				// scene-models 元数据异步预热，第一次建 handler 时 supportVision 可能还是 0
+				// （后来管理端刷新成 1），不刷新就走 stale 快照触发 vision 降级把图丢了。
+				cached.updateMeta({
+					supportsVision: meta ? !!meta.supportVision : true,
+					selectedModel:  sessionModel ?? null,
+				});
 				console.log(`[AiHandler] 复用 handler: businessCode=${bizCode}, ${modelLogPart}`);
 				return cached;
 			}
@@ -2348,6 +2355,10 @@ async function main() {
 			const cacheKey = `st|${aiConfig.apiUrl}|${aiConfig.username}|${bizCode}|${sessionModel ?? ''}`;
 			const cached = __aiHandlerCache.get(cacheKey);
 			if (cached) {
+				cached.updateMeta({
+					supportsVision: meta ? !!meta.supportVision : true,
+					selectedModel:  sessionModel ?? null,
+				});
 				console.log(`[AiHandler] 复用 handler (static): businessCode=${bizCode}, ${modelLogPart}`);
 				return cached;
 			}
@@ -4615,9 +4626,11 @@ OBJECTIVE
 		}
 
 		// 处理图片附件（base64 → Anthropic multi-modal content block）
+		// K-Vision：图片块放在文字块**之前**——实测小米 mimo-v2-omni 对此顺序敏感（详见
+		// convertMessages 同处注释）。这里源头就摆对，convertMessages 直接照搬即可。
 		let userMessageContent: string | unknown[] = userContent;
 		if (sendOpts.images && sendOpts.images.length > 0) {
-			const contentBlocks: unknown[] = [{ type: 'text', text: userContent }];
+			const contentBlocks: unknown[] = [];
 			for (const b64 of sendOpts.images) {
 				// 检测图片类型（默认 jpeg）
 				const mediaType = b64.startsWith('/9j/') ? 'image/jpeg'
@@ -4629,6 +4642,7 @@ OBJECTIVE
 					source: { type: 'base64', media_type: mediaType, data: b64 },
 				});
 			}
+			contentBlocks.push({ type: 'text', text: userContent });
 			userMessageContent = contentBlocks;
 		}
 
