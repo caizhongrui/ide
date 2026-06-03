@@ -1675,6 +1675,21 @@ export default function App() {
 
   async function bootWithCredentials(creds: SavedCredentials) {
     setAppStatus("booting"); setBootError("")
+    // F25：自动登录前先去管理端 loginCheck 校验本地保存的密码是否仍有效。
+    // 防止用户在管理端改了密码、本地 localStorage 还存着旧密码时——以前流程
+    // 直接把旧密码推给 sidecar，UI 看似登录成功但每次调 AI 都 401（"密码错误"）。
+    // 校验失败 → 清掉本地凭据、踢回登录页让用户输新密码。
+    try {
+      await loginCheck(creds.apiUrl, creds.username, creds.password)
+    } catch (e: any) {
+      console.warn('[boot] 本地凭据已失效（管理端密码已改？），踢回登录页:', e?.message || e)
+      clearCredentials()
+      setCurrentUser(null)
+      setLoginPassword("")
+      setLoginError("登录信息已失效，请重新登录")
+      setAppStatus("login")
+      return
+    }
     // 启动竞态自愈：手动点图标启动时，sidecar（子进程）可能还没监听好，
     // /auth/configure 等请求会 connection refused。自动重试若干次（每次重置 client
     // 重新解析端口 + 等待），把原来需要用户手点"重试"的弹窗变成自动恢复。

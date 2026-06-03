@@ -2325,12 +2325,14 @@ async function main() {
 			const cacheKey = `rt|${runtimeCfg.apiUrl}|${runtimeCfg.username}|${bizCode}|${sessionModel ?? ''}`;
 			const cached = __aiHandlerCache.get(cacheKey);
 			if (cached) {
-				// K-MultiModel：handler 复用前按最新 meta 刷一次 supportsVision / selectedModel —
-				// scene-models 元数据异步预热，第一次建 handler 时 supportVision 可能还是 0
-				// （后来管理端刷新成 1），不刷新就走 stale 快照触发 vision 降级把图丢了。
+				// K-MultiModel：handler 复用前按最新 runtimeCfg + meta 刷一次配置——
+				// ① supportsVision/selectedModel：scene-models 异步预热的 stale 修复（vision 降级丢图）
+				// ② username/password：管理端改密后 /auth/configure 推新凭据但 handler stale → 401 修复
 				cached.updateMeta({
 					supportsVision: meta ? !!meta.supportVision : true,
 					selectedModel:  sessionModel ?? null,
+					username:       runtimeCfg.username,
+					password:       runtimeCfg.password,
 				});
 				console.log(`[AiHandler] 复用 handler: businessCode=${bizCode}, ${modelLogPart}`);
 				return cached;
@@ -2358,6 +2360,8 @@ async function main() {
 				cached.updateMeta({
 					supportsVision: meta ? !!meta.supportVision : true,
 					selectedModel:  sessionModel ?? null,
+					username:       aiConfig.username,
+					password:       aiConfig.password,
 				});
 				console.log(`[AiHandler] 复用 handler (static): businessCode=${bizCode}, ${modelLogPart}`);
 				return cached;

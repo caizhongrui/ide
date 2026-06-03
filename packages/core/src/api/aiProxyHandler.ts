@@ -288,15 +288,22 @@ export class AiProxyHandler implements IApiHandler {
 
 	/**
 	 * K-MultiModel：sidecar 复用 cached handler 前刷新 meta 用。
-	 * 避免 supportsVision / selectedModel 是 handler 创建那一刻的快照 ——
-	 * scene-models 元数据是异步预热的，第一次建 handler 时可能 meta 还不
-	 * 完整（supportVision=0），之后管理端刷新成 supportVision=1，但
-	 * cached handler 仍用旧快照 → vision 降级把图丢了 (imageBlockCount=0)。
-	 * 让 cli.ts 每次复用前调一次，永远跟最新 meta 同步。
+	 * 避免 supportsVision / selectedModel / username / password 是 handler
+	 * 创建那一刻的快照——
+	 *  - scene-models 元数据异步预热（导致 supportsVision 一开始是 false 之后变 true）
+	 *  - 管理端改用户密码后，IDE 重登推送新凭据但 handler 仍用旧密码 → 401
+	 * 让 cli.ts 每次复用前调一次，永远跟最新 config 同步。
 	 */
-	updateMeta(meta: { supportsVision?: boolean; selectedModel?: string | null }): void {
+	updateMeta(meta: {
+		supportsVision?: boolean;
+		selectedModel?:  string | null;
+		username?:       string;
+		password?:       string;
+	}): void {
 		if (meta.supportsVision !== undefined) this.config.supportsVision = meta.supportsVision;
 		if (meta.selectedModel  !== undefined) this.config.selectedModel  = meta.selectedModel ?? undefined;
+		if (meta.username       !== undefined) this.config.username       = meta.username;
+		if (meta.password       !== undefined) this.config.password       = meta.password;
 	}
 
 	/**
