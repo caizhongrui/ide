@@ -1112,12 +1112,16 @@ export default function App() {
 
   // ── K-MultiModel (v0.2.25)：模型清单 + per-session 模型选择 ──────────────
   // 模型清单按当前模式对应的 businessCode 拉
-  // 'ask' / globalMode='chat' → IDE_CHAT_ASK；其余（code / plan / bypass）→ IDE_CHAT_CODE
+  // 只有 globalMode='chat'（纯问答）→ IDE_CHAT_ASK；四种作曲模式都是 Code agent → IDE_CHAT_CODE
   const [availableModels, setAvailableModels] = createSignal<SceneModel[]>([])
   const [modelsLoading, setModelsLoading] = createSignal(false)
   const currentBusinessCode = createMemo<'IDE_CHAT_CODE' | 'IDE_CHAT_ASK'>(() => {
-    if (composerMode() === 'ask' || globalMode() === 'chat') return 'IDE_CHAT_ASK'
-    return 'IDE_CHAT_CODE'
+    // 模型清单只跟「Chat 模式」(纯问答) 走 IDE_CHAT_ASK；其余都是 Code agent。
+    // 四种作曲模式（接受编辑/询问权限/计划/跳过）只是工具审批策略不同，本质都是
+    // Code agent，统一走 IDE_CHAT_CODE 的同一套模型集——审批策略不该切换模型集。
+    // 之前 composerMode==='ask' 也映射到 IDE_CHAT_ASK，导致选「询问权限」时模型清单
+    // 突然只剩 IDE_CHAT_ASK 场景配置的那几个（用户实测从 4 个变 1 个）。
+    return globalMode() === 'chat' ? 'IDE_CHAT_ASK' : 'IDE_CHAT_CODE'
   })
   // 拉清单：每次 businessCode 变化时；拿到空清单时 1.5s 后 retry 一次
   // （sidecar 启动预热 prefetch 是异步的，首次 createEffect 可能比 prefetch 早完成）

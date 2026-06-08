@@ -12,6 +12,17 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
 	{
+		version: '0.2.43',
+		date: '2026-06-08',
+		changes: [
+			'🐛 修复「切到『询问权限』作曲模式时可选模型从 4 个骤降为 1 个」：',
+			'   · 四种作曲模式（接受编辑 / 询问权限 / 计划 / 跳过）本质都是 Code agent，只是工具审批策略不同，模型清单应当一致',
+			'   · 此前「询问权限」被误判为问答场景去拉 IDE_CHAT_ASK 的模型集，导致清单收窄',
+			'   · 现在仅「Chat 纯问答模式」走 IDE_CHAT_ASK，其余作曲模式统一走 IDE_CHAT_CODE 同一套模型',
+			'⚙️ 一批内部稳定性优化',
+		],
+	},
+	{
 		version: '0.2.42',
 		date: '2026-06-08',
 		changes: [
