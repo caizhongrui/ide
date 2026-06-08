@@ -621,6 +621,16 @@ export class MaxianClient {
 		catch { /* 刷新失败静默忽略，不影响 @ 引用现有候选 */ }
 	}
 
+	/**
+	 * 前端诊断日志落盘（PERFDIAG 用）。fire-and-forget：把前端主线程卡顿、
+	 * 启动各阶段耗时等回传到 sidecar.log（[CLIENT-DIAG] 前缀），便于事后定位
+	 * Windows "未响应"卡在哪个环节。失败静默忽略，绝不影响主流程。
+	 */
+	async clientLog(msg: string): Promise<void> {
+		try { await this.request('POST', `/__client-log`, { msg }); }
+		catch { /* 诊断日志失败无所谓 */ }
+	}
+
 	/** 读取项目级配置 + 自定义 agent / command */
 	async getProjectConfig(workspaceId: string): Promise<{
 		config: {

@@ -131,6 +131,56 @@ type AppStatus  = "login" | "booting" | "ready" | "error"
 // SettingsTab 类型已抽到 ./components/SettingsNav
 // 类型 / 常量 / helpers 已抽到 ./lib/types.ts / ./lib/toolMeta.ts / ./lib/themeFont.ts
 
+// ─── PERFDIAG: 启动期/运行期主线程卡顿诊断（纯诊断，不改业务行为）─────────────
+// 把前端主线程卡顿 + 启动各阶段耗时落盘到 sidecar.log（[CLIENT-DIAG] 前缀），
+// 用于定位 Windows "未响应" 卡在哪个环节。复现后查 ~/.maxian/sidecar.log。
+const __perfT0 = (typeof performance !== 'undefined' ? performance.now() : 0)
+function __now(): number { return typeof performance !== 'undefined' ? performance.now() : Date.now() }
+function diag(tag: string, msg: string): void {
+  const ts = (__now() - __perfT0).toFixed(0)
+  const line = `[PERFDIAG ${tag}] +${ts}ms ${msg}`
+  try { console.log(line) } catch { /* */ }
+  void (async () => {
+    try { const c = await getClient(); await (c as any).clientLog?.(line) } catch { /* 落盘失败忽略 */ }
+  })()
+}
+// 计时器：返回一个函数，调用时记录从创建到现在的耗时并落盘
+function diagTimer(tag: string): (msg: string) => void {
+  const t0 = __now()
+  return (msg: string) => diag(tag, `${msg} 耗时 ${(__now() - t0).toFixed(0)}ms`)
+}
+// 主线程卡顿监控：rAF 间隔自检 + longtask observer。
+// ⚠️ Tauri 里 webview JS 与 Rust 同步 command 同在主线程——Rust command（如
+// process_stats）阻塞主线程时 rAF 回调也停，恢复后帧间隔暴增即被捕获。这是
+// 能抓到"包括 Rust 同步 command 在内"所有主线程占用的金标准。
+let __stallMonitorInstalled = false
+function installMainThreadStallMonitor(): void {
+  if (__stallMonitorInstalled) return
+  __stallMonitorInstalled = true
+  // ① longtask observer（抓 JS 长任务，如大渲染/hljs）
+  try {
+    const PO = (window as any).PerformanceObserver
+    if (PO) {
+      const obs = new PO((list: any) => {
+        for (const entry of list.getEntries()) {
+          if (entry.duration >= 100) diag('LONGTASK', `JS 长任务阻塞 ${entry.duration.toFixed(0)}ms`)
+        }
+      })
+      obs.observe({ entryTypes: ['longtask'] })
+    }
+  } catch { /* 不支持就靠 rAF 兜底 */ }
+  // ② rAF 间隔自检（兜底，覆盖 Rust 同步 command 等非 JS 主线程占用）
+  let last = __now()
+  const tick = () => {
+    const now = __now()
+    const gap = now - last
+    if (gap > 250) diag('STALL', `主线程被占 ${gap.toFixed(0)}ms（两帧间隔）`)
+    last = now
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+}
+
 // ─── ProcStats: 左下角进程资源监控（webview + sidecar 内存/CPU 实时） ───────
 // formatBytes 已抽到 ./lib/themeFont
 function ProcStats() {
@@ -147,8 +197,15 @@ function ProcStats() {
     try {
       const { invoke } = await import('@tauri-apps/api/core' as any)
       const poll = async () => {
+        // 窗口不可见（最小化/切后台）时跳过——省 CPU，且避免长时间隐藏后回到窗口时
+        // 攒着的多次 poll 集中爆发。
+        if (typeof document !== 'undefined' && document.hidden) return
         try {
+          // PERFDIAG：测 process_stats invoke 往返耗时（Rust 端现已 spawn_blocking 离开主线程）。
+          const __t = __now()
           const r = await invoke('process_stats')
+          const __ms = __now() - __t
+          if (__ms > 300) diag('PROCSTATS', `process_stats invoke 往返 ${__ms.toFixed(0)}ms`)
           setStats(r as any)
         } catch (e) {
           console.warn('[ProcStats] poll failed:', e)
@@ -1304,17 +1361,24 @@ export default function App() {
   function progressiveSetMessages(all: ChatMessage[]): void {
     const FIRST_BATCH = 10
     const STEP        = 10
+    // PERFDIAG：记录历史消息渲染规模（"刚打开就卡"若是会话渲染导致，这里会暴露）
+    diag('RENDER', `开始渲染历史消息 共 ${all.length} 条`)
     if (all.length <= FIRST_BATCH) {
+      const __t = __now()
       setMessages(all)
+      diag('RENDER', `一次性渲染 ${all.length} 条 耗时 ${(__now()-__t).toFixed(0)}ms`)
       return
     }
     let shown = FIRST_BATCH
+    const __tf = __now()
     setMessages(all.slice(-shown))
+    diag('RENDER', `首屏 ${shown} 条 耗时 ${(__now()-__tf).toFixed(0)}ms`)
     const tick = (): void => {
-      if (shown >= all.length) return
+      if (shown >= all.length) { diag('RENDER', `全部 ${all.length} 条渲染完成`); return }
       shown = Math.min(shown + STEP, all.length)
       setMessages(all.slice(-shown))
       if (shown < all.length) requestAnimationFrame(tick)
+      else diag('RENDER', `全部 ${all.length} 条渲染完成`)
     }
     requestAnimationFrame(tick)
   }
@@ -1553,11 +1617,15 @@ export default function App() {
   }
 
   onMount(() => {
-    initI18n()
+    // PERFDIAG：装主线程卡顿监控 + 给 onMount 各步计时（定位"刚打开就卡"）。
+    installMainThreadStallMonitor()
+    diag('BOOT', 'App onMount 开始')
+    let __t = __now()
+    initI18n();                                    diag('BOOT', `initI18n 耗时 ${(__now()-__t).toFixed(0)}ms`); __t = __now()
     setLocaleSignal(getLocale())
-    applyTheme(loadTheme())
-    applyFont(loadFontFamily(), loadFontSize())
-    const saved = loadSavedCredentials()
+    applyTheme(loadTheme());                        diag('BOOT', `applyTheme 耗时 ${(__now()-__t).toFixed(0)}ms`); __t = __now()
+    applyFont(loadFontFamily(), loadFontSize());    diag('BOOT', `applyFont 耗时 ${(__now()-__t).toFixed(0)}ms`); __t = __now()
+    const saved = loadSavedCredentials();           diag('BOOT', `loadSavedCredentials 耗时 ${(__now()-__t).toFixed(0)}ms（有凭据=${!!saved}）`)
     if (saved) {
       setCurrentUser(saved.userInfo)
       setLoginApiUrl(saved.apiUrl)
@@ -1680,7 +1748,9 @@ export default function App() {
     // 直接把旧密码推给 sidecar，UI 看似登录成功但每次调 AI 都 401（"密码错误"）。
     // 校验失败 → 清掉本地凭据、踢回登录页让用户输新密码。
     try {
+      const __lc = diagTimer('BOOT')
       await loginCheck(creds.apiUrl, creds.username, creds.password)
+      __lc('loginCheck（自动登录校验）')
     } catch (e: any) {
       console.warn('[boot] 本地凭据已失效（管理端密码已改？），踢回登录页:', e?.message || e)
       clearCredentials()
@@ -1700,11 +1770,13 @@ export default function App() {
           resetClient()                                   // 丢掉可能连错端口的旧 client，重新解析
           await new Promise(r => setTimeout(r, 1000))     // 给 sidecar 一点稳定时间
         }
-        await waitForServer()
-        await configureServerAi(creds.apiUrl, creds.username, creds.password)
-        await refreshWorkspaces()
-        await refreshSessions()
+        let __bt = diagTimer('BOOT')
+        await waitForServer();                                                   __bt('waitForServer'); __bt = diagTimer('BOOT')
+        await configureServerAi(creds.apiUrl, creds.username, creds.password);    __bt('configureServerAi'); __bt = diagTimer('BOOT')
+        await refreshWorkspaces();                                               __bt('refreshWorkspaces'); __bt = diagTimer('BOOT')
+        await refreshSessions();                                                 __bt('refreshSessions')
         setAppStatus("ready")
+        diag('BOOT', `进入 ready 状态（启动完成，attempt=${attempt}）`)
         // 启动后静默检查更新（后台，不影响 UI）
         void checkForUpdatesSilent()
         return

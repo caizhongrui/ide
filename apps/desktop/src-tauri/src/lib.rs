@@ -168,11 +168,23 @@ fn sidecar_log_path() -> Option<PathBuf> {
     let home = std::env::var("USERPROFILE").ok();
     home.map(|h| PathBuf::from(h).join(".maxian").join("sidecar.log"))
 }
-/// 每次 spawn 前清空，只保留本次启动的输出（避免无限增长）。
+/// 每次 spawn 时追加一行启动分隔符（不再整体清空——否则每次启动都丢掉上次
+/// 卡死前的历史日志，没法排查"刚打开就卡"）。仅当文件超过 5MB 时轮转一次，
+/// 保留最近一半，避免无限增长。
 fn reset_sidecar_log(header: &str) {
     if let Some(path) = sidecar_log_path() {
         if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-        let _ = std::fs::write(&path, format!("{header}\n"));
+        const MAX_BYTES: u64 = 5 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > MAX_BYTES {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let keep_from = content.len().saturating_sub((MAX_BYTES / 2) as usize);
+                    let tail_start = content[keep_from..].find('\n').map(|i| keep_from + i + 1).unwrap_or(keep_from);
+                    let _ = std::fs::write(&path, &content[tail_start..]);
+                }
+            }
+        }
+        append_sidecar_log(&format!("\n========== {header} =========="));
     }
 }
 fn append_sidecar_log(line: &str) {
@@ -435,63 +447,79 @@ fn server_info(server_port: tauri::State<'_, ServerPort>) -> serde_json::Value {
 /// 进程资源监控（左下角状态栏用）：返回当前桌面端进程 + sidecar 子进程的内存/CPU。
 /// sysinfo 是跨平台的（macOS/Windows/Linux），mem_bytes 单位字节，cpu_percent 是单核相对值（多核机器可能 > 100）。
 #[tauri::command]
-fn process_stats(server_pid: tauri::State<'_, ServerPid>) -> serde_json::Value {
-    use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
-
-    let mut sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
-    );
-    // sysinfo 要求两次 refresh 之间隔一段才能算 cpu_usage（差分）
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-
-    let self_pid = std::process::id();
+async fn process_stats(server_pid: tauri::State<'_, ServerPid>) -> Result<serde_json::Value, String> {
+    // 先把 sidecar pid 取出（u32 是 Send），State 不能跨 spawn_blocking 边界。
     let sidecar_pid: Option<u32> = server_pid.0.lock().ok().and_then(|g| *g);
 
-    let (mut self_mem, mut self_cpu) = (0u64, 0.0f32);
-    let (mut sc_mem,   mut sc_cpu)   = (0u64, 0.0f32);
-    let (mut total_mem, mut total_cpu) = (0u64, 0.0f32);
+    // 核心修复：原来是【同步】command，在主线程枚举全进程 + sleep 120ms。Tauri 里同步
+    // command 在主线程跑 = webview 消息循环被冻结，Windows 大进程表阻塞数百 ms~数秒 →
+    // "未响应"。改成 async + spawn_blocking：sysinfo 重活搬到阻塞线程池，彻底离开主线程。
+    // sysinfo 逻辑保持不变（零编译风险）。
+    tauri::async_runtime::spawn_blocking(move || {
+        use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
-    if let Some(p) = sys.process(Pid::from_u32(self_pid)) {
-        self_mem = p.memory();
-        self_cpu = p.cpu_usage();
-        total_mem += self_mem;
-        total_cpu += self_cpu;
-    }
-    if let Some(pid) = sidecar_pid {
-        if let Some(p) = sys.process(Pid::from_u32(pid)) {
-            sc_mem = p.memory();
-            sc_cpu = p.cpu_usage();
-            total_mem += sc_mem;
-            total_cpu += sc_cpu;
+        let __t0 = std::time::Instant::now();
+        let mut sys = System::new_with_specifics(
+            RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+        );
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let __proc_count = sys.processes().len();
+        let __elapsed_ms = __t0.elapsed().as_millis();
+        if __elapsed_ms > 200 {
+            append_sidecar_log(&format!(
+                "[PERFDIAG] process_stats blocking-thread {}ms (enumerated {} processes, off main thread)",
+                __elapsed_ms, __proc_count
+            ));
         }
-    }
 
-    // 系统总内存 / 可用内存（用于计算占比）
-    let sys_total = sys.total_memory();
-    let sys_used  = sys.used_memory();
+        let self_pid = std::process::id();
+        let (mut self_mem, mut self_cpu) = (0u64, 0.0f32);
+        let (mut sc_mem,   mut sc_cpu)   = (0u64, 0.0f32);
+        let (mut total_mem, mut total_cpu) = (0u64, 0.0f32);
 
-    serde_json::json!({
-        "self": {
-            "pid": self_pid,
-            "memBytes": self_mem,
-            "cpuPercent": self_cpu,
-        },
-        "sidecar": {
-            "pid": sidecar_pid,
-            "memBytes": sc_mem,
-            "cpuPercent": sc_cpu,
-        },
-        "total": {
-            "memBytes": total_mem,
-            "cpuPercent": total_cpu,
-        },
-        "system": {
-            "totalMemBytes": sys_total,
-            "usedMemBytes":  sys_used,
+        if let Some(p) = sys.process(Pid::from_u32(self_pid)) {
+            self_mem = p.memory();
+            self_cpu = p.cpu_usage();
+            total_mem += self_mem;
+            total_cpu += self_cpu;
         }
+        if let Some(pid) = sidecar_pid {
+            if let Some(p) = sys.process(Pid::from_u32(pid)) {
+                sc_mem = p.memory();
+                sc_cpu = p.cpu_usage();
+                total_mem += sc_mem;
+                total_cpu += sc_cpu;
+            }
+        }
+
+        let sys_total = sys.total_memory();
+        let sys_used  = sys.used_memory();
+
+        serde_json::json!({
+            "self": {
+                "pid": self_pid,
+                "memBytes": self_mem,
+                "cpuPercent": self_cpu,
+            },
+            "sidecar": {
+                "pid": sidecar_pid,
+                "memBytes": sc_mem,
+                "cpuPercent": sc_cpu,
+            },
+            "total": {
+                "memBytes": total_mem,
+                "cpuPercent": total_cpu,
+            },
+            "system": {
+                "totalMemBytes": sys_total,
+                "usedMemBytes":  sys_used,
+            }
+        })
     })
+    .await
+    .map_err(|e| format!("process_stats join error: {}", e))
 }
 
 /// 打开本地目录到系统资源管理器（macOS Finder / Windows Explorer / Linux 文件管理器）。
