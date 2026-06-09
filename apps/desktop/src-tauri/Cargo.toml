@@ -1,6 +1,6 @@
 [package]
 name = "maxian-desktop"
-version = "0.2.43"
+version = "0.2.44"
 description = "码弦 Maxian 桌面客户端"
 edition = "2021"
 rust-version = "1.77"
@@ -32,6 +32,16 @@ sysinfo = "0.32"
 # portable-pty 是 wezterm 项目的 PTY 抽象层，跨平台（macOS / Linux / Windows ConPTY）。
 portable-pty = "0.8"
 parking_lot = "0.12"
+
+# Windows 专用：Job Object（kill-on-close）——把 sidecar 挂进 Job，父进程退出/崩溃/被强杀时
+# OS 自动连带终止 Job 内所有进程，从 OS 层面杜绝"占住端口的孤儿 sidecar"。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",            # CreateJobObjectW 的 SECURITY_ATTRIBUTES 参数需要此 feature
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

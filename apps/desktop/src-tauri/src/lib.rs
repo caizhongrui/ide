@@ -53,21 +53,6 @@ fn read_env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// K-Port：从 start 起最多试 50 个端口找空闲的。返回 None 表示全部被占。
-/// v0.2.28 起改为固定端口策略（不再让步换端口），此函数保留备用、暂不调用。
-#[allow(dead_code)]
-fn find_free_port(start: u16) -> Option<u16> {
-    use std::net::TcpListener;
-    for offset in 0..50u16 {
-        let p = start.saturating_add(offset);
-        // bind 成功立刻 drop（listener 出作用域），端口空闲
-        if TcpListener::bind(("127.0.0.1", p)).is_ok() {
-            return Some(p);
-        }
-    }
-    None
-}
-
 // ─── O9: 窗口尺寸/位置持久化 ──────────────────────────────────────────────
 // 简化方案：不引 tauri-plugin-window-state 插件，直接读写 ~/.maxian/desktop-window-state.json
 
@@ -196,121 +181,97 @@ fn append_sidecar_log(line: &str) {
     }
 }
 
-/// 杀掉占用指定端口的进程：清理上次没退干净的残留 sidecar，确保新 sidecar 能在固定端口起来。
-fn kill_process_on_port(port: &str) {
-    #[cfg(windows)]
-    {
-        if let Ok(out) = cmd_no_window("netstat").args(["-ano"]).output() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let needle = format!(":{}", port);
-            let mut pids: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for line in text.lines() {
-                if line.contains(&needle) && line.to_uppercase().contains("LISTENING") {
-                    if let Some(pid) = line.split_whitespace().last() {
-                        if pid != "0" { pids.insert(pid.to_string()); }
-                    }
-                }
-            }
-            for pid in pids {
-                let _ = cmd_no_window("taskkill").args(["/F", "/PID", &pid]).output();
-                println!("[maxian-desktop] 杀掉占用端口 {} 的残留进程 pid={}", port, pid);
-            }
-        }
-    }
-    #[cfg(unix)]
-    {
-        if let Ok(out) = cmd_no_window("lsof").args(["-ti", &format!(":{}", port)]).output() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for pid in text.split_whitespace() {
-                let _ = cmd_no_window("kill").args(["-9", pid]).output();
-                println!("[maxian-desktop] 杀掉占用端口 {} 的残留进程 pid={}", port, pid);
-            }
-        }
-    }
+/// 从 sidecar stdout 的握手行 `__MAXIAN_READY__ {"url":..,"port":51847,..}` 解析实际端口。
+/// 端口由 OS 经 --port 0 动态分配，sidecar listen 成功后把它打到 stdout 回报给桌面端。
+fn parse_ready_port(line: &str) -> Option<u16> {
+    let brace = line.find('{')?;
+    let v: serde_json::Value = serde_json::from_str(line[brace..].trim()).ok()?;
+    v.get("port")
+        .and_then(|p| p.as_u64())
+        .and_then(|p| u16::try_from(p).ok())
 }
 
-/// 启动前探活：检查端口上是否有我们的 maxian-server（用 /health 验证）。
-/// 返回值：true=端口上是 maxian-server（残留，需清理）；false=端口空闲或被别的服务占。
-fn probe_existing_server(port: &str, user: &str, pass: &str) -> bool {
-    // 1. 试着连一下 /health
-    let url = format!("http://127.0.0.1:{}/health", port);
-    let auth = {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, pass))
+/// Windows Job Object（kill-on-close）：把 sidecar 挂进一个进程级唯一的 Job，父进程（本桌面
+/// 进程）的句柄一旦关闭（正常退出 / 崩溃 / 被任务管理器或 kill -9 强杀），OS 自动连带终止 Job
+/// 内所有进程。这是比 stdin-EOF 启发式更可靠的 OS 级生命周期绑定，杜绝"占住端口的孤儿 sidecar"。
+/// （Chrome / Electron / VS Code 同款机制。）mac/linux 无此机制，仍由 sidecar 的 stdin-EOF
+/// watcher 兜底——PR_SET_PDEATHSIG 需子进程在 exec 前自设，无法经 tauri-plugin-shell 注入。
+#[cfg(windows)]
+mod winjob {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    // 用 curl 做 HEAD 探活（避免引入 reqwest 依赖；Windows 10+ 已自带 curl.exe）
-    let devnull = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let out = cmd_no_window("curl")
-        .args([
-            "-s", "-o", devnull,
-            "-w", "%{http_code}",
-            "--max-time", "2",
-            "-H", &format!("Authorization: Basic {}", auth),
-            &url,
-        ])
-        .output();
-    if let Ok(o) = out {
-        let code = String::from_utf8_lossy(&o.stdout).trim().to_string();
-        if code == "200" {
-            println!("[maxian-desktop] 端口 {} 上检测到 maxian-server（/health=200，按残留处理）", port);
-            return true;
-        }
-        if !code.is_empty() && code != "000" {
-            // 是别的服务占着端口（401/403/等）
-            eprintln!("[maxian-desktop] ⚠️ 端口 {} 被占用（HTTP {}），但不是我们的 maxian-server", port, code);
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    /// 包裹裸 HANDLE 以便存进 OnceLock（HANDLE 本身非 Send/Sync）。句柄存活到本进程退出，
+    /// 退出时由 OS 关闭 → 触发 kill-on-close。故意不主动 CloseHandle，这正是我们要的语义。
+    struct JobHandle(HANDLE);
+    unsafe impl Send for JobHandle {}
+    unsafe impl Sync for JobHandle {}
+
+    static JOB: OnceLock<JobHandle> = OnceLock::new();
+
+    fn ensure_job() -> HANDLE {
+        JOB.get_or_init(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if !job.is_null() {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+            }
+            JobHandle(job)
+        })
+        .0
+    }
+
+    /// 把指定 pid 挂进 kill-on-close Job。成功返回 true。
+    pub fn assign_kill_on_close(pid: u32) -> bool {
+        unsafe {
+            let job = ensure_job();
+            if job.is_null() {
+                return false;
+            }
+            let proc = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if proc.is_null() {
+                return false;
+            }
+            let ok = AssignProcessToJobObject(job, proc) != 0;
+            CloseHandle(proc);
+            ok
         }
     }
-    false
 }
 
 fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
-    // 默认端口 4096 → 51847：避开 Node dev 工具（Vite 5173 / CRA 3000 / webpack 8080 等）
-    // 常用范围，落在动态/私有端口区（49152+）。与 jiusi(51823) 错开，避免同机两端互撞。
-    // 用户可用 MAXIAN_PORT 环境变量覆盖；被占时仍走下方 find_free_port 自动让步。
-    let configured = read_env_or_default("MAXIAN_PORT", "51847");
     let user = read_env_or_default("MAXIAN_USER", "maxian");
     let pass = read_env_or_default("MAXIAN_PASS", "test123");
 
-    // 启动前探活：51847 上若已有 maxian-server——加了 single-instance 后不会有合法的并发实例，
-    // 所以一定是上次没退干净的【残留】。它的 parent-death watcher 认的是【旧 app】的 pid，
-    // 复用它会让它几秒后发现旧 app 已死而自杀 → 端口变空 → 前端 /health 失败（Windows 高发）。
-    // 故：杀掉残留 + 重新 spawn 全新 sidecar（认【当前 app】为 parent，不会自杀），稳定在固定端口。
-    if probe_existing_server(&configured, &user, &pass) {
-        println!("[maxian-desktop] 检测到残留 sidecar 占用端口 {}，杀掉后重新 spawn", configured);
-        kill_process_on_port(&configured);
-        std::thread::sleep(Duration::from_millis(600));  // 等端口释放再 bind
-    }
+    // 端口策略（v0.2.44 重构）：传 --port 0，让 OS 原子分配一个保证空闲的端口。
+    // 旧方案（固定 51847 + probe_existing_server + kill_process_on_port + find_free_port 让步
+    // 重试）整套删除——根因是"父子在抢一个具体的 TCP 端口"：端口被上次没退干净的残留 sidecar
+    // 占用、或被安全软件 MITM（本机回环留下 ESTABLISHED 连接，且是杀不掉的受保护进程）占住，
+    // 就反复 EADDRINUSE 崩溃；固定端口死守时没有逃生口 → 永远"启动失败"。
+    //
+    // port=0 由内核交回一个【已绑好的】空闲端口，从原理上消灭 EADDRINUSE，也没有"先用
+    // TcpListener 探测、后 sidecar 真正 bind"之间的竞态窗口。sidecar listen 成功后会在 stdout
+    // 打印 `__MAXIAN_READY__ {json}`（含实际端口），下方 stdout 消费循环解析它并写入 ServerPort；
+    // 握手到达前 server_info 返回 ready:false，前端 waitForServer 持续重试直到拿到实际端口。
+    //
+    // 孤儿治理交给 OS 级机制：Windows 用 Job Object（kill-on-close，见下方 winjob），
+    // mac/linux 仍由 sidecar 的 stdin-EOF watcher 兜底。故不再需要启动前探活/强杀残留。
 
-    // 固定端口策略（v0.2.28）：**不再** K-Port 让步换端口。
-    // 原因：让步后 sidecar 实际端口与前端探测端口（拿不到 server_info 时 fallback 51847）不一致，
-    // Windows 上高发——前端探 51847、sidecar 在 51848 → /health 连不上 → "启动失败"。
-    // 改为：端口被占时强杀占用进程（netstat/taskkill on Win，lsof/kill on unix），固定复用 51847。
-    // 宁可端口固定可预测（前后端永远一致、报错端口可信），也不悄悄换端口制造不一致。
-    let configured_port: u16 = configured.parse().unwrap_or(51847);
-    {
-        use std::net::TcpListener;
-        if TcpListener::bind(("127.0.0.1", configured_port)).is_err() {
-            eprintln!(
-                "[maxian-desktop] 端口 {} 被占用，强杀占用进程后固定复用该端口（不让步换端口）",
-                configured_port
-            );
-            kill_process_on_port(&configured);
-            std::thread::sleep(Duration::from_millis(600)); // 等端口释放再 bind
-        }
-    }
-    let port_num: u16 = configured_port;
-    let port = port_num.to_string();
-
-    // 把实际端口写入 state，供 server_info / 前端读取
-    if let Some(s) = app.try_state::<ServerPort>() {
-        if let Ok(mut g) = s.0.lock() {
-            *g = Some(port_num);
-        }
-    }
-
-    // O4：传父进程 PID 给 sidecar，sidecar 自己 watch 父进程死亡然后自杀
-    // 解决 dev 环境用 kill -9 强杀 desktop 主进程时 Tauri CloseRequested handler 不跑、
-    // sidecar 给 init 接管成为僵尸的问题
+    // O4：传父进程 PID 给 sidecar（mac/linux 的 stdin-EOF watcher 据此自杀兜底）。
     let parent_pid = std::process::id().to_string();
 
     // B5: 计算 maxian-deps 目录绝对路径（dev / release 都覆盖）
@@ -355,7 +316,7 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         .sidecar("maxian-server")
         .map_err(|e| format!("创建 sidecar 失败（检查 externalBin 是否包含 bin/maxian-server）: {e}"))?
         .args([
-            "--port", &port,
+            "--port", "0",            // ← 让 OS 原子分配空闲端口；实际端口经 __MAXIAN_READY__ 回报
             "--host", "127.0.0.1",
             "--cors",
             "--username", &user,
@@ -370,7 +331,7 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         .env("BUN_GC_HEAP_GROWTH_RATIO", "1.5")
         .env("NODE_OPTIONS", "--max-old-space-size=2048");
 
-    reset_sidecar_log(&format!("=== maxian-server spawn: port={} ===", port));
+    reset_sidecar_log("=== maxian-server spawn: port=0 (OS 动态分配) ===");
     let (mut rx, child) = sidecar
         .spawn()
         .map_err(|e| {
@@ -381,18 +342,51 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         })?;
 
     let pid = child.pid();
-    println!("[maxian-desktop] sidecar 已启动 pid={} port={}", pid, port);
-    append_sidecar_log(&format!("[spawn OK] pid={} port={}", pid, port));
+    println!("[maxian-desktop] sidecar 已启动 pid={}（端口由 OS 分配，等待 __MAXIAN_READY__）", pid);
+    append_sidecar_log(&format!("[spawn OK] pid={}（等待 __MAXIAN_READY__ 回报实际端口）", pid));
 
-    // 后台消费子进程 stdout/stderr，透传到本进程（便于开发时查看日志）
+    // Windows：把 sidecar 挂进 kill-on-close Job Object，父进程一旦退出/崩溃/被强杀，OS 自动
+    // 连带终止，杜绝占住端口的孤儿。mac/linux 仍由 sidecar 的 stdin-EOF watcher 兜底。
+    #[cfg(windows)]
+    {
+        if winjob::assign_kill_on_close(pid) {
+            append_sidecar_log(&format!("[winjob] pid={} 已挂入 kill-on-close Job Object", pid));
+        } else {
+            append_sidecar_log(&format!("[winjob] pid={} 挂入 Job 失败（退回 stdin-EOF 兜底）", pid));
+        }
+    }
+
+    // 后台消费子进程 stdout/stderr：透传日志 + 解析 sidecar 的 `__MAXIAN_READY__` 握手行拿实际端口
+    let ready_app = app.clone();
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
+        // 握手检测缓冲：Stdout 事件不保证按行切分，累积到换行再判断，避免标记行被 chunk 截断
+        let mut ready_buf = String::new();
+        let mut ready_done = false;
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(data) => {
                     if let Ok(line) = String::from_utf8(data) {
                         print!("{line}");
                         append_sidecar_log(&line);
+                        if !ready_done {
+                            ready_buf.push_str(&line);
+                            while let Some(nl) = ready_buf.find('\n') {
+                                let one: String = ready_buf.drain(..=nl).collect();
+                                if one.contains("__MAXIAN_READY__") {
+                                    if let Some(p) = parse_ready_port(&one) {
+                                        if let Some(s) = ready_app.try_state::<ServerPort>() {
+                                            if let Ok(mut g) = s.0.lock() { *g = Some(p); }
+                                        }
+                                        println!("[maxian-desktop] sidecar 就绪，实际端口={}", p);
+                                        append_sidecar_log(&format!("[ready] sidecar 实际端口={}", p));
+                                        ready_done = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ready_buf.len() > 16_384 { ready_buf.clear(); }  // 保险：避免无界增长
+                        }
                     }
                 }
                 CommandEvent::Stderr(data) => {
@@ -424,24 +418,25 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
 
 #[tauri::command]
 fn server_info(server_port: tauri::State<'_, ServerPort>) -> serde_json::Value {
-    // K-Port：优先读 spawn_server 写入的实际端口；fallback 到 env / 51847 默认
-    let port: u16 = server_port
+    // v0.2.44：端口由 sidecar 经 stdout `__MAXIAN_READY__` 握手回报后写入 ServerPort。
+    // 握手到达前端口未知 —— 返回 ready:false（不再臆测 51847），前端 waitForServer 会持续
+    // 重试直到拿到实际端口。MAXIAN_PORT 环境变量仍作为显式覆盖（standalone / dev 用）。
+    let port: Option<u16> = server_port
         .0
         .lock()
         .ok()
         .and_then(|g| *g)
-        .unwrap_or_else(|| {
-            std::env::var("MAXIAN_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(51847)
-        });
-    serde_json::json!({
-        "baseUrl": format!("http://127.0.0.1:{}", port),
-        "port": port,
-        "username": std::env::var("MAXIAN_USER").unwrap_or_else(|_| "maxian".into()),
-        "password": std::env::var("MAXIAN_PASS").unwrap_or_else(|_| "test123".into()),
-    })
+        .or_else(|| std::env::var("MAXIAN_PORT").ok().and_then(|s| s.parse().ok()));
+    match port {
+        Some(p) => serde_json::json!({
+            "ready":    true,
+            "baseUrl":  format!("http://127.0.0.1:{}", p),
+            "port":     p,
+            "username": std::env::var("MAXIAN_USER").unwrap_or_else(|_| "maxian".into()),
+            "password": std::env::var("MAXIAN_PASS").unwrap_or_else(|_| "test123".into()),
+        }),
+        None => serde_json::json!({ "ready": false }),
+    }
 }
 
 /// 进程资源监控（左下角状态栏用）：返回当前桌面端进程 + sidecar 子进程的内存/CPU。

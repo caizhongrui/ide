@@ -329,14 +329,42 @@ export class NodeTerminal implements ITerminal {
 			finished = true;
 			if (killTimer) clearTimeout(killTimer);
 			if (idleChecker) clearInterval(idleChecker);
+			if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
 		});
 
-		child.on('close', (code: number | null) => {
+		// 收尾：emit exit chunk + 清理所有 timer / 监听。幂等（finished 守卫）。
+		let lastExitCode: number | null = null;
+		let graceTimer: ReturnType<typeof setTimeout> | null = null;
+		const finalize = () => {
 			if (finished) return;
-			enqueue({ type: 'exit', exitCode: timedOut ? null : code, cancelled, timedOut });
 			finished = true;
 			if (killTimer) clearTimeout(killTimer);
 			if (idleChecker) clearInterval(idleChecker);
+			if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+			// 命令把 stdout/stderr 管道交给了后台残留的孙进程（典型：`nohup node server &`、
+			// `cmd & echo $!`）时，'close' 永远不会触发（管道写端被孙进程一直持有）。
+			// 主动摘除监听并 unref，让孙进程在后台继续运行，父侧立即停止等待。
+			try { child.stdout?.removeAllListeners('data'); } catch { /* ignore */ }
+			try { child.stderr?.removeAllListeners('data'); } catch { /* ignore */ }
+			try { child.unref(); } catch { /* ignore */ }
+			enqueue({ type: 'exit', exitCode: timedOut ? null : lastExitCode, cancelled, timedOut });
+		};
+
+		// 'close'：进程退出 **且** stdio 流全部关闭后触发——正常命令的主路径，此时输出已完整。
+		child.on('close', (code: number | null) => {
+			lastExitCode = code;
+			finalize();
+		});
+
+		// 'exit'：进程本身已退出（早于 'close'）。正常情况下 'close' 紧随其后并带出全部缓冲
+		// 输出，走 'close' 分支即可。但若进程把管道交给了后台孙进程，'close' 永远不来——
+		// 给一个短暂的排空窗口让最后的缓冲输出（如 `echo PID=$!`）落地后强制收尾，
+		// 避免一直挂到超时阈值才误报 timedOut。
+		child.on('exit', (code: number | null) => {
+			if (finished) return;
+			lastExitCode = code;
+			if (graceTimer) clearTimeout(graceTimer);
+			graceTimer = setTimeout(finalize, 200);
 		});
 
 		// 把 ChildProcess 注册到 running，cancel(token) 时 lookup
