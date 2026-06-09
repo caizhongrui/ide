@@ -38,6 +38,28 @@ export function resolvedBase(): string {
   return resolvedInfo?.baseUrl ?? BASE
 }
 
+// ─── server-ready 事件：Rust 在 sidecar 握手完成后主动推送实际端口 ──────────────
+// 端口由 OS 动态分配（--port 0），Rust 解析 sidecar 的 __MAXIAN_READY__ 握手后 emit 此事件。
+// 监听它 = 第一时间锁定正确端口，不再依赖轮询 server_info 的时序（修复"动态端口连不上、
+// 一直连 51847"）。轮询 server_info 仍作兜底（事件可能在监听器注册前就发出）。
+let _serverReadyListening = false
+export function listenServerReady(): void {
+  if (_serverReadyListening) return
+  if (!(window as any).__TAURI_INTERNALS__) return
+  _serverReadyListening = true
+  import('@tauri-apps/api/event' as any)
+    .then(({ listen }: any) => listen('maxian:server-ready', (e: any) => {
+      const port = e?.payload?.port
+      const baseUrl = e?.payload?.baseUrl ?? (port ? `http://127.0.0.1:${port}` : null)
+      if (baseUrl) {
+        resolvedInfo = { baseUrl, username: USER, password: PASS }
+        _client = null   // 丢弃旧 client，下次 getClient 用新端口重建
+        console.log('[maxian] 收到 server-ready，锁定 sidecar 实际地址: ' + baseUrl)
+      }
+    }))
+    .catch((e: any) => { _serverReadyListening = false; console.warn('[maxian] 监听 server-ready 失败:', e) })
+}
+
 // ─── 本地凭据存储（localStorage） ───────────────────────────────────────────
 const CRED_KEY = "maxian_credentials"
 
@@ -93,6 +115,7 @@ async function makeFetch(): Promise<typeof fetch> {
 let _client: MaxianClient | null = null
 
 export async function getClient(): Promise<MaxianClient> {
+  listenServerReady()   // 幂等：确保已挂上 server-ready 监听，第一时间拿到动态端口
   if (_client) return _client
   const f = await makeFetch()
   // 先尝试通过 invoke 拿真实 sidecar 配置（端口可能被 Rust 端 fallback）；拿不到走默认值
@@ -122,6 +145,9 @@ export async function waitForServer(maxMs = 25000, intervalMs = 300): Promise<vo
   let attempts = 0
   while (Date.now() - start < maxMs) {
     attempts++
+    // 每轮都重取 client：若 server-ready 事件已把 _client 置空并锁定新端口，这里立刻生效
+    c = await getClient()
+    usedBase = resolvedInfo?.baseUrl ?? BASE
     try {
       const r = await c.health()
       if (r.ok) {
@@ -132,13 +158,11 @@ export async function waitForServer(maxMs = 25000, intervalMs = 300): Promise<vo
       lastErr = e
       if (attempts <= 3) console.warn(`[maxian] health attempt ${attempts} failed:`, e)
     }
-    // 每 5 次失败重新解析一次端口：sidecar 起来后才把实际端口写进 Rust state，
-    // 或被占自动 fallback 换了端口——重置 client 重新 invoke server_info 拿最新端口
+    // 轮询兜底：每 5 次失败强制重新 invoke server_info 解析端口（应对 server-ready 事件
+    // 在监听器注册前就发出、被错过的情况）。事件命中时上面的 getClient 已用新端口，无需等这里
     if (attempts % 5 === 0) {
       resetClient()
-      c = await getClient()
-      usedBase = resolvedInfo?.baseUrl ?? BASE
-      console.warn(`[maxian] 重新解析 sidecar 端口 @ ${usedBase}`)
+      console.warn(`[maxian] 重新解析 sidecar 端口（轮询兜底） @ ${usedBase}`)
     }
     await new Promise((res) => setTimeout(res, intervalMs))
   }

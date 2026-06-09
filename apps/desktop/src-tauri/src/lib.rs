@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, RunEvent, WindowEvent};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 // F11: Windows 上启动子进程时不弹 cmd 黑窗
@@ -366,27 +366,33 @@ fn spawn_server(app: &AppHandle) -> Result<CommandChild, String> {
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(data) => {
-                    if let Ok(line) = String::from_utf8(data) {
-                        print!("{line}");
-                        append_sidecar_log(&line);
-                        if !ready_done {
-                            ready_buf.push_str(&line);
-                            while let Some(nl) = ready_buf.find('\n') {
-                                let one: String = ready_buf.drain(..=nl).collect();
-                                if one.contains("__MAXIAN_READY__") {
-                                    if let Some(p) = parse_ready_port(&one) {
-                                        if let Some(s) = ready_app.try_state::<ServerPort>() {
-                                            if let Ok(mut g) = s.0.lock() { *g = Some(p); }
-                                        }
-                                        println!("[maxian-desktop] sidecar 就绪，实际端口={}", p);
-                                        append_sidecar_log(&format!("[ready] sidecar 实际端口={}", p));
-                                        ready_done = true;
-                                        break;
+                    // from_utf8_lossy：绝不因 chunk 边界切断多字节 UTF-8 就丢掉整块（会吞掉握手行）
+                    let line = String::from_utf8_lossy(&data).into_owned();
+                    print!("{line}");
+                    append_sidecar_log(&line);
+                    if !ready_done {
+                        ready_buf.push_str(&line);
+                        while let Some(nl) = ready_buf.find('\n') {
+                            let one: String = ready_buf.drain(..=nl).collect();
+                            if one.contains("__MAXIAN_READY__") {
+                                if let Some(p) = parse_ready_port(&one) {
+                                    if let Some(s) = ready_app.try_state::<ServerPort>() {
+                                        if let Ok(mut g) = s.0.lock() { *g = Some(p); }
                                     }
+                                    // 主动把实际端口推给前端（Tauri 事件），不依赖前端轮询 server_info。
+                                    // 端口发现的"推"模型：握手一完成立刻通知，消除前端轮询的时序脆弱。
+                                    let _ = ready_app.emit("maxian:server-ready", serde_json::json!({
+                                        "port":    p,
+                                        "baseUrl": format!("http://127.0.0.1:{}", p),
+                                    }));
+                                    println!("[maxian-desktop] sidecar 就绪，实际端口={}", p);
+                                    append_sidecar_log(&format!("[ready] sidecar 实际端口={}", p));
+                                    ready_done = true;
+                                    break;
                                 }
                             }
-                            if ready_buf.len() > 16_384 { ready_buf.clear(); }  // 保险：避免无界增长
                         }
+                        if ready_buf.len() > 16_384 { ready_buf.clear(); }  // 保险：避免无界增长
                     }
                 }
                 CommandEvent::Stderr(data) => {
