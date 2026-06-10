@@ -72,7 +72,33 @@
 - 关键文件：`controller/AiProxyController.java`、`service/impl/AiProxyServiceImpl.java`（`forwardStreamRequest` / `buildRequestBody` / `resolveBusinessModel`）、`domain/dto/AiProxyRequest.java`；
 - 现有转发已忠实透传 tool_calls / tool_call_id / reasoning_content / cache_control（2026-01-21 commit `cff5e45` 加入）。
 
-### 2.5 一个未解之谜（不阻塞，但要留诊断）
+### 2.5 鉴权实现照抄细节（已拍板：直接照抄九思）
+
+九思后端鉴权用 **Sa-Token 框架**（`cn.dev33.satoken`），已查证的关键事实：
+
+- token 名：`jiusi-token`（HTTP 头），CORS `exposedHeaders` 必须包含它；
+- 单设备登录：Sa-Token 配置 `is-concurrent=false + is-share=false`，登录自动踢掉旧设备 token；
+- 鉴权注解：受保护 controller 用 `@SaCheckLogin`（如 `jiusi-openapi` 的 `ChatCompletionController`）；
+- 拦截器注册：`jiusi-bootstrap/.../config/WebMvcConfig.java` 的 `addInterceptors` 注册 `SaInterceptor`——**注意注册顺序坑**（源码注释：上下文 filter 必须比 SaInterceptor 先注册，否则 `@SaCheckLogin` 全部失效/抛错，九思踩过这个坑）；
+- 登录实现：`jiusi-auth/.../service/LoginService.java` + `controller/AuthController.java`（`StpUtil` 登录、`SaTokenCurrentUserProvider` 取当前用户）。
+
+**qdport 照抄清单**：引 sa-token 依赖（版本与九思 pom 对齐）→ 照搬 `WebMvcConfig` 拦截器配置（含注册顺序）→ 照搬 `LoginService`/`AuthController`，把用户源从九思用户表替换为 qdport 的 `SysUser`（保留 status='1' 停用检查）→ token-name 配置 `jiusi-token` 与客户端一致 → CORS 配置对照九思 `WebMvcConfig.addCorsMappings`（含 `tauri://localhost` / `https://tauri.localhost` 桌面端 origin，缺了桌面端直接跨域失败）。
+
+### 2.6 数据库兼容结论（已拍板：要迁移——实测结论是天然兼容）
+
+对比两边 `database.ts`（jiusi-server vs 码弦 packages/server）已查证：
+
+- **DB 路径完全相同**：两边都是 `~/.maxian/maxian.db`（jiusi-server 同源未改）→ 码弦老用户装上新客户端，jiusi-server **直接打开原库**，会话/工作区/记忆全部继承，无需迁移工具；
+- **schema 同源，jiusi 是超集**：核心表完全一致（sessions/messages/workspaces/history_entries/file_snapshots/memories/mcp_servers/batch_tasks/task_batches/codebase_index_*）；jiusi 多 notes/tags/todos/remote_config/remote_tasks/remote_user_state（`CREATE TABLE IF NOT EXISTS` 自动建）；码弦多 `workspace_files`（jiusi 不认识但留着无害）；
+- **两边都有惰性 migration**（try/catch `ALTER TABLE ADD COLUMN`）：jiusi-server 打开码弦库时自动补齐自己需要的列（如 pm_base_url/pm_token）；码弦库已有而 jiusi 没有的列（如 sessions.model）留着无害；
+- **双向安全**：升级后老版本码弦再打开也不会坏（SQLite 多余表/列无影响）——回滚无风险；
+- ⚠️ **遗留验证项**（P4 联调时确认）：码弦 `sessions.model` 列记录的是 businessCode 体系的模型选择，切到九思协议后模型标识体系变化，老会话的 model 字段语义可能对不上——预期影响仅"老会话显示的模型名"，不影响内容，联调时确认即可。
+
+**双品牌数据目录策略修订**（基于此发现）：
+- 码弦版：保持 `~/.maxian/`（天然继承老数据，这就是迁移本身）；
+- 九思版：**需改为** `~/.jiusi/`——`database.ts` 已支持 `DATA_DIR` 环境变量覆盖（机制现成），打包时按 brand 注入即可。不改的话同机双装会共写同一个 SQLite（写竞争 + 数据混淆）。
+
+### 2.7 一个未解之谜（不阻塞，但要留诊断）
 
 lenovo 机器上出现过「上游 400：tool_call_ids did not have response messages」反复复现：sidecar 出站消息已验证合规、qdport 源码转发忠实、部署不滞后 → 剩余嫌疑是 qdport 的 `EffectiveAiConfig.apiEndpoint` 指向的**上游网关**（所配模型名 `deepseek-v4-pro` 非 DeepSeek 官方命名，疑似内部网关渠道）在协议转换时丢 tool 配对。`358ca6c` 的诊断日志 + 客户端 400 自愈（§4-#4）已covering。**迁移时检查 IDE_CHAT_CODE 场景的 apiEndpoint 指向并确认那层网关的行为。**
 
@@ -137,7 +163,7 @@ pnpm tauri build --config tauri.jiusi.conf.json    # 九思
 | identifier | **`com.maxian.desktop`**（老用户无缝升级，不可变） | `com.jiusi.desktop` | 不同 identifier → 可并存安装 |
 | 功能面 | 5 模块关 | 全开 | `VITE_BRAND` + feature flag |
 | 默认后端 | qdport 管理端 | 九思后端 | brand 配置 |
-| **数据目录** | `~/.maxian/` | `~/.jiusi/` | 构建时传给 sidecar（env/参数）；**必须隔离**，否则同机双装共写一个 SQLite |
+| **数据目录** | `~/.maxian/`（保持不动=天然继承老用户全部会话/工作区，见 §2.6） | `~/.jiusi/`（**要改**：jiusi-server 现在也用 `~/.maxian`，按 brand 注入 `DATA_DIR` env——机制现成） | **必须隔离**，否则同机双装共写一个 SQLite |
 | 更新通道 | 码弦现有 release repo（沿用，存量用户自动升级） | 九思自己的 | updater endpoint 按 brand |
 | 版本线 | **0.3.0 起**（标记大版本切换） | 0.9.x 继续 | tag 前缀分流：`maxian-v*` / `jiusi-v*` |
 
@@ -150,7 +176,7 @@ CI：把码弦的 `release-desktop.yml` 模式搬到 jiusi client 仓库，matri
 
 ```
 P0  qdport 九思接口适配层（独立包 com.boyo.knowledge.jiusiapi）：
-    #1/#2 token 认证 → #3 chat/completions（最难，先打通）→ #4/#5 models
+    #1/#2 token 认证（照抄 Sa-Token，照抄清单见 §2.5）→ #3 chat/completions（最难，先打通）→ #4/#5 models
 P1  qdport 形状兼容：#6 balance / #7 notifications / #10 health；#8 embeddings 调查定案
 P2  客户端：feature flag + 5 个稳定性修复移植 + 品牌字符串收敛
 P3  双品牌打包：tauri 双 config、数据目录隔离、CI workflow、updater 通道
@@ -158,6 +184,8 @@ P4  联调与发布：
     - 全链路：登录→模型清单→对话→工具调用→停止→重连→自动重试
     - 协议对比测试：同一请求分别打九思后端/qdport 适配层，diff SSE 输出序列
     - 跑码弦 docs/regression-checklist.md 全量回归
+    - 老数据继承验证：找一台装过码弦 0.2.x 的机器直接升级 0.3.0，确认历史会话/
+      工作区/记忆完整可用（§2.6 预期天然兼容），并核对老会话的 model 字段显示
     - 重点实测两台问题机器：8071 端口被占那台（验端口0）+ lenovo（验截断重试/400自愈）
     - 码弦 0.3.0-beta 经现有更新通道灰度 → 正式发布 → 码弦 ide 仓库归档
 ```
@@ -171,12 +199,12 @@ P4  联调与发布：
 **已拍板**（用户确认）：
 - 全面替换，以九思为准，qdport 对齐九思接口，不一致处单独分支；
 - design/project/tasks/notes/toolbox 暂不开放（feature flag 屏蔽，代码保留）；
-- 双品牌打包，后续修改两个品牌同步。
+- 双品牌打包，后续修改两个品牌同步；
+- token 体系：**直接照抄九思的 Sa-Token 鉴权实现**（照抄清单见 §2.5）；
+- 老用户历史会话：**要迁移**——已查证天然兼容（同一 DB 路径 + schema 同源超集 + 惰性 migration，见 §2.6），码弦版保持 `~/.maxian/` 即自动继承，无需迁移工具。
 
-**待拍板**（执行前确认，括号内为建议默认值）：
-1. token 体系：简单 DB token 表映射 SysUser，还是照抄九思鉴权 filter 实现？（建议：先读九思实现，能照抄就照抄——"实现尽可能一致"原则）
-2. 老用户历史会话：`~/.maxian/maxian.db` schema 与 jiusi-server 已分叉数月——做只读导入迁移，还是接受丢失？（建议：先实测 jiusi-server 能否直接打开旧库；不能则 0.3.0 发布说明里声明会话不迁移，新起）
-3. embeddings（§2.2-#8）调查结论出来后定：qdport 补接口 or 客户端降级。
+**待拍板/待调查**（仅剩一项）：
+1. embeddings（§2.2-#8）调查结论出来后定：qdport 补接口 or 客户端降级。
 
 ---
 
