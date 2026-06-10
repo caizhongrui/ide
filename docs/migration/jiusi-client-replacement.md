@@ -156,8 +156,8 @@ lenovo 机器上出现过「上游 400：tool_call_ids did not have response mes
 
 | # | 修复 | 码弦 commit | 源文件 → 九思目标文件 | 要点 |
 |---|---|---|---|---|
-| 1 | **端口 0 + stdout 握手 + Windows Job Object**（根治 EADDRINUSE「启动失败」+ 孤儿进程占端口） | `5bfcf45`(v0.2.44) | `apps/desktop/src-tauri/src/lib.rs` → `jiusi-desktop/src-tauri/src/lib.rs`；`packages/server/src/cli.ts`（`__MAXIAN_READY__` 握手行已存在） | 九思现在还是「探测+1 递增」找端口（有竞态）。sidecar `--port 0`；解析 stdout `__MAXIAN_READY__ {json}` 拿实际端口；`winjob` 模块挂 kill-on-close Job Object（需 Cargo.toml 加 `windows-sys` 含 `Win32_Security` feature——`CreateJobObjectW` 被它门控）；删除旧的探测/强杀逻辑 |
-| 2 | **端口主动推送给前端**（修「动态端口后客户端死连默认端口」） | `c92a8e5`(v0.2.45) | 同上 lib.rs（`emit("maxian:server-ready")`）+ `apps/desktop/src/api.ts`（`listenServerReady`）→ jiusi 对应文件 | stdout 解析用 `from_utf8_lossy`（chunk 边界切断多字节字符会吞握手行）；前端事件监听 + `waitForServer` 每轮重取 client |
+| 1 | **端口 0 + stdout 握手 + Windows Job Object**（根治 EADDRINUSE「启动失败」+ 孤儿进程占端口） | `5bfcf45`(v0.2.44) | `apps/desktop/src-tauri/src/lib.rs` → `jiusi-desktop/src-tauri/src/lib.rs` | **详细移植步骤见附录 A**（含与九思已有「崩溃自动拉起」逻辑的协调） |
+| 2 | **端口主动推送给前端**（修「动态端口后客户端死连默认端口」） | `c92a8e5`(v0.2.45) | 同上 lib.rs + `jiusi-desktop/src/api.ts` | **详细移植步骤见附录 A**（A.4/A.5） |
 | 3 | **NodeTerminal 后台命令卡死**（`nohup x & echo $!` 等后台孙进程持有管道 → 'close' 永不触发 → 挂到超时） | NodeTerminal 修复 commit（v0.2.44 内） | `packages/core/src/adapters/NodeTerminal.ts` → `jiusi-core/src/adapters/NodeTerminal.ts` | 监听 `'exit'` + 200ms 排空 grace 后强制收尾（移除 stdout/stderr 监听、unref、emit exit chunk）；实测从 8000ms 超时 → 6ms |
 | 4 | **tool_calls 配对 400 自愈**（消毒重试，防会话卡死在同一错误） | `7c3e669` | `packages/core/src/api/aiProxyHandler.ts` → `jiusi-core/src/api/jiusiHandler.ts`（注意：九思模式走 JiusiHandler，要移植到它；aiProxyHandler 也可同步） | `isToolPairingError` 识别 + `sanitizeToolHistory`（assistant.tool_calls 折叠为文本、role:tool 转 user）+ 任何内容输出之前命中则消毒重试一次 |
 | 5 | **流截断检测 + 轮级自动重试**（修「思考中直接断了、无提示」） | `9175267` + `41f7651` | `packages/core/src/api/aiProxyHandler.ts`（截断检测）→ `jiusi-core/src/api/jiusiHandler.ts`；`packages/server/src/cli.ts`（P0-6 重试块扩展）→ `jiusi-server/src/cli.ts` | 检测：流 done 但无 `[DONE]`/finish_reason/已上抛业务错误 → yield「响应流被中途截断」error。重试：复用限流重试循环，TRUNCATION_RE 命中 → **回滚本轮累积**（iterText/allText 增量/toolCalls/reasoning 分段 offset/工具流状态）→ 等 3s 整轮重发，最多 3 次；重试中再次截断继续重试 |
@@ -254,3 +254,88 @@ P4  联调与发布：
 - 九思 client 校验：`pnpm -r --if-present typecheck`；桌面 dev：`pnpm --filter @jiusi/desktop run tauri:dev`
 - 码弦的回归清单：ide 仓库 `docs/regression-checklist.md`
 - 遵守 ide 仓库 CLAUDE.md 纪律（一次重构只改一件事、HTTP 路由变更同步文档等）；qdport/jiusi 仓库如有各自 CLAUDE.md 同样遵守。
+
+---
+
+## 附录 A：端口修复移植详细说明（九思侧，对应 §4-#1/#2）
+
+### A.0 原理：为什么旧方案有竞态、新方案没有
+
+**九思现状（旧方案，`jiusi-desktop/src-tauri/src/lib.rs` 的 `spawn_server`）**：
+```
+probe_existing_server(51823)   # /health 探活，是自己的残留就复用（__REUSE_EXISTING__）
+→ find_free_port(51823)        # Rust 进程里 TcpListener::bind 试绑，+1 递增找空闲
+→ spawn sidecar --port <探测到的端口>   # sidecar 自己再 bind 一次
+```
+缺陷：① **试绑→sidecar 真正 bind 之间有时间窗**（sidecar 启动还要先同步读 DB，几百 ms~1s+），任何进程在窗口内抢占该端口，sidecar 就 EADDRINUSE 崩；② 端口被「杀不掉的占用者」握住时（实战案例：安全软件 MITM 回环 TCP 留下 ESTABLISHED 连接、taskkill 拒绝访问），固定起点的探测可能反复踩坑；③ 残留 sidecar 复用有自杀隐患（它的 parent-death watcher 认的是旧 app 的 stdin）。
+
+**新方案（码弦 v0.2.44/45 已实战验证）**：
+```
+spawn sidecar --port 0         # 内核在 sidecar bind 时原子分配空闲端口——不存在探测窗口
+→ sidecar listen 成功后 stdout 打印 __JIUSI_READY__ {"port":NNNNN,...}
+→ Rust 行缓冲解析握手 → 写入 ServerPort state + emit 事件主动推给前端
+→ Windows: 把 sidecar 挂进 kill-on-close Job Object（父进程死亡 OS 自动连带杀，孤儿绝迹）
+```
+实测：连续 6 次重启 + 3 实例并发启动，EADDRINUSE 全 0，每次都拿到不同空闲端口。
+
+### A.1 Rust 侧改动（`jiusi-desktop/src-tauri/src/lib.rs`）
+
+1. **`spawn_server` 端口选择段整段删除**：
+   - 删 `probe_existing_server(...)` 调用及 `__REUSE_EXISTING__` 复用分支（port=0 模式下每次新端口，不存在「复用固定端口上的残留」；残留治理交给 Job Object）；
+   - 删 `find_free_port(...)` 调用；`probe_existing_server`/`find_free_port` 两个函数整体删除；
+   - sidecar 启动参数改 `"--port", "0"`。
+2. **签名协调（九思特有）**：九思 `spawn_server` 返回 `(CommandChild, u16)`，spawn 时已知端口；port=0 后 spawn 时**不知道**端口（异步握手到达）→ 返回值改 `Result<CommandChild, String>`，`store_server_state` 去掉 port 参数（端口由握手解析写入 `ServerPort`）；调用点（setup 初次启动 + **崩溃自动拉起处** `match spawn_server(&app2)`）同步调整。**自动拉起逻辑本身保留**——拉起的新实例同样 port=0 → 新端口 → 握手 → 推送事件 → 前端自动跟随。
+3. **新增 `parse_ready_port`**（解析握手行，九思的标记是 `__JIUSI_READY__`，sidecar 已在输出、无需改服务端）：
+   ```rust
+   fn parse_ready_port(line: &str) -> Option<u16> {
+       let brace = line.find('{')?;
+       let v: serde_json::Value = serde_json::from_str(line[brace..].trim()).ok()?;
+       v.get("port").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok())
+   }
+   ```
+4. **stdout 消费循环改造**（spawn_server 内已有的 `CommandEvent::Stdout` 分支）：
+   - 解码改 `String::from_utf8_lossy(&data)`——**实战坑**：`String::from_utf8` 在 chunk 边界切断多字节 UTF-8 时整块丢弃，会吞掉握手行导致端口解析失败；
+   - 加行缓冲（Stdout 事件不保证按行切分）：累积到 `\n` 再逐行检查 `__JIUSI_READY__`；命中 → `parse_ready_port` → 写 `ServerPort` state → `app.emit("jiusi:server-ready", json!({"port": p, "baseUrl": format!("http://127.0.0.1:{}", p)}))` 主动推给前端 → 置 `ready_done` 不再解析；缓冲上限 16KB 防无界增长。
+5. **`server_info` 命令**：握手到达前返回 `{"ready": false}`（**不要**臆测返回默认端口 51823——旧行为会让前端死连错误端口）；到达后返回 `{"ready":true, "baseUrl":..., "port":...}`。`JIUSI_PORT` 环境变量仍可作显式覆盖（standalone/dev 用）。
+6. **新增 `winjob` 模块（Windows Job Object）**，spawn 成功拿到 pid 后调用：
+   ```rust
+   #[cfg(windows)]
+   { if winjob::assign_kill_on_close(pid) { /* log ok */ } else { /* log 退回 stdin-EOF 兜底 */ } }
+   ```
+   模块完整代码照抄码弦 commit `5bfcf45` 的 `winjob` mod（约 60 行）：`CreateJobObjectW` 建进程级唯一 Job、`SetInformationJobObject` 设 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、`OpenProcess(PROCESS_SET_QUOTA|PROCESS_TERMINATE)` + `AssignProcessToJobObject` 挂入；Job 句柄存 `OnceLock` 活到进程退出（故意不 CloseHandle——进程死亡时 OS 关句柄即触发连带终止，这正是要的语义）。mac/linux 不编译此模块，保留 sidecar 既有 stdin-EOF watcher 兜底（`PR_SET_PDEATHSIG` 需子进程 exec 前自设，无法经 tauri-plugin-shell 注入）。
+
+### A.2 `jiusi-desktop/src-tauri/Cargo.toml` 加依赖
+
+```toml
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",            # ← 必须：CreateJobObjectW 被此 feature 门控（实测踩过，缺它编译不过）
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+```
+
+### A.3 sidecar（`jiusi-server`）——基本无需改
+
+- `__JIUSI_READY__ {json}` 握手行已存在（cli.ts `console.log` 处，含 port 字段）；
+- 确认 `adapter/node.ts` 的 `listen` 在 `port:0` 下从 `server.address()` 取实际端口（码弦同源文件已支持，注释明确写了「port=0 让 OS 分配随机端口」；九思同源大概率一致，移植时花一分钟确认）。
+
+### A.4 前端（`jiusi-desktop/src/api.ts`）——事件监听（对应码弦 v0.2.45）
+
+1. 新增 `listenServerReady()`（幂等）：`@tauri-apps/api/event` 的 `listen('jiusi:server-ready', ...)` → 收到后 `resolvedInfo = {baseUrl, ...}`、`_client = null`（下次 getClient 用新端口重建）；
+2. `getClient()` 开头调 `listenServerReady()`（确保监听尽早挂上）；
+3. `waitForServer()` 轮询循环**每轮重取** `c = await getClient()`（事件一到立刻生效）；保留「每 5 次失败 `resetClient()` 重新 invoke server_info」作兜底（应对事件在监听器注册前发出被错过）。
+
+### A.5 验证清单（移植完逐项跑）
+
+| 验证 | 方法 | 预期 |
+|---|---|---|
+| Rust 编译 | `cargo check`（mac）+ 隔离 crate `cargo check --target x86_64-pc-windows-msvc`（验 winjob，mac 上整包 cross-check 会被 ring 的 C 依赖卡住，码弦侧用隔离 crate 法通过） | 零 error |
+| 端口不撞 | sidecar 二进制直接 `--port 0` 起 6 次（杀掉再起）+ 3 个并发 | 每次不同端口，EADDRINUSE=0 |
+| 握手链路 | tauri dev 启动，看 sidecar 日志 | 依次出现 `spawn OK（等待 __JIUSI_READY__）`→`Listening on :NNNNN`→`[ready] 实际端口=NNNNN`→ 前端请求打到 NNNNN |
+| 前端跟随 | 启动后前端能正常进主界面 | 不再死连 51823 |
+| Job Object（仅 Windows 实机） | 任务管理器强杀 jiusi-desktop.exe | jiusi-server.exe 同时消失（不再残留） |
+| 崩溃自动拉起协调 | 手动 kill sidecar 进程 | 1s 后自动拉起、拿到**新端口**、前端经事件自动跟随恢复 |
+
+> 码弦侧参照实现：ide 仓库分支 `claude/heuristic-moore-0c97e9`，commit `5bfcf45`（端口0+Job Object+握手解析）、`c92a8e5`（事件推送+lossy+前端监听）。两 commit 的 diff 就是完整答案，九思侧主要差异：标记名 `__JIUSI_READY__`、事件名 `jiusi:server-ready`、env 前缀 `JIUSI_*`、以及 §A.1-2 的返回值/自动拉起协调。
