@@ -585,6 +585,50 @@ export class AiProxyHandler implements IApiHandler {
 	}
 
 	/**
+	 * 识别"tool_calls 配对缺失"类 400 错误（OpenAI 兼容端点的标准文案及变体）。
+	 * 例："An assistant message with 'tool_calls' must be followed by tool messages
+	 *      responding to each 'tool_call_id'. The following tool_call_ids did not
+	 *      have response messages: call_xxx"
+	 */
+	private isToolPairingError(err: string | undefined): boolean {
+		if (!err) return false;
+		return /tool_call/i.test(err)
+			&& /(must be followed|did not have response|tool messages|preceding message)/i.test(err);
+	}
+
+	/**
+	 * 历史工具对话降级消毒：assistant.tool_calls 折叠为 content 文本、role:tool 转
+	 * role:user 文本。语义无损（模型仍能读到"调过什么工具、结果是什么"），但消除了
+	 * 所有 tool 配对结构——用于绕开链路上某层（网关/代理）丢配对导致的反复 400。
+	 * 仅在 isToolPairingError 命中时作为一次性重试使用，不影响正常请求。
+	 */
+	private sanitizeToolHistory(messages: AiProxyMessage[]): AiProxyMessage[] {
+		const out: AiProxyMessage[] = [];
+		for (const m of messages) {
+			if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+				const calls = m.tool_calls
+					.map(c => `${c.function?.name ?? 'unknown'}(${c.function?.arguments ?? ''})`)
+					.join('; ');
+				const text = typeof m.content === 'string' ? m.content : '';
+				const { tool_calls: _dropped, ...rest } = m as any;
+				out.push({
+					...rest,
+					content: `${text}\n[历史工具调用(已折叠为文本): ${calls}]`.trim(),
+				});
+			} else if (m.role === 'tool') {
+				const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+				out.push({
+					role: 'user',
+					content: `[历史工具结果${m.tool_call_id ? ` ${m.tool_call_id}` : ''}]\n${text}`,
+				});
+			} else {
+				out.push(m);
+			}
+		}
+		return out;
+	}
+
+	/**
 	 * P1优化：为消息添加缓存控制标记
 	 * 借鉴 Cline/Continue 的实现
 	 * 注意：这主要用于 Anthropic API，对于其他 API 可能需要适配
@@ -869,8 +913,40 @@ export class AiProxyHandler implements IApiHandler {
 				return;
 			}
 
-			// 处理流式响应
-			yield* this.processStream(response);
+			// 处理流式响应（带 tool_calls 配对 400 自愈）：
+			// 即便本地 repairOrphanToolCalls 已保证出站配对完整，链路上的网关/代理仍可能丢
+			// tool 配对，导致上游报 "An assistant message with 'tool_calls' must be followed
+			// by tool messages..." 的 400，且该错误会随破损历史每次请求复现——会话直接卡死。
+			// 自愈：错误出现在【任何内容输出之前】时，把历史中的工具对话降级为纯文本
+			// （assistant.tool_calls 折叠进 content、role:tool 转 user 文本）重试一次。
+			// 语义无损（模型仍能读到调用与结果），但绕开了所有对 tool 配对的结构校验。
+			let yieldedContent = false;
+			let sanitizeRetried = false;
+			let activeResponse: Response = response;
+			while (true) {
+				let pairingError: string | null = null;
+				for await (const chunk of this.processStream(activeResponse)) {
+					if (!yieldedContent && !sanitizeRetried && chunk.type === 'error'
+						&& this.isToolPairingError((chunk as ErrorStreamChunk).error)) {
+						pairingError = (chunk as ErrorStreamChunk).error;
+						break;  // 吞掉这个 error，转入消毒重试
+					}
+					if (chunk.type !== 'error') yieldedContent = true;
+					yield chunk;
+				}
+				if (pairingError === null) break;
+				sanitizeRetried = true;
+				console.warn('[Maxian] 检测到 tool_calls 配对 400，历史降级消毒后重试一次:', pairingError.slice(0, 200));
+				requestBody.messages = this.sanitizeToolHistory(aiProxyMessages);
+				requestOptions.body = JSON.stringify(requestBody);
+				const retryResp = await this.fetchWithTimeout(apiEndpoint, requestOptions, this.REQUEST_TIMEOUT);
+				if (!retryResp.ok) {
+					const retryErrText = await retryResp.text();
+					yield { type: 'error', error: friendlyHttpError(retryResp.status, retryErrText) } as ErrorStreamChunk;
+					return;
+				}
+				activeResponse = retryResp;
+			}
 
 		} catch (error) {
 			console.error('[Maxian] AiProxyHandler 错误:', error);
