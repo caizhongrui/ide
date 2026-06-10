@@ -82,7 +82,13 @@
 - 拦截器注册：`jiusi-bootstrap/.../config/WebMvcConfig.java` 的 `addInterceptors` 注册 `SaInterceptor`——**注意注册顺序坑**（源码注释：上下文 filter 必须比 SaInterceptor 先注册，否则 `@SaCheckLogin` 全部失效/抛错，九思踩过这个坑）；
 - 登录实现：`jiusi-auth/.../service/LoginService.java` + `controller/AuthController.java`（`StpUtil` 登录、`SaTokenCurrentUserProvider` 取当前用户）。
 
-**qdport 照抄清单**：引 sa-token 依赖（版本与九思 pom 对齐）→ 照搬 `WebMvcConfig` 拦截器配置（含注册顺序）→ 照搬 `LoginService`/`AuthController`，把用户源从九思用户表替换为 qdport 的 `SysUser`（保留 status='1' 停用检查）→ token-name 配置 `jiusi-token` 与客户端一致 → CORS 配置对照九思 `WebMvcConfig.addCorsMappings`（含 `tauri://localhost` / `https://tauri.localhost` 桌面端 origin，缺了桌面端直接跨域失败）。
+**qdport 侧已查证的现状（降低照抄成本，但有一个必须分支的差异）**：
+- qdport **本身已用 Sa-Token**（RuoYi-Vue-Plus 风格，`boyo-framework/config/SaTokenConfig.java`），且为 **JWT 简单模式**（`StpLogicJwtForSimple`）——框架依赖已在，无需新引；
+- 现有全局拦截：`SaInterceptor` 匹配 `/**`、放行列表在 `boyo-admin/src/main/resources/application.yml` 的 `security.excludes`（`/ai/proxy/**` 已在其中）；
+- ⚠️ **token 头名不一致（分支点）**：qdport 全局 `sa-token.token-name: token`，九思客户端发 `jiusi-token` 头。**不改全局配置**（会影响现有管理端 web），在新模块内自带轻量鉴权拦截器：从 `jiusi-token` 头取值 → `StpUtil.getLoginIdByToken()` 校验——这是「设计不一致单独加分支」的第一个实例；
+- **登录主体隔离**：IDE 登录（SysUser by email/password）与现有管理端 web 登录不能混在同一会话体系（互踢/超时策略不同）。用 Sa-Token **多账号体系**（独立 `StpLogic`，`loginType='jiusi-ide'`）在新模块内隔离，零侵入现有登录。
+
+**qdport 照抄清单**：照搬九思 `LoginService`/`AuthController` 语义（用户源换成 qdport `SysUser`，保留 status='1' 停用检查）→ 新模块内建独立 `StpLogic(loginType='jiusi-ide')` + `jiusi-token` 头拦截器 → CORS 对照九思 `WebMvcConfig.addCorsMappings`（必须含 `tauri://localhost` / `https://tauri.localhost` 桌面端 origin，缺了桌面端直接跨域失败；只对新模块路由生效，不动全局 CORS）。
 
 ### 2.6 数据库兼容结论（已拍板：要迁移——实测结论是天然兼容）
 
@@ -98,7 +104,31 @@
 - 码弦版：保持 `~/.maxian/`（天然继承老数据，这就是迁移本身）；
 - 九思版：**需改为** `~/.jiusi/`——`database.ts` 已支持 `DATA_DIR` 环境变量覆盖（机制现成），打包时按 brand 注入即可。不改的话同机双装会共写同一个 SQLite（写竞争 + 数据混淆）。
 
-### 2.7 一个未解之谜（不阻塞，但要留诊断）
+### 2.7 qdport 独立模块设计（已拍板：单独建模块，现有模块/接口零改动）
+
+qdport 是 RuoYi 风格多模块 Maven 工程：根 pom 聚合 modules，`boyo-admin` 是启动模块（`BoyoApplication`，`scanBasePackages={"org.jeecg","com.boyo"}`），各业务模块作为 boyo-admin 的依赖被自动扫描。
+
+**新模块：`boyo-jiusi-adapter`**（九思接口适配层，包路径 `com.boyo.jiusiadapter`——在 `com.boyo` 下自动被扫描，无需改启动类）：
+
+```
+boyo-jiusi-adapter/
+  └─ com.boyo.jiusiadapter/
+      ├─ config/        # 独立 StpLogic(loginType='jiusi-ide')、jiusi-token 头拦截器、
+      │                 #   新模块路由专属 CORS（tauri:// origins）
+      ├─ controller/    # /api/auth/*、/api/openapi/*、/api/tenant/*、/api/admin/balance/*、/api/health
+      ├─ service/       # 协议翻译：九思格式 ⇄ 复用 boyo-knowledge 的转发核心
+      └─ dto/           # 九思接口的请求/响应结构（照九思定义）
+```
+
+- **依赖方向**：boyo-jiusi-adapter → 依赖 boyo-knowledge（Spring 跨模块注入复用 `AiProxyServiceImpl` / `IModelProviderService` 等现有 bean），**只调用、不修改**；
+- **现有功能全部保留**：`/ai/proxy/**` 等所有既有接口原样不动——过渡期双协议并存：老码弦 0.2.x 客户端继续走 `/ai/proxy`，新 0.3.0 走九思接口，同一个 qdport 同时服务两者；
+- **不可避免的装配性改动只有三处**（均为声明/配置增量，不触碰任何现有代码逻辑）：
+  1. 根 `pom.xml`：`<module>boyo-jiusi-adapter</module>` 一行；
+  2. `boyo-admin/pom.xml`：新模块依赖声明一个 block；
+  3. `application.yml` 的 `security.excludes`：放行九思路由（`/api/auth/login`、`/api/openapi/**` 等几行——全局 SaInterceptor 放行后由新模块自己的拦截器接管鉴权）。
+- 若 `AiProxyServiceImpl` 的复用点是 private 方法（如 `buildRequestBody`），**不改它**——在新模块内通过组合调用其 public 入口，或把九思格式先翻译成 `AiProxyRequest` DTO 再调用现有 public 方法（首选，零侵入）。
+
+### 2.8 一个未解之谜（不阻塞，但要留诊断）
 
 lenovo 机器上出现过「上游 400：tool_call_ids did not have response messages」反复复现：sidecar 出站消息已验证合规、qdport 源码转发忠实、部署不滞后 → 剩余嫌疑是 qdport 的 `EffectiveAiConfig.apiEndpoint` 指向的**上游网关**（所配模型名 `deepseek-v4-pro` 非 DeepSeek 官方命名，疑似内部网关渠道）在协议转换时丢 tool 配对。`358ca6c` 的诊断日志 + 客户端 400 自愈（§4-#4）已covering。**迁移时检查 IDE_CHAT_CODE 场景的 apiEndpoint 指向并确认那层网关的行为。**
 
@@ -114,7 +144,7 @@ lenovo 机器上出现过「上游 400：tool_call_ids did not have response mes
 ```
 
 - 后续所有功能/修复在 jiusi client 一套代码上做，**两个品牌同步获得**；
-- qdport 的「九思兼容层」收敛到独立包（建议 `com.boyo.knowledge.jiusiapi`），九思接口演进时只动这一处；
+- qdport 的「九思兼容层」为**独立 Maven 模块 `boyo-jiusi-adapter`**（设计见 §2.7）：现有模块/接口零改动全保留，过渡期双协议并存（老码弦 0.2.x 走 `/ai/proxy`，新版走九思接口）；九思接口演进时只动这一个模块；
 - 码弦 ide 仓库冻结，归档。
 
 ---
@@ -175,8 +205,11 @@ CI：把码弦的 `release-desktop.yml` 模式搬到 jiusi client 仓库，matri
 ## 7. 实施顺序
 
 ```
-P0  qdport 九思接口适配层（独立包 com.boyo.knowledge.jiusiapi）：
-    #1/#2 token 认证（照抄 Sa-Token，照抄清单见 §2.5）→ #3 chat/completions（最难，先打通）→ #4/#5 models
+P0  qdport 九思接口适配层（独立 Maven 模块 boyo-jiusi-adapter，设计见 §2.7，
+    现有模块零改动，仅三处装配性增量）：
+    #1/#2 token 认证（照抄 Sa-Token + 多账号体系隔离，见 §2.5）
+    → #3 chat/completions（最难，先打通；九思格式翻译成 AiProxyRequest 复用现有转发）
+    → #4/#5 models
 P1  qdport 形状兼容：#6 balance / #7 notifications / #10 health；#8 embeddings 调查定案
 P2  客户端：feature flag + 5 个稳定性修复移植 + 品牌字符串收敛
 P3  双品牌打包：tauri 双 config、数据目录隔离、CI workflow、updater 通道
@@ -200,8 +233,9 @@ P4  联调与发布：
 - 全面替换，以九思为准，qdport 对齐九思接口，不一致处单独分支；
 - design/project/tasks/notes/toolbox 暂不开放（feature flag 屏蔽，代码保留）；
 - 双品牌打包，后续修改两个品牌同步；
-- token 体系：**直接照抄九思的 Sa-Token 鉴权实现**（照抄清单见 §2.5）；
-- 老用户历史会话：**要迁移**——已查证天然兼容（同一 DB 路径 + schema 同源超集 + 惰性 migration，见 §2.6），码弦版保持 `~/.maxian/` 即自动继承，无需迁移工具。
+- token 体系：**直接照抄九思的 Sa-Token 鉴权实现**（照抄清单见 §2.5；qdport 已自带 Sa-Token，差异点 jiusi-token 头名/登录主体用新模块内拦截器 + 多账号体系隔离解决）；
+- 老用户历史会话：**要迁移**——已查证天然兼容（同一 DB 路径 + schema 同源超集 + 惰性 migration，见 §2.6），码弦版保持 `~/.maxian/` 即自动继承，无需迁移工具；
+- qdport 后端接口：**单独创建模块 `boyo-jiusi-adapter`，不改动现有模块**（设计见 §2.7），既有功能/接口全部保留，过渡期双协议并存。
 
 **待拍板/待调查**（仅剩一项）：
 1. embeddings（§2.2-#8）调查结论出来后定：qdport 补接口 or 客户端降级。
@@ -215,7 +249,7 @@ P4  联调与发布：
   - 九思后端（接口标准参照，只读）：`/Users/caizhongrui/Documents/workspace/production/jiusi/api`（`jiusi-openapi`/`jiusi-proxy` 模块）
   - qdport 管理端（要加适配层）：`/Users/caizhongrui/Documents/workspace/qdport/ai/qdport-ai-api`（注意有本地未推送 commit `358ca6c` 和一些未提交的 yml/Dockerfile 改动，动手前先看 `git status`）
   - 码弦 ide（修复移植的源，参照只读）：分支 `claude/heuristic-moore-0c97e9`，未出货 commits：`7c3e669`（400自愈）、`9175267`（截断检测）、`41f7651`（截断重试）
-- qdport 编译验证：`mvn compile -pl boyo-knowledge -am -DskipTests`
+- qdport 编译验证：`mvn compile -pl boyo-knowledge -am -DskipTests`（新模块建好后：`mvn compile -pl boyo-jiusi-adapter -am -DskipTests`）
 - 九思 client 校验：`pnpm -r --if-present typecheck`；桌面 dev：`pnpm --filter @jiusi/desktop run tauri:dev`
 - 码弦的回归清单：ide 仓库 `docs/regression-checklist.md`
 - 遵守 ide 仓库 CLAUDE.md 纪律（一次重构只改一件事、HTTP 路由变更同步文档等）；qdport/jiusi 仓库如有各自 CLAUDE.md 同样遵守。
