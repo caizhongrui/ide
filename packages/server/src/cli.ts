@@ -3839,22 +3839,45 @@ OBJECTIVE
 				}
 			}
 
-			// Rate-limit 检测与自动重试（P0-6）
+			// Rate-limit / 流截断 检测与自动重试（P0-6 + 参照 jiusi LlmProxyService 的自动重试）
 			// 覆盖：HTTP 429、"rate limit"、"too many requests"、
 			//      DashScope/Qwen 容量忙时（"throttled / capacity limits / InternalError.Algo"）、
-			//      Anthropic "overloaded"、OpenAI "rate_limit_exceeded"
-			if (aiError && /\b429\b|rate[\s_-]?limit|too many requests|throttl|capacity limits?|overloaded|InternalError\.Algo/i.test(aiError)) {
+			//      Anthropic "overloaded"、OpenAI "rate_limit_exceeded"、
+			//      流被中途截断（网关空闲超时 / TCP 断开——多为暂态，重试通常即恢复）
+			const TRUNCATION_RE = /响应流被中途截断|流式响应静默超时/;
+			const RATE_LIMIT_RE = /\b429\b|rate[\s_-]?limit|too many requests|throttl|capacity limits?|overloaded|InternalError\.Algo/i;
+			if (aiError && (RATE_LIMIT_RE.test(aiError) || TRUNCATION_RE.test(aiError))) {
 				const retryMatch = aiError.match(/retry[\s-]*(?:after)?[\s:]*(\d+)/i);
-				const waitSec = retryMatch ? Math.max(5, Math.min(300, parseInt(retryMatch[1], 10))) : 30;
 				const maxRetries = 3;
 				let retries = 0;
 				while (retries < maxRetries) {
 					retries++;
+					// 截断是暂态网络问题，3s 即可；限流按 Retry-After / 默认 30s
+					const isTruncation = TRUNCATION_RE.test(aiError ?? '');
+					const waitSec = isTruncation
+						? 3
+						: (retryMatch ? Math.max(5, Math.min(300, parseInt(retryMatch[1], 10))) : 30);
+					// 截断重试前回滚本轮累积：半截输出不能与重试后的完整输出拼接入历史
+					// （iterText 会进 API history / DB assistant；allText 本轮增量 = iterText）。
+					// 前端思考块里已流出的半截文字保留展示，无碍。
+					if (isTruncation) {
+						allText = allText.slice(0, allText.length - iterText.length);
+						iterText = '';
+						iterReasoningText = '';
+						toolCalls.length = 0;
+						lastSavedTextOffset = 0;
+						lastSavedReasoningOffset = 0;
+						seenToolIds.clear();
+						toolInputCumLen.clear();
+						toolInputPending.clear();
+					}
 					const resetAt = Date.now() + waitSec * 1000;
 					await server.sessionManager.emitEvent(sessionId, {
 						type: 'rate_limit', sessionId,
 						resetAt, attempt: retries,
-						message: `触发限流（${waitSec}s），${retries}/${maxRetries} 次重试…`,
+						message: isTruncation
+							? `连接中断，${waitSec}s 后自动重试（${retries}/${maxRetries}）…`
+							: `触发限流（${waitSec}s），${retries}/${maxRetries} 次重试…`,
 					} as any);
 					await new Promise(r => setTimeout(r, waitSec * 1000));
 					await server.sessionManager.emitEvent(sessionId, {
@@ -3899,12 +3922,14 @@ OBJECTIVE
 							}
 						}
 						if (!aiError) break;
-						// 重试循环的退出判断必须与首次检测的正则一致，包括 "too many requests"
-						// 和 "throttl" / "capacity"（DashScope/Qwen 的容量忙时提示）
-						if (!/\b429\b|rate[\s_-]?limit|too many requests|throttl|capacity limits?/i.test(aiError)) break;
+						// 重试循环的退出判断必须与首次检测一致：限流类正则 + 流截断类。
+						// 缺截断判断的话，重试中再次断流会被当成普通错误直接放弃。
+						if (!/\b429\b|rate[\s_-]?limit|too many requests|throttl|capacity limits?/i.test(aiError)
+							&& !TRUNCATION_RE.test(aiError)) break;
 					} catch (e) {
 						aiError = (e as Error).message;
-						if (!/\b429\b|rate[\s_-]?limit|too many requests|throttl|capacity limits?/i.test(aiError)) break;
+						if (!/\b429\b|rate[\s_-]?limit|too many requests|throttl|capacity limits?/i.test(aiError)
+							&& !TRUNCATION_RE.test(aiError)) break;
 					} finally {
 						if (__activeStreamHandlers.get(sessionId) === handler) {
 							__activeStreamHandlers.delete(sessionId);
@@ -3915,7 +3940,9 @@ OBJECTIVE
 					await server.sessionManager.emitEvent(sessionId, {
 						type: 'rate_limit_cleared', sessionId,
 					} as any);
-					throw new Error(`持续限流，已重试 ${retries} 次仍失败: ${aiError}`);
+					throw new Error(TRUNCATION_RE.test(aiError)
+						? `连接持续中断，已自动重试 ${retries} 次仍失败: ${aiError}`
+						: `持续限流，已重试 ${retries} 次仍失败: ${aiError}`);
 				}
 			}
 
