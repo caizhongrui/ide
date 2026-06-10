@@ -1147,6 +1147,11 @@ export class AiProxyHandler implements IApiHandler {
 
 		// E2优化：追踪最终的 finish_reason，用于检测输出 token 达到上限
 		let finishReason = '';
+		// 截断检测：正常结束必有 [DONE] 或 finish_reason 之一；两者皆无而流 done
+		// = 连接被中途掐断（网关 readTimeout / TCP 断开 / 上游崩溃）。
+		// 不检测的话半截输出会被当成"正常说完"，UI 停在思考中无任何报错。
+		let sawDoneMarker = false;
+		let yieldedErrorChunk = false;
 		const HEARTBEAT_INTERVAL_MS = 3000;
 		const STREAM_IDLE_TIMEOUT_MS = 240_000;   // 4 分钟（multiedit 等大参数 LLM 生成可能慢）
 		const streamStartedAt = Date.now();
@@ -1233,6 +1238,7 @@ export class AiProxyHandler implements IApiHandler {
 					// 检查是否结束
 					if (data === '[DONE]') {
 						console.log('[Maxian] 收到 [DONE]');
+						sawDoneMarker = true;
 						continue;
 					}
 
@@ -1243,6 +1249,7 @@ export class AiProxyHandler implements IApiHandler {
 						if ((event as any).error) {
 							const errMsg = (event as any).error;
 							console.error('[Maxian] 后端返回业务错误:', errMsg);
+							yieldedErrorChunk = true;
 							yield { type: 'error', error: errMsg } as ErrorStreamChunk;
 							return;
 						}
@@ -1360,6 +1367,18 @@ export class AiProxyHandler implements IApiHandler {
 						console.error('[Maxian] 解析 AiProxy 响应失败:', parseError, 'data:', data);
 					}
 				}
+			}
+
+			// 截断检测：流 done 了但既没收到 [DONE] 也没收到任何 finish_reason，
+			// 且本流没有上抛过业务错误 → 连接被中途掐断（网关 readTimeout / TCP 断开 /
+			// 上游崩溃）。必须显式报错——否则半截输出会被上层当成"模型正常说完"，
+			// UI 永远停在"思考中"且无任何报错（实机已复现）。
+			if (!sawDoneMarker && !finishReason && !yieldedErrorChunk) {
+				console.error(`[Maxian] 流被中途截断：未收到 [DONE]/finish_reason（已收 ${totalBytesReceived} 字节, ${dataLinesCount} 行 data）`);
+				yield {
+					type: 'error',
+					error: '响应流被中途截断（未收到结束标记，疑似网络中断或网关超时），内容不完整。请重试。',
+				} as ErrorStreamChunk;
 			}
 
 		} finally {
