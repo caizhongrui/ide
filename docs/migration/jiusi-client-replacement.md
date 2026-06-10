@@ -158,9 +158,9 @@ lenovo 机器上出现过「上游 400：tool_call_ids did not have response mes
 |---|---|---|---|---|
 | 1 | **端口 0 + stdout 握手 + Windows Job Object**（根治 EADDRINUSE「启动失败」+ 孤儿进程占端口） | `5bfcf45`(v0.2.44) | `apps/desktop/src-tauri/src/lib.rs` → `jiusi-desktop/src-tauri/src/lib.rs` | **详细移植步骤见附录 A**（含与九思已有「崩溃自动拉起」逻辑的协调） |
 | 2 | **端口主动推送给前端**（修「动态端口后客户端死连默认端口」） | `c92a8e5`(v0.2.45) | 同上 lib.rs + `jiusi-desktop/src/api.ts` | **详细移植步骤见附录 A**（A.4/A.5） |
-| 3 | **NodeTerminal 后台命令卡死**（`nohup x & echo $!` 等后台孙进程持有管道 → 'close' 永不触发 → 挂到超时） | NodeTerminal 修复 commit（v0.2.44 内） | `packages/core/src/adapters/NodeTerminal.ts` → `jiusi-core/src/adapters/NodeTerminal.ts` | 监听 `'exit'` + 200ms 排空 grace 后强制收尾（移除 stdout/stderr 监听、unref、emit exit chunk）；实测从 8000ms 超时 → 6ms |
-| 4 | **tool_calls 配对 400 自愈**（消毒重试，防会话卡死在同一错误） | `7c3e669` | `packages/core/src/api/aiProxyHandler.ts` → `jiusi-core/src/api/jiusiHandler.ts`（注意：九思模式走 JiusiHandler，要移植到它；aiProxyHandler 也可同步） | `isToolPairingError` 识别 + `sanitizeToolHistory`（assistant.tool_calls 折叠为文本、role:tool 转 user）+ 任何内容输出之前命中则消毒重试一次 |
-| 5 | **流截断检测 + 轮级自动重试**（修「思考中直接断了、无提示」） | `9175267` + `41f7651` | `packages/core/src/api/aiProxyHandler.ts`（截断检测）→ `jiusi-core/src/api/jiusiHandler.ts`；`packages/server/src/cli.ts`（P0-6 重试块扩展）→ `jiusi-server/src/cli.ts` | 检测：流 done 但无 `[DONE]`/finish_reason/已上抛业务错误 → yield「响应流被中途截断」error。重试：复用限流重试循环，TRUNCATION_RE 命中 → **回滚本轮累积**（iterText/allText 增量/toolCalls/reasoning 分段 offset/工具流状态）→ 等 3s 整轮重发，最多 3 次；重试中再次截断继续重试 |
+| 3 | **NodeTerminal 后台命令卡死**（`nohup x & echo $!` 等后台孙进程持有管道 → 'close' 永不触发 → 挂到超时） | NodeTerminal 修复 commit（v0.2.44 内） | `packages/core/src/adapters/NodeTerminal.ts` → `jiusi-core/src/adapters/NodeTerminal.ts` | **详细移植步骤见附录 B** |
+| 4 | **tool_calls 配对 400 自愈**（消毒重试，防会话卡死在同一错误） | `7c3e669` | `packages/core/src/api/aiProxyHandler.ts` → `jiusi-core/src/api/jiusiHandler.ts`（主用 handler，**它没有 repair**；同源 aiProxyHandler 有 repair 无消毒） | **详细移植步骤见附录 C** |
+| 5 | **流截断检测 + 自动重试**（修「思考中直接断了、无提示」） | `9175267`（检测）；重试九思已有现成机制 | `jiusi-core/src/api/jiusiHandler.ts`（检测）+ `jiusi-server/src/cli.ts`（一行正则） | **详细移植步骤见附录 D**——九思已有 stall 重发 + transient 重试 + attempt 级回滚（比码弦先进），缺口只有「干净掐断」的检测，移植量大幅收窄 |
 
 > 另：码弦 v0.2.43 的「模型清单 IDE_CHAT_ASK/CODE 误映射」修复是码弦 UI 特有逻辑，迁移后模型清单走九思接口（§2.2-#4/#5），不需要移植，但联调时要验证模型清单在四种作曲模式下一致。
 
@@ -339,3 +339,95 @@ windows-sys = { version = "0.59", features = [
 | 崩溃自动拉起协调 | 手动 kill sidecar 进程 | 1s 后自动拉起、拿到**新端口**、前端经事件自动跟随恢复 |
 
 > 码弦侧参照实现：ide 仓库分支 `claude/heuristic-moore-0c97e9`，commit `5bfcf45`（端口0+Job Object+握手解析）、`c92a8e5`（事件推送+lossy+前端监听）。两 commit 的 diff 就是完整答案，九思侧主要差异：标记名 `__JIUSI_READY__`、事件名 `jiusi:server-ready`、env 前缀 `JIUSI_*`、以及 §A.1-2 的返回值/自动拉起协调。
+
+---
+
+## 附录 B：NodeTerminal 后台命令卡死修复移植说明（对应 §4-#3）
+
+### B.0 问题与原理
+
+`executeStream` 判定命令完成只靠 `child.on('close')`。`'close'` 的语义是「进程退出**且** stdio 管道全部关闭」——当命令把后台孙进程留在身后（典型：AI 执行 `nohup node server > log 2>&1 & echo "PID=$!"` 起 dev server），孙进程**继承并持续持有** stdout/stderr 管道写端，父 shell 退出后 `'close'` 永不触发 → `executeStream` 不 yield exit chunk → 上层 `for await` 挂到超时（60–120s），UI 表现为「AI 执行命令后卡住不动」，最后还误报 timedOut。
+
+修复：补订阅 `'exit'`（进程本身退出，先于 'close' 触发）。正常命令仍走 'close' 主路径（输出完整）；进程退出后给 **200ms 排空窗口**让最后的缓冲输出（如 `echo PID=$!` 的结果）落地，'close' 仍未到则强制收尾——孙进程继续后台运行，父侧立即返回。码弦实测：卡 8000ms 超时 → **6ms** 正常返回。
+
+### B.1 改动（`jiusi-core/src/adapters/NodeTerminal.ts`，与码弦修复前同构，照搬即可）
+
+替换原 `child.on('close', ...)` 单一收尾为三件套（完整代码见码弦 v0.2.44 commit `5bfcf45` 中 NodeTerminal.ts 的 diff）：
+
+1. **幂等 `finalize()`**：`finished` 守卫；清 killTimer/idleChecker/graceTimer；`removeAllListeners('data')` + `child.unref()`（摘除监听让孙进程自由运行）；`enqueue({type:'exit', exitCode: timedOut ? null : lastExitCode, ...})`；
+2. **`child.on('close')`**：记录 exitCode → `finalize()`（正常命令主路径，行为不变）；
+3. **`child.on('exit')`**：记录 exitCode → `graceTimer = setTimeout(finalize, 200)`（孙进程持管道时的逃生路径）；
+4. `child.on('error')` 收尾处同步清 graceTimer。
+
+### B.2 验证（用编译产物直接实测）
+
+| 用例 | 命令 | 预期 |
+|---|---|---|
+| 卡死复现型 | `nohup sleep 20 > /tmp/x.log 2>&1 & echo "PID=$!"` | **<300ms** 返回 exit=0，stdout 含 PID（修复前挂满 timeoutMs 且误报 timedOut） |
+| 普通命令 | `echo hello` | 无新增延迟（~3ms） |
+| 退出码传播 | `sh -c "exit 7"` | exit=7 正确传播 |
+
+---
+
+## 附录 C：tool_calls 配对 400 自愈移植说明（对应 §4-#4）
+
+### C.0 问题与原理
+
+上游返回 400「`An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'`」时，破损在**会话历史**里——每次请求都复现，会话永久卡死（码弦实机案例：sidecar 出站已验证合规，仍反复 400，嫌疑在上游网关丢配对）。防线两层：
+
+- **第一层 repair（请求前自愈）**：扫描出站消息，发现 assistant.tool_calls 后面缺对应 role:tool 回复 → 立刻插占位 tool 消息。来源：取消时未补 placeholder / 旧版 bug / 压缩边界裁错。
+- **第二层消毒重试（请求后自愈）**：repair 保证了出站合规，但链路上的网关仍可能丢配对。命中此类 400 且**未输出任何内容**时，把历史中的工具对话**降级为纯文本**（assistant.tool_calls 折叠进 content、role:tool 转 user 文本——语义无损但消除所有 tool 配对结构，绕开任何层的配对校验）重发一次。
+
+### C.1 九思现状与改动
+
+- `jiusi-core/src/api/aiProxyHandler.ts`：**有** `repairOrphanToolCalls`（同源 v0.2.20）、**无**消毒重试；
+- `jiusi-core/src/api/jiusiHandler.ts`（**九思模式主用 handler**）：repair 和消毒**都没有**——消息构建是独立实现。
+
+改动（jiusiHandler 为主，aiProxyHandler 顺手补消毒）：
+
+1. **repair 适配进 jiusiHandler**：把 aiProxyHandler 的 `repairOrphanToolCalls` 逻辑按 jiusiHandler 自己的消息结构适配（它构建 `body.messages` 处、发请求前调用）。算法不变：遍历→发现 assistant.tool_calls→收集紧随的 role:tool 已覆盖 ids→缺的补占位 `{role:'tool', tool_call_id, content:'[历史不完整：该工具结果丢失或未执行]'}`；
+2. **消毒重试**（照搬码弦 `7c3e669`，两个纯函数 + 流消费包装）：
+   - `isToolPairingError(err)`：`/tool_call/i` **且** `/(must be followed|did not have response|tool messages|preceding message)/i`（码弦实测：命中真实 400 原文、不误伤"用户名或密码错误"/"tool execution failed"）；
+   - `sanitizeToolHistory(messages)`：assistant.tool_calls → 折叠为 `content + "\n[历史工具调用(已折叠为文本): name(args); ...]"` 并删 tool_calls 字段；role:tool → `{role:'user', content:'[历史工具结果 id]\n...'}`；其余原样；
+   - 流消费处包一层：错误出现在**任何内容 chunk 之前**且命中识别 → 不上抛，`body.messages = sanitizeToolHistory(...)` 重发一次（只一次）；再失败如实上抛。jiusiHandler 的流读取在 `createMessage` 内联（无独立 processStream），包装位置在其 SSE 读循环外层。
+
+### C.2 验证
+
+- repair：五形态历史输入（孤儿在末尾+新 user / 并行 tool_calls 缺一 / 文本+tool_result 混合 / 图片+tool_result 混合 / 孤儿在最末）→ 输出全部满足 OpenAI 配对约束（校验器：每个 assistant.tool_calls 的全部 id 必须被紧随的 role:tool 覆盖）；
+- 消毒：含真实 400 原文的识别命中 / 两类普通错误不误伤 / 消毒输出零 tool 结构且语义保留。
+
+---
+
+## 附录 D：流截断检测移植说明（对应 §4-#5，九思侧移植量已收窄）
+
+### D.0 先说九思已有的（不要重复造）
+
+九思 `jiusi-server/src/cli.ts` 的 agent 循环已具备（且比码弦实现更系统）：
+- `consumeStreamWithStallRetry`：60s 静默 stall 检测 + 重发；
+- **transient 瞬时错误自动重试**：`isTransientAiError`（5xx/空流/网络断连等）→ 退避 1.5/3s 重发，最多 2 次；
+- **attempt 级回滚**：每次重发前把本轮累积器（iterText/iterReasoningText/toolCalls/工具流状态）复位到 iter-start 基线——半截输出不会与重试输出叠加。**码弦 `41f7651` 的回滚逻辑不需要移植**，九思现成。
+
+### D.1 唯一缺口：「干净掐断」检测不到
+
+`jiusi-core/src/api/jiusiHandler.ts` 读循环 `if (done) break;` 后无收尾判断：连接被**干净地关闭**（TCP FIN 正常到达——网关空闲超时主动断、上游进程退出，**不是**静默 stall，所以 stall 检测抓不到）且没收到 `[DONE]`/finish_reason 时，半截输出被当成「模型正常说完」静默结束——无错误上抛 → transient 重试不触发 → UI 停在「思考中」半截文字（码弦实机案例）。
+
+### D.2 改动（两小步）
+
+1. **jiusiHandler 加截断检测**（适配码弦 `9175267`）：读循环作用域加三个标记——`sawDoneMarker`（收到 `[DONE]` 时置位，九思在 296 行处理 [DONE]）、`finishReason`（收到任一 finish_reason 时记录，105 行已有字段定义）、`yieldedErrorChunk`（333 行已有的后端 error 块 yield 处置位）。读循环结束后、finally 前：
+   ```ts
+   if (!sawDoneMarker && !finishReason && !yieldedErrorChunk) {
+       yield { type: 'error', error: '响应流被中途截断（未收到结束标记，疑似网络中断或网关超时），内容不完整。请重试。' };
+   }
+   ```
+2. **`jiusi-server/src/cli.ts` 的 `isTransientAiError` 正则加一项**：`|响应流被中途截断`——让现成的 transient 重试 + 回滚机制接管自动重发。
+
+### D.3 验证（mock SSE 流四场景，码弦侧脚本可复用）
+
+| 场景 | 输入流 | 预期 |
+|---|---|---|
+| 截断流 | 只有半截 content、无 [DONE] 无 finish_reason | 报「响应流被中途截断」 |
+| 正常流 | content + finish_reason + [DONE] | 不误报 |
+| 有 finish 无 DONE | content + finish_reason（部分厂商习惯） | 不误报 |
+| 后端业务错误流 | `{"error":{...}}` + [DONE] | 只报业务错误，不重复报截断 |
+
+端到端：截断后应看到「上游瞬时错误，Ns 后自动重试…」提示条，随后输出自动接续，历史无半截+完整重复。
